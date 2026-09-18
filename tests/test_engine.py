@@ -232,3 +232,29 @@ def test_dashboard_shows_balance_strategies_and_trades(world):
         assert section in page, section
     assert page.count("<span class='pill buy'>Long</span>") >= 7 * 2  # open trips listed on overview + history
     assert "S1 trend following" in page and "B0 buy-and-hold" in page
+
+
+def test_local_server_serves_only_the_dashboard(world):
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import HTTPServer
+
+    from trader.engine.serve import make_handler
+
+    world["engine"].run_once()
+    def build_engine(journal):  # like the real server: a fresh engine on the request's own journal connection
+        return Engine(world["settings"], world["broker"], journal, world["bars"], clock=world["clock"])
+
+    server = HTTPServer(("127.0.0.1", 0), make_handler(world["settings"], build_engine))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        page = urllib.request.urlopen(base + "/").read().decode()
+        assert "Account balance" in page and 'content="60"' in page  # served page refreshes every minute
+        for path in ("/data/journal.db", "/.env", "/../config/risk.yaml"):
+            with pytest.raises(urllib.error.HTTPError) as err:
+                urllib.request.urlopen(base + path)
+            assert err.value.code == 404
+    finally:
+        server.shutdown()

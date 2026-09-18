@@ -12,6 +12,7 @@
   run --dry-run   same, on a copy of the journal: shows what it would do, sends nothing
   news            latest headlines (Alpaca/Benzinga), stored in the journal; --json for AI skills
   fundamentals X  company fundamentals snapshot (Yahoo); --json for AI skills
+  serve           dashboard at http://localhost:8050 (read-only)
 """
 
 from __future__ import annotations
@@ -306,6 +307,13 @@ def cmd_fundamentals(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
+    from trader.engine.serve import serve
+
+    serve(settings, port=args.port)
+    return 0
+
+
 def cmd_halt(settings: Settings, args: argparse.Namespace) -> int:
     KillSwitch(settings.kill_switch_path).engage(args.reason)
     print(f"Kill switch ON. No new orders will be sent. Reason: {args.reason}")
@@ -350,13 +358,16 @@ def main(argv: list[str] | None = None) -> int:
     p_fund.add_argument("symbols", help="comma-separated, e.g. AAPL,MSFT")
     p_fund.add_argument("--refresh", action="store_true")
     p_fund.add_argument("--json", action="store_true")
+    p_serve = sub.add_parser("serve", help="dashboard at http://localhost:8050")
+    p_serve.add_argument("--port", type=int, default=8050)
     p_run = sub.add_parser("run", help="one engine cycle")
     p_run.add_argument("--dry-run", action="store_true", help="show what would happen; send nothing")
 
     args = parser.parse_args(argv)
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
-                "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals}
+                "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
+                "serve": cmd_serve}
     try:
         return handlers[args.command](load_settings(), args)
     except LiveTradingRefused as exc:

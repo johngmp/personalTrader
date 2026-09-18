@@ -262,13 +262,17 @@ def render(d: dict) -> str:
 <script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script></body></html>"""
 
 
-def write_dashboard(settings: Settings, journal: Journal, engine: Engine) -> None:
+def dashboard_html(settings: Settings, journal: Journal, engine: Engine, refresh_s: int = 300) -> str:
     d = collect(settings, journal, engine)
     d["_limits_day"] = f"{settings.risk.account.max_daily_loss_pct:g}"
     d["_limits_dd"] = f"{settings.risk.account.max_drawdown_halt_pct:g}"
+    return render(d).replace('content="300"', f'content="{refresh_s}"', 1)
+
+
+def write_dashboard(settings: Settings, journal: Journal, engine: Engine) -> None:
     path = settings.root / "data" / "dashboard.html"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render(d))
+    path.write_text(dashboard_html(settings, journal, engine))
 
 
 CSS = """
