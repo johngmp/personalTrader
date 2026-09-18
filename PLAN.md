@@ -60,7 +60,7 @@ A personal, multi-market trading system that uses Claude to research, run and re
 | Optional paper: ASX | **IBKR free trial / paper** | ✅ ([IBKR](https://www.interactivebrokers.com/campus/trading-lessons/how-to-open-an-ibkr-paper-trading-account/)) | ASX, US, FX, futures | Free |
 | **Future live** (not in this plan) | IBKR AU, OANDA AU, an AUSTRAC-registered crypto exchange | ⚠️ Alpaca *live* eligibility for Australia isn't confirmed; brokers sit behind swappable adapters | n/a | n/a |
 | Market data | Alpaca feeds (OANDA from Phase 4b), `yfinance`, OpenBB | ✅ | All | Free |
-| Smart money | QuiverQuant API + MCP | ✅ | US Congress/insider trades | ~US$30/mo (decision 6) |
+| Smart money | ~~QuiverQuant~~ not needed (2026-09-18). Insider buys, if wanted later, come free from SEC EDGAR Form 4 filings | ✅ | US insider trades | Free |
 | Fundamentals (AI persona strategy) | `yfinance` (`trader fundamentals`); Financial Datasets or FMP only if needed | ✅ | US stocks | Free |
 | News (AI analyst team) | Alpaca's Benzinga feed via your existing keys (`trader news`), stored in the journal so AI decisions are auditable | ✅ | Stocks + crypto, history to 2016 | Free |
 | **AI** | **Your Claude subscription**: Claude Code in the desktop app for building and research; **desktop scheduled tasks** for AI strategies, the daily digest and the weekly review | ✅ | n/a | Already paying; uses your plan's usage limits (§9) |
@@ -367,7 +367,7 @@ personalTrader/
 - [ ] **Learning loop:** `/weekly-review` scheduled task writes `vault/Weekly/`, adds post-trade reviews to the week's closed trades, maintains `learnings.md` (evidence-linked, capped, statuses) and drafts `Experiments/`
 - [ ] AI sleeves read `learnings.md` before each run and record the learnings version they used
 - [ ] Permission rules: scheduled tasks may write only to `vault/` and `signals/`, never `trader/` or `config/`
-- [ ] Quiver client; re-check the Congress Buys backtest; S7a/S7b sleeves (if approved)
+- [ ] (optional) S7b insider cluster buys from free SEC EDGAR Form 4 data, through Gate 1 first. Quiver/S7a dropped.
 - [ ] Track subscription usage per run; tune how many tickers AI sleeves analyze
 - **Exit:** AI sleeves trading on paper for 2 weeks without stalled runs or usage-limit problems.
 
@@ -396,7 +396,6 @@ IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-k
 |------|------|-------|
 | Brokers, market data | Free | Alpaca paper, yfinance, OpenBB (OANDA and Liquid paper also free from 4b) |
 | Claude | **Your existing subscription** | Building, research and scheduled tasks all draw from your plan's usage limits |
-| QuiverQuant API (decision 6) | ~US$30 / month | Cancel if S7a/S7b fail Gate 2 |
 | Mac electricity / staying awake | Minimal | Mac stays on, plugged in, lid open (or a Mac mini) |
 | Optional: Financial Datasets / FMP | US$0 to start | Only if S6 needs better fundamentals |
 
@@ -436,7 +435,7 @@ Pro has 5-hour usage windows plus weekly limits, shared with your own Claude use
 3. **ASX:** leave for Phase 5 via IBKR paper (recommended), or include from the start?
 4. **Strategy lineup:** keep B0 and S1–S7b, or add/drop any?
 5. ~~Brokers~~ **Alpaca only to start** (confirmed); OANDA + Liquid added in Phase 4b.
-6. **QuiverQuant:** API (~US$30/mo) from Phase 4 for S7a/S7b (recommended), skip, or website Premium only for your own research?
+6. ~~QuiverQuant~~ **Not needed** (decided 2026-09-18). S7a (Congress copy) dropped: evidence says it lags the S&P 500. S7b (insider cluster buys) optional later, built on free SEC EDGAR data and put through Gate 1 first.
 7. **Learning loop:** AI sleeves may use learnings immediately, but rule strategies change only via experiment → your approval → challenger version (recommended); or also let the weekly review auto-apply small parameter changes (not recommended).
 
 ---
