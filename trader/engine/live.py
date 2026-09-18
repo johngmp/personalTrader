@@ -65,7 +65,8 @@ class EngineBusy(RuntimeError):
 class Engine:
     def __init__(self, settings: Settings, broker: Broker, journal: Journal, bars: BarSource,
                  notifier: Notifier | None = None, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                 executor: Executor | None = None, fill_wait_s: float = 15.0) -> None:
+                 executor: Executor | None = None, fill_wait_s: float = 15.0, handle_commands: bool = True,
+                 shared_outputs: bool = True) -> None:
         self.settings = settings
         self.broker = broker
         self.journal = journal
@@ -75,6 +76,11 @@ class Engine:
         self.kill_switch = KillSwitch(settings.kill_switch_path)
         self.executor = executor or Executor(settings, broker, journal, kill_switch=self.kill_switch, clock=clock)
         self.fill_wait_s = fill_wait_s
+        # With several brokers (Alpaca, OANDA), one Coordinator handles Telegram commands and writes the
+        # vault/dashboard/digest once; each Engine only ever touches its own broker's sleeves.
+        self.handle_commands = handle_commands
+        self.shared_outputs = shared_outputs
+        self.my_sleeves = {s.id for s in settings.sleeves.values() if s.broker == broker.name}
 
     # --- entry point ------------------------------------------------------------------------------
 
@@ -91,8 +97,9 @@ class Engine:
     def _run(self) -> RunReport:
         report = RunReport(started=self.clock())
         self.journal.kv_set("last_run", report.started.isoformat(timespec="seconds"))  # shown on dashboard/vault
+        self.journal.kv_set(f"last_run:{self.broker.name}", report.started.isoformat(timespec="seconds"))
         steps: list[tuple[str, Callable[[RunReport], None]]] = [
-            ("telegram commands", self._handle_commands),
+            *([("telegram commands", self._handle_commands)] if self.handle_commands else []),
             ("sync fills", self._sync_fills),
             ("reconcile", self._reconcile),
             ("position state", self._refresh_states),
@@ -101,9 +108,8 @@ class Engine:
             ("position state", self._refresh_states),  # register positions filled just now...
             ("protective stops", self._protect),       # ...so they get their stop in this same run
             ("sleeve values", self._record_equity),
-            ("vault", self._write_vault),
-            ("dashboard", self._write_dashboard),
-            ("daily digest", self._digest),
+            *([("vault", self._write_vault), ("dashboard", self._write_dashboard), ("daily digest", self._digest)]
+              if self.shared_outputs else []),
         ]
         for name, step in steps:
             try:
@@ -113,7 +119,7 @@ class Engine:
                 report.problems.append(msg)
                 self.journal.log(msg, level="error")
         for msg in report.problems:
-            self.notifier.send(f"⚠️ {msg}")
+            self.notifier.send(f"⚠️ {self.broker.name}: {msg}")
         self.journal.kv_set("last_run_summary", report.summary())
         self.journal.log(f"run finished: {report.summary()}")
         return report
@@ -121,18 +127,7 @@ class Engine:
     # --- steps ------------------------------------------------------------------------------------
 
     def _handle_commands(self, report: RunReport) -> None:
-        for command in self.notifier.poll_commands(self.journal):
-            if command == "/halt":
-                self.kill_switch.engage("halted from Telegram")
-                self.notifier.send("🛑 Kill switch ON. No new orders. Existing stops stay at Alpaca. /resume to undo.")
-            elif command == "/resume":
-                self.kill_switch.release()
-                self.notifier.send("✅ Kill switch OFF. Trading resumes on the next run.")
-            elif command == "/status":
-                self.notifier.send(self.status_text())
-            else:
-                self.notifier.send("Commands: /status · /halt · /resume")
-            report.actions.append(f"telegram {command}")
+        report.actions += handle_commands(self.notifier, self.journal, self.kill_switch, [self])
 
     def _sync_fills(self, report: RunReport) -> None:
         for fill in self.executor.sync_open_orders():
@@ -140,16 +135,17 @@ class Engine:
             self.notifier.send(_fill_text(fill))
 
     def _reconcile(self, report: RunReport) -> None:
-        """Journal holdings (all sleeves together) must equal Alpaca's position in each symbol."""
+        """Journal holdings (this broker's sleeves together) must equal the broker's position in each symbol."""
         ours: dict[str, float] = {}
-        for (_, symbol), qty in self.journal.all_holdings().items():
-            ours[symbol] = ours.get(symbol, 0.0) + qty
+        for (sleeve_id, symbol), qty in self.journal.all_holdings().items():
+            if sleeve_id in self.my_sleeves:
+                ours[symbol] = ours.get(symbol, 0.0) + qty
         theirs = {p.symbol: p.qty for p in self.broker.get_positions()}
         for symbol in sorted(set(ours) | set(theirs)):
             a, b = ours.get(symbol, 0.0), theirs.get(symbol, 0.0)
             if abs(a - b) > max(DUST_QTY, 1e-6 * max(abs(a), abs(b))):
                 report.mismatched.add(symbol)
-                msg = f"{symbol}: journal holds {a:g} but Alpaca holds {b:g}; not trading it until this is fixed"
+                msg = f"{symbol}: journal holds {a:g} but {self.broker.name} holds {b:g}; not trading it until fixed"
                 key = f"mismatch:{symbol}:{self.clock().date()}"
                 if self.journal.kv_get(key) is None:  # alert once per symbol per day
                     self.journal.kv_set(key, "1")
@@ -163,7 +159,7 @@ class Engine:
         for (sleeve_id, symbol), qty in holdings.items():
             if sleeve_id in live_sleeves and self.journal.position_state(sleeve_id, symbol) is None and qty > 0:
                 self._create_state(sleeve_id, symbol)
-        for state in self.journal.position_states():
+        for state in self._my_states():
             if holdings.get((state["sleeve_id"], state["symbol"]), 0.0) <= DUST_QTY:
                 self._cancel_stop(state)
                 self.journal.delete_position_state(state["sleeve_id"], state["symbol"])
@@ -173,14 +169,13 @@ class Engine:
     def _protect(self, report: RunReport) -> None:
         market = self.broker.get_clock()
         broker_qty = {p.symbol: p.qty for p in self.broker.get_positions()}
-        for state in self.journal.position_states():
+        for state in self._my_states():
             sleeve_id, symbol, stop = state["sleeve_id"], state["symbol"], state["stop"]
             if stop is None or symbol in report.mismatched:
                 continue
             asset_class = self.settings.asset_class(symbol)
-            qty = min(self.journal.sleeve_holdings(sleeve_id).get(symbol, 0.0), broker_qty.get(symbol, 0.0))
-            if asset_class is AssetClass.US_EQUITY:
-                qty = math.floor(qty + 1e-9)
+            qty = self._round_qty(symbol, min(self.journal.sleeve_holdings(sleeve_id).get(symbol, 0.0),
+                                              broker_qty.get(symbol, 0.0)))
             if qty <= 0:
                 continue
             quote = self.broker.get_quote(symbol, asset_class)  # type: ignore[arg-type]
@@ -219,19 +214,15 @@ class Engine:
     def _write_vault(self, report: RunReport) -> None:
         from trader.journal.vault import write_vault
 
-        write_vault(self.settings, self.journal, self)
+        write_vault(self.settings, self.journal, [self])
 
     def _write_dashboard(self, report: RunReport) -> None:
         from trader.engine.dashboard import write_dashboard
 
-        write_dashboard(self.settings, self.journal, self)
+        write_dashboard(self.settings, self.journal, [self])
 
     def _digest(self, report: RunReport) -> None:
-        local = self.clock().astimezone(SYDNEY)
-        if local.hour < DIGEST_HOUR or self.journal.kv_get("last_digest") == str(local.date()):
-            return
-        self.journal.kv_set("last_digest", str(local.date()))
-        self.notifier.send("☀️ Daily summary\n" + self.status_text())
+        send_digest(self.notifier, self.journal, [self], self.clock())
 
     # --- decisions ----------------------------------------------------------------------------------
 
@@ -327,10 +318,11 @@ class Engine:
     def _enter(self, sleeve_id: str, symbol: str, dollars: float, price: float, stop: float | None, reason: str,
                report: RunReport) -> None:
         asset_class = self.settings.asset_class(symbol)
-        if asset_class is AssetClass.US_EQUITY:
-            qty = math.floor(dollars / price)  # whole shares, so the protective stop can stay at Alpaca (GTC)
-            if qty < 1:
-                report.actions.append(f"{sleeve_id} skipped {symbol}: ${dollars:,.0f} buys less than one share")
+        step = self.broker.order_step(symbol, asset_class)  # type: ignore[arg-type]
+        if step is not None:  # whole shares at Alpaca, whole units at OANDA
+            qty = self._round_qty(symbol, dollars / price)
+            if qty < step[1]:
+                report.actions.append(f"{sleeve_id} skipped {symbol}: ${dollars:,.0f} is below the minimum order size")
                 return
             order = OrderRequest(sleeve_id=sleeve_id, symbol=symbol, side=Side.BUY, qty=qty, stop_price=stop,
                                  reason=reason)
@@ -356,8 +348,8 @@ class Engine:
                 report: RunReport) -> None:
         if abs(qty_delta) * price < MIN_ORDER_USD:
             return
-        if self.settings.asset_class(symbol) is AssetClass.US_EQUITY:
-            qty_delta = math.floor(qty_delta) if qty_delta > 0 else -math.floor(-qty_delta)
+        if self.broker.order_step(symbol, self.settings.asset_class(symbol)) is not None:  # type: ignore[arg-type]
+            qty_delta = math.copysign(self._round_qty(symbol, abs(qty_delta)), qty_delta)
             if qty_delta == 0:
                 return
         side = Side.BUY if qty_delta > 0 else Side.SELL
@@ -435,6 +427,16 @@ class Engine:
         self.journal.upsert_position_state(sleeve_id, symbol, entry_price=entry_price, entry_date=last_entry["ts"],
                                            stop=stop, initial_stop=stop, high_since_entry=entry_price, bars_held=0)
 
+    def _my_states(self) -> list:
+        return [s for s in self.journal.position_states() if s["sleeve_id"] in self.my_sleeves]
+
+    def _round_qty(self, symbol: str, qty: float) -> float:
+        """Round a quantity DOWN to what the broker accepts (whole shares, whole FX units, crypto as is)."""
+        step = self.broker.order_step(symbol, self.settings.asset_class(symbol))  # type: ignore[arg-type]
+        if step is None:
+            return qty
+        return round(math.floor(qty / step[0] + 1e-9) * step[0], 9)
+
     # --- reporting ----------------------------------------------------------------------------------
 
     def sleeve_value(self, sleeve: SleeveConfig, bars: dict[str, pd.DataFrame] | None = None) -> tuple[float, float]:
@@ -449,21 +451,92 @@ class Engine:
         return sleeve.capital_usd + self.journal.sleeve_cash_flow(sleeve.id) + invested, invested
 
     def status_text(self) -> str:
-        account = self.broker.get_account()
-        lines = [f"Paper account ${account.equity:,.0f} (today {account.equity - account.last_equity:+,.0f})",
-                 f"Kill switch: {'ON' if self.kill_switch.active else 'off'}"]
-        for sleeve in self._live_sleeves():
-            equity, invested = self.sleeve_value(sleeve)
-            ret = equity / sleeve.capital_usd - 1
-            lines.append(f"{sleeve.id} {sleeve.name}: ${equity:,.0f} ({ret:+.2%}), {invested / equity:.0%} invested")
-        states = self.journal.position_states()
-        for s in states:
-            lines.append(f"  {s['sleeve_id']} {s['symbol']}: stop {s['stop']:,.2f}" if s["stop"] else
-                         f"  {s['sleeve_id']} {s['symbol']}: no stop (benchmark)")
-        return "\n".join(lines)
+        return status_text([self])
 
 
 def _fill_text(fill: Fill, reason: str = "") -> str:
     verb = "Bought" if fill.side is Side.BUY else "Sold"
     extra = f" ({reason})" if reason else ""
     return f"{'🟢' if fill.side is Side.BUY else '🔴'} {fill.sleeve_id} {verb} {fill.qty:g} {fill.symbol} @ ${fill.price:,.2f}{extra}"
+
+
+# --- shared across brokers --------------------------------------------------------------------------
+
+
+def status_text(engines: list[Engine]) -> str:
+    lines = [f"Kill switch: {'ON' if engines[0].kill_switch.active else 'off'}"]
+    for engine in engines:
+        account = engine.executor.account()
+        day = account.equity - (account.last_equity or account.equity)
+        lines.append(f"{engine.broker.name} paper account ${account.equity:,.0f} (today {day:+,.0f})")
+        for sleeve in engine._live_sleeves():
+            equity, invested = engine.sleeve_value(sleeve)
+            lines.append(f"  {sleeve.id} {sleeve.name}: ${equity:,.0f} ({equity / sleeve.capital_usd - 1:+.2%}), "
+                         f"{invested / equity:.0%} invested")
+        for s in engine._my_states():
+            lines.append(f"    {s['sleeve_id']} {s['symbol']}: stop {s['stop']:,.4g}" if s["stop"] else
+                         f"    {s['sleeve_id']} {s['symbol']}: no stop (benchmark)")
+    return "\n".join(lines)
+
+
+def handle_commands(notifier: Notifier, journal: Journal, kill_switch: KillSwitch, engines: list[Engine]) -> list[str]:
+    done = []
+    for command in notifier.poll_commands(journal):
+        if command == "/halt":
+            kill_switch.engage("halted from Telegram")
+            notifier.send("🛑 Kill switch ON. No new orders. Existing stops stay at the brokers. /resume to undo.")
+        elif command == "/resume":
+            kill_switch.release()
+            notifier.send("✅ Kill switch OFF. Trading resumes on the next run.")
+        elif command == "/status":
+            notifier.send(status_text(engines))
+        else:
+            notifier.send("Commands: /status · /halt · /resume")
+        done.append(f"telegram {command}")
+    return done
+
+
+def send_digest(notifier: Notifier, journal: Journal, engines: list[Engine], now: datetime) -> None:
+    local = now.astimezone(SYDNEY)
+    if local.hour < DIGEST_HOUR or journal.kv_get("last_digest") == str(local.date()):
+        return
+    journal.kv_set("last_digest", str(local.date()))
+    notifier.send("☀️ Daily summary\n" + status_text(engines))
+
+
+class Coordinator:
+    """Runs one Engine per broker under a single lock, then writes the shared outputs once."""
+
+    def __init__(self, settings: Settings, journal: Journal, engines: list[Engine], notifier: Notifier,
+                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
+        self.settings, self.journal, self.engines, self.notifier, self.clock = settings, journal, engines, notifier, clock
+        for engine in engines:
+            engine.handle_commands = False
+            engine.shared_outputs = False
+
+    def run_once(self) -> list[RunReport]:
+        from trader.engine.dashboard import write_dashboard
+        from trader.journal.vault import write_vault
+
+        lock_path = self.settings.root / "data" / "engine.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise EngineBusy("another engine run is still in progress") from exc
+            try:
+                handle_commands(self.notifier, self.journal, self.engines[0].kill_switch, self.engines)
+            except Exception as exc:
+                self.journal.log(f"telegram commands failed: {exc}", level="error")
+            reports = [engine._run() for engine in self.engines]  # noqa: SLF001
+            for name, fn in (("vault", lambda: write_vault(self.settings, self.journal, self.engines)),
+                             ("dashboard", lambda: write_dashboard(self.settings, self.journal, self.engines)),
+                             ("daily digest", lambda: send_digest(self.notifier, self.journal, self.engines, self.clock()))):
+                try:
+                    fn()
+                except Exception as exc:
+                    reports[0].problems.append(f"{name} failed: {type(exc).__name__}: {exc}")
+                    self.journal.log(f"{name} failed: {exc}", level="error")
+                    self.notifier.send(f"⚠️ {name} failed: {exc}")
+            return reports

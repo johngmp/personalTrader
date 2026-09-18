@@ -47,3 +47,7 @@ class Broker(ABC):
 
     @abstractmethod
     def get_clock(self) -> MarketClock: ...
+
+    def order_step(self, symbol: str, asset_class: AssetClass) -> tuple[float, float] | None:
+        """(quantity step, minimum quantity) for orders in `symbol`, or None if dollar amounts are accepted."""
+        return None

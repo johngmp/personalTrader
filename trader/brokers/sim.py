@@ -114,6 +114,9 @@ class SimBroker(Broker):
     def get_clock(self) -> MarketClock:
         return self.clock
 
+    def order_step(self, symbol: str, asset_class: AssetClass) -> tuple[float, float] | None:
+        return None if asset_class is AssetClass.CRYPTO else (1.0, 1.0)
+
     def fill_pending(self) -> None:
         """Fill waiting market/limit orders (e.g. stock orders queued overnight)."""
         for o in list(self.orders.values()):

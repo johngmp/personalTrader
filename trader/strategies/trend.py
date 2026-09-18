@@ -66,4 +66,4 @@ class FXTrend(TrendFollowing):
 
     name: ClassVar[str] = "S4"
     title: ClassVar[str] = "Forex & gold trend following"
-    default_symbols: ClassVar[list[str]] = ["EUR/USD", "AUD/USD", "GBP/USD", "USD/JPY", "XAU/USD"]
+    default_symbols: ClassVar[list[str]] = ["EUR/USD", "AUD/USD", "GBP/USD", "XAU/USD"]

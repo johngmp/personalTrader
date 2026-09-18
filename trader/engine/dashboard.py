@@ -21,7 +21,9 @@ from trader.journal.vault import Trip, round_trips
 if TYPE_CHECKING:
     from trader.engine.live import Engine
 
-SERIES_COLORS = {"account": "#c98500", "S1": "#3987e5", "B0": "#d95926"}  # validated on the dark surface
+# Categorical colours validated on the dark surface (entity keeps its colour everywhere).
+SERIES_COLORS = {"alpaca": "#c98500", "oanda": "#9085e9", "S1": "#3987e5", "B0": "#d95926", "S4": "#199e70"}
+BROKER_LABELS = {"alpaca": "Alpaca (stocks & crypto)", "oanda": "OANDA (forex)"}
 
 
 def _money(x: float | None, signed: bool = False, cents: bool = True) -> str:
@@ -55,28 +57,42 @@ def _downsample(points: list[tuple[str, float]]) -> list[list]:
     return [[ts.isoformat(timespec="minutes"), round(float(v), 2)] for ts, v in s.items()]
 
 
-def collect(settings: Settings, journal: Journal, engine: Engine) -> dict:
-    """Everything the dashboard shows, as plain data (also handy for tests)."""
+def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict:
+    """Everything the dashboard shows, across all brokers, as plain data (also handy for tests)."""
     now = datetime.now(timezone.utc)
-    account = engine.broker.get_account()
-    snaps = journal.conn.execute("SELECT ts, equity FROM equity_snapshots WHERE broker=? ORDER BY ts",
-                                 (engine.broker.name,)).fetchall()
-    start_equity = snaps[0]["equity"] if snaps else account.equity
-    peak = max([s["equity"] for s in snaps] + [account.equity])
     risk = settings.risk.account
-    day_pct = account.equity / account.last_equity - 1 if account.last_equity else 0.0
-    drawdown = account.equity / peak - 1 if peak else 0.0
-    day_used = max(0.0, -day_pct * 100 / risk.max_daily_loss_pct)
-    dd_used = max(0.0, -drawdown * 100 / risk.max_drawdown_halt_pct)
-    if engine.kill_switch.active or day_used >= 1 or dd_used >= 1:
-        risk_level = "Trading halted" if engine.kill_switch.active else "Limit reached"
+    kill_switch = engines[0].kill_switch
+    accounts, account_series = [], {}
+    for engine in engines:
+        acct = engine.executor.account()
+        snaps = journal.conn.execute("SELECT ts, equity FROM equity_snapshots WHERE broker=? ORDER BY ts",
+                                     (engine.broker.name,)).fetchall()
+        start = snaps[0]["equity"] if snaps else acct.equity
+        peak = max([s["equity"] for s in snaps] + [acct.equity])
+        day_pct = acct.equity / acct.last_equity - 1 if acct.last_equity else 0.0
+        dd = acct.equity / peak - 1 if peak else 0.0
+        accounts.append({"broker": engine.broker.name, "label": BROKER_LABELS.get(engine.broker.name, engine.broker.name),
+                         "account": acct, "start": start, "day_pct": day_pct, "drawdown": dd,
+                         "day_used": max(0.0, -day_pct * 100 / risk.max_daily_loss_pct),
+                         "dd_used": max(0.0, -dd * 100 / risk.max_drawdown_halt_pct)})
+        account_series[engine.broker.name] = _downsample([(s["ts"], s["equity"]) for s in snaps] +
+                                                         [(now.isoformat(), acct.equity)])
+    worst = max(accounts, key=lambda a: max(a["day_used"], a["dd_used"]))
+    day_used, dd_used = worst["day_used"], worst["dd_used"]
+    if kill_switch.active or day_used >= 1 or dd_used >= 1:
+        risk_level = "Trading halted" if kill_switch.active else "Limit reached"
     else:
         risk_level = "Low risk" if max(day_used, dd_used) < 0.5 else "Elevated risk"
+    total = sum(a["account"].equity for a in accounts)
+    start_total = sum(a["start"] for a in accounts)
+    last_total = sum(a["account"].last_equity or a["account"].equity for a in accounts)
 
+    symbol_engine = {s: e for e in engines for sl in e._live_sleeves() for s in sl.symbols}  # noqa: SLF001
     prices: dict[str, float] = {}
 
     def price(symbol: str) -> float | None:
         if symbol not in prices:
+            engine = symbol_engine.get(symbol, engines[0])
             try:
                 prices[symbol] = engine.broker.get_quote(symbol, settings.asset_class(symbol)).price  # type: ignore[arg-type]
             except Exception:
@@ -85,7 +101,7 @@ def collect(settings: Settings, journal: Journal, engine: Engine) -> dict:
 
     sleeves, trips = [], []
     b0_return = None
-    for sleeve in engine._live_sleeves():  # noqa: SLF001
+    for engine, sleeve in ((e, sl) for e in engines for sl in e._live_sleeves()):  # noqa: SLF001
         equity, invested = engine.sleeve_value(sleeve)
         haircut = journal.sleeve_haircut(sleeve.id)
         sleeve_trips = round_trips(journal, sleeve.id)
@@ -98,7 +114,7 @@ def collect(settings: Settings, journal: Journal, engine: Engine) -> dict:
                         "adjusted_return": (equity - haircut) / sleeve.capital_usd - 1,
                         "invested": invested / equity if equity else 0.0, "capital": sleeve.capital_usd,
                         "open": sum(1 for t in sleeve_trips if t.is_open), "closed": len(closed),
-                        "benchmark": sleeve.id == "B0"})
+                        "benchmark": sleeve.id == "B0", "broker": sleeve.broker})
     for s in sleeves:
         s["vs_b0"] = None if s["benchmark"] or b0_return is None else s["return"] - b0_return
 
@@ -120,10 +136,11 @@ def collect(settings: Settings, journal: Journal, engine: Engine) -> dict:
         sleeve_series.setdefault(h["sleeve_id"], []).append((h["ts"], h["equity"] / cap * 10_000))
 
     return {
-        "now": now, "account": account, "start_equity": start_equity, "total_pnl": account.equity - start_equity,
-        "day_pnl": account.equity - account.last_equity, "day_pct": day_pct, "drawdown": drawdown,
+        "now": now, "accounts": accounts, "total": total, "start_equity": start_total, "total_pnl": total - start_total,
+        "day_pnl": total - last_total, "day_pct": total / last_total - 1 if last_total else 0.0,
+        "drawdown": worst["drawdown"], "worst_broker": worst["label"],
         "day_used": day_used, "dd_used": dd_used, "risk_level": risk_level,
-        "kill_switch": engine.kill_switch.active, "kill_reason": engine.kill_switch.reason,
+        "kill_switch": kill_switch.active, "kill_reason": kill_switch.reason,
         "last_run": journal.kv_get("last_run"), "orders_today": journal.orders_submitted_since(trading_day_start(now)),
         "max_orders": risk.max_orders_per_day, "realized": realized, "unrealized": unrealized, "fees": fees,
         "kpis": {"closed": len(closed), "win_rate": len(wins) / len(closed) if closed else None,
@@ -137,8 +154,8 @@ def collect(settings: Settings, journal: Journal, engine: Engine) -> dict:
         "orders": journal.recent_order_rows(25),
         "warnings": [e for e in journal.recent_events(60) if e["level"] in ("warning", "error", "critical")][:12],
         "charts": {
-            "account": _downsample([(s["ts"], s["equity"]) for s in snaps] + [(now.isoformat(), account.equity)]),
-            "sleeves": {sid: _downsample(pts) for sid, pts in sleeve_series.items() if sid in ("S1", "B0")},
+            "account": account_series,
+            "sleeves": {sid: _downsample(pts) for sid, pts in sleeve_series.items() if sid in SERIES_COLORS},
         },
     }
 
@@ -165,8 +182,8 @@ def _trip_row(t: Trip, price, state) -> str:
 
 
 def render(d: dict) -> str:
-    a = d["account"]
     k = d["kpis"]
+    cash = sum(x["account"].cash for x in d["accounts"])
     tiles = "".join([
         _tile("Closed trades", str(k["closed"]), f"{k['open']} open now"),
         _tile("Win rate", _pct(k["win_rate"], signed=False, digits=1) if k["win_rate"] is not None else "–",
@@ -203,7 +220,12 @@ def render(d: dict) -> str:
                         for w in d["warnings"]) or "<li class='subtle'>No warnings.</li>"
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
     total_base = d["start_equity"] or 1
-    chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"], "colors": SERIES_COLORS})
+    chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"], "colors": SERIES_COLORS,
+                             "labels": BROKER_LABELS})
+    breakdown = " · ".join(f"<span><i class='sw' style='background:{SERIES_COLORS.get(x['broker'], '#898781')}'></i>"
+                           f"{html.escape(x['label'])} {_money(x['account'].equity)}</span>" for x in d["accounts"])
+    legend_sleeves = "".join(f"<span><i style='background:{SERIES_COLORS[s['id']]}'></i>{s['id']} {html.escape(s['name'])}</span>"
+                             for s in d["sleeves"] if s["id"] in SERIES_COLORS)
     last_run = (d["last_run"] or "never").replace("T", " ")[:16]
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -211,7 +233,7 @@ def render(d: dict) -> str:
 <title>Trader dashboard</title><style>{CSS}</style></head><body>
 <header><div class="brand">PT</div><div><h1>Dashboard</h1><div class="subtle">{d['now'].astimezone():%A, %d %B %Y · %H:%M}</div></div>
 <div class="spacer"></div>
-<div class="account"><div><b>Alpaca paper</b> <span class="pill {'bad' if d['kill_switch'] else 'ok'}">{'Halted' if d['kill_switch'] else 'Active'}</span>
+<div class="account"><div><b>Paper trading</b> <span class="pill {'bad' if d['kill_switch'] else 'ok'}">{'Halted' if d['kill_switch'] else 'Active'}</span>
 <span class="pill closed">Auto</span></div><div class="subtle">Last engine run {html.escape(last_run)} UTC · orders today {d['orders_today']}/{d['max_orders']}</div></div></header>
 <nav class="tabs" role="tablist">
 <button class="tab active" data-tab="overview" role="tab">Overview</button>
@@ -220,12 +242,13 @@ def render(d: dict) -> str:
 <main>
 <section data-panel="overview">
 <div class="grid top">
-<div class="card chartcard"><div class="row"><div><div class="label">Account balance</div>
-<div class="hero">{_money(a.equity)}</div>
+<div class="card chartcard"><div class="row"><div><div class="label">Account balance · all paper accounts</div>
+<div class="hero">{_money(d['total'])}</div>
 <div class="{_tone(d['day_pnl'])}">{_money(d['day_pnl'], signed=True)} ({_pct(d['day_pct'])}) today</div></div>
 <div class="spacer"></div><div class="ranges" data-for="account">
 <button data-r="1D">1D</button><button data-r="1W">1W</button><button data-r="1M">1M</button><button data-r="3M">3M</button>
 <button data-r="YTD">YTD</button><button data-r="All" class="on">All</button></div></div>
+<div class="breakdown">{breakdown}</div>
 <div class="chart" id="account-chart" aria-label="Account balance over time"></div></div>
 <div class="card side"><div class="row"><div><div class="label">Profit / loss</div>
 <div class="big {_tone(d['total_pnl'])}">{_money(d['total_pnl'], signed=True)}</div>
@@ -233,21 +256,21 @@ def render(d: dict) -> str:
 <span class="pill {risk_class}">{html.escape(d['risk_level'])}</span></div>
 <div class="split"><div><div class="label">Realised</div><div class="{_tone(d['realized'])}">{_money(d['realized'], signed=True)}</div></div>
 <div><div class="label">Unrealised</div><div class="{_tone(d['unrealized'])}">{_money(d['unrealized'], signed=True)}</div></div></div>
-<div class="meter"><div class="label">Daily loss limit used ({d['day_pct'] * 100:+.2f}% of −{d['_limits_day']}%)</div>
+<div class="subtle">Limits are per account; meters show the closest one ({html.escape(d['worst_broker'])})</div>
+<div class="meter"><div class="label">Daily loss limit used ({-d['day_used'] * float(d['_limits_day']):+.2f}% of −{d['_limits_day']}%)</div>
 <div class="track"><div class="fill {'bad' if d['day_used'] >= 1 else 'warn' if d['day_used'] >= .5 else ''}" style="width:{min(d['day_used'], 1) * 100:.0f}%"></div></div></div>
 <div class="meter"><div class="label">Drawdown limit used ({d['drawdown'] * 100:.2f}% of −{d['_limits_dd']}%)</div>
 <div class="track"><div class="fill {'bad' if d['dd_used'] >= 1 else 'warn' if d['dd_used'] >= .5 else ''}" style="width:{min(d['dd_used'], 1) * 100:.0f}%"></div></div></div>
-<dl><div><dt>Equity</dt><dd>{_money(a.equity)}</dd></div><div><dt>Cash</dt><dd>{_money(a.cash)}</dd></div>
-<div><dt>Account size</dt><dd>{_money(d['start_equity'])}</dd></div><div><dt>Invested</dt><dd>{_money(a.equity - a.cash)}</dd></div></dl>
+<dl><div><dt>Equity</dt><dd>{_money(d['total'])}</dd></div><div><dt>Cash</dt><dd>{_money(cash)}</dd></div>
+<div><dt>Account size</dt><dd>{_money(d['start_equity'])}</dd></div><div><dt>Accounts</dt><dd>{len(d['accounts'])}</dd></div></dl>
 {f"<p class='bad'>Kill switch: {html.escape(d['kill_reason'])}</p>" if d['kill_switch'] else ''}</div></div>
 <h2>Trading objectives</h2><div class="tiles">{tiles}</div>
 <h2>Strategies</h2><div class="grid sleeves">{sleeve_cards}</div>
 <div class="card chartcard"><div class="row"><div><div class="label">Strategy vs buy-and-hold</div>
-<div class="subtle">Value of each $10,000 sleeve</div></div><div class="spacer"></div>
+<div class="subtle">Value of each $10,000 strategy</div></div><div class="spacer"></div>
 <div class="ranges" data-for="sleeves"><button data-r="1W">1W</button><button data-r="1M">1M</button>
 <button data-r="3M">3M</button><button data-r="All" class="on">All</button></div></div>
-<div class="legend"><span><i style="background:{SERIES_COLORS['S1']}"></i>S1 trend following</span>
-<span><i style="background:{SERIES_COLORS['B0']}"></i>B0 buy-and-hold</span></div>
+<div class="legend">{legend_sleeves}</div>
 <div class="chart" id="sleeves-chart" aria-label="Sleeve values over time"></div></div>
 <h2>Open positions</h2><div class="card scroll"><table>{trade_head}{open_rows or "<tr><td colspan=13 class='subtle'>No open positions.</td></tr>"}</table></div>
 </section>
@@ -262,17 +285,17 @@ def render(d: dict) -> str:
 <script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script></body></html>"""
 
 
-def dashboard_html(settings: Settings, journal: Journal, engine: Engine, refresh_s: int = 300) -> str:
-    d = collect(settings, journal, engine)
+def dashboard_html(settings: Settings, journal: Journal, engines: list[Engine], refresh_s: int = 300) -> str:
+    d = collect(settings, journal, engines)
     d["_limits_day"] = f"{settings.risk.account.max_daily_loss_pct:g}"
     d["_limits_dd"] = f"{settings.risk.account.max_drawdown_halt_pct:g}"
     return render(d).replace('content="300"', f'content="{refresh_s}"', 1)
 
 
-def write_dashboard(settings: Settings, journal: Journal, engine: Engine) -> None:
+def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine]) -> None:
     path = settings.root / "data" / "dashboard.html"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(dashboard_html(settings, journal, engine))
+    path.write_text(dashboard_html(settings, journal, engines))
 
 
 CSS = """
@@ -318,6 +341,8 @@ dt { color:var(--muted); font-size:12px; } dd { margin:2px 0 0; font-weight:600;
 .pill.bad { color:var(--down); border-color:#5a2525; background:#2a1414; }
 .pill.buy { color:var(--up); background:#11261b; border-color:#1f4d33; } .pill.sell { color:var(--down); background:#2a1414; border-color:#5a2525; }
 .pill.open { color:var(--accent); border-color:#4d3a10; } .pill.closed { color:var(--muted); }
+.breakdown { display:flex; gap:16px; flex-wrap:wrap; color:var(--ink2); font-size:12px; margin-top:8px; }
+.sw { display:inline-block; width:14px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
 .legend { display:flex; gap:18px; color:var(--ink2); font-size:12px; margin-top:10px; }
 .legend i { display:inline-block; width:14px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
 .scroll { overflow-x:auto; } table { width:100%; border-collapse:collapse; font-size:13px; white-space:nowrap; }
@@ -428,9 +453,10 @@ JS = r"""
     });
   }
   var charts = {
-    account: function (r) { draw(document.getElementById('account-chart'),
-      [{ name: 'Account', color: data.colors.account, pts: data.account }], r, true); },
-    sleeves: function (r) { draw(document.getElementById('sleeves-chart'), Object.keys(data.sleeves).sort().reverse().map(function (k) {
+    account: function (r) { var ks = Object.keys(data.account); draw(document.getElementById('account-chart'),
+      ks.map(function (k) { return { name: ks.length > 1 ? (data.labels[k] || k).split(' (')[0] : 'Account',
+        color: data.colors[k], pts: data.account[k] }; }), r, ks.length === 1); },
+    sleeves: function (r) { draw(document.getElementById('sleeves-chart'), Object.keys(data.sleeves).sort().map(function (k) {
       return { name: k, color: data.colors[k], pts: data.sleeves[k] }; }), r, false); }
   };
   var current = { account: 'All', sleeves: 'All' };

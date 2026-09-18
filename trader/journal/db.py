@@ -268,11 +268,17 @@ class Journal:
         return [RecentOrder(r["sleeve_id"], r["symbol"], Side(r["side"]), datetime.fromisoformat(r["created_at"]))
                 for r in rows]
 
-    def open_orders(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM orders WHERE status IN (?, ?) AND broker_order_id IS NOT NULL",
-            (OrderStatus.SUBMITTED.value, OrderStatus.PARTIALLY_FILLED.value),
-        ).fetchall()
+    def open_orders(self, broker: str | None = None) -> list[sqlite3.Row]:
+        q = "SELECT * FROM orders WHERE status IN (?, ?) AND broker_order_id IS NOT NULL"
+        args: tuple = (OrderStatus.SUBMITTED.value, OrderStatus.PARTIALLY_FILLED.value)
+        if broker is not None:
+            q, args = q + " AND broker=?", (*args, broker)
+        return self.conn.execute(q, args).fetchall()
+
+    def first_equity_since(self, broker: str, since: datetime) -> float | None:
+        row = self.conn.execute("SELECT equity FROM equity_snapshots WHERE broker=? AND ts >= ? ORDER BY ts LIMIT 1",
+                                (broker, _iso(since))).fetchone()
+        return row["equity"] if row else None
 
     def order(self, client_order_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM orders WHERE client_order_id=?", (client_order_id,)).fetchone()

@@ -86,7 +86,7 @@ class Quote(BaseModel):
 
 class Account(BaseModel):
     equity: float
-    last_equity: float          # equity at the previous market close
+    last_equity: float | None   # equity at the previous close (None if the broker doesn't report it)
     cash: float
     buying_power: float
     currency: str = "USD"

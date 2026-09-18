@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from trader.config import Settings, load_secrets
+from trader.config import Settings
 from trader.journal.db import Journal
 
 log = logging.getLogger(__name__)
@@ -49,16 +49,15 @@ def make_handler(settings: Settings, build_engine, refresh_s: int = 60):
 
 
 def serve(settings: Settings, port: int = 8050) -> None:
-    from trader.brokers.alpaca import AlpacaBroker
-    from trader.data.live_bars import AlpacaDailyBars
     from trader.engine.live import Engine
 
-    secrets = load_secrets()
-    broker = AlpacaBroker(secrets.alpaca_api_key, secrets.alpaca_secret_key)
-    bars = AlpacaDailyBars(secrets.alpaca_api_key, secrets.alpaca_secret_key)
+    from trader.engine.brokers_setup import configured_brokers
 
-    def build_engine(journal: Journal) -> Engine:
-        return Engine(settings, broker, journal, bars)  # used only to read values; run_once is never called
+    brokers = configured_brokers(settings)
+
+    def build_engine(journal: Journal) -> list[Engine]:
+        # Used only to read values; run_once is never called here.
+        return [Engine(settings, broker, journal, bars) for broker, bars in brokers]
 
     server = HTTPServer((HOST, port), make_handler(settings, build_engine))
     print(f"Dashboard at http://localhost:{port} (Ctrl+C to stop)", flush=True)

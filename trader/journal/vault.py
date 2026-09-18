@@ -164,11 +164,18 @@ def write_trip(vault: Path, trip: Trip, sleeve: SleeveConfig | None, price: floa
     return path
 
 
-def write_vault(settings: Settings, journal: Journal, engine: Engine) -> None:
+def write_vault(settings: Settings, journal: Journal, engines: list[Engine]) -> None:
     vault = settings.root / "vault"
     prices: dict[str, float] = {}
+    by_broker = {e.broker.name: e for e in engines}
 
-    def price(symbol: str) -> float | None:
+    def engine_for(sleeve: SleeveConfig) -> Engine | None:
+        return by_broker.get(sleeve.broker)
+
+    def price(symbol: str, sleeve: SleeveConfig) -> float | None:
+        engine = engine_for(sleeve)
+        if engine is None:
+            return None
         if symbol not in prices:
             try:
                 prices[symbol] = engine.broker.get_quote(symbol, settings.asset_class(symbol)).price  # type: ignore[arg-type]
@@ -185,16 +192,17 @@ def write_vault(settings: Settings, journal: Journal, engine: Engine) -> None:
             continue
         links = []
         for trip in trips:
-            path = write_trip(vault, trip, sleeve, price(trip.symbol) if trip.is_open else None)
+            path = write_trip(vault, trip, sleeve, price(trip.symbol, sleeve) if trip.is_open else None)
             recent.append((trip.entry_ts, trip, path))
             links.append(f"- [[{path.relative_to(vault).with_suffix('').as_posix()}|{trip.entry_ts[:10]} {trip.symbol}]]"
                          f" · {'open' if trip.is_open else _money(trip.pnl())}")
         closed = [t for t in trips if not t.is_open]
         wins = [t for t in closed if t.pnl() > 0]
         rs = [t.r_multiple() for t in closed if t.r_multiple() is not None]
-        equity, invested = engine.sleeve_value(sleeve) if sleeve.enabled else (sleeve.capital_usd, 0.0)
+        engine = engine_for(sleeve)
+        equity, invested = engine.sleeve_value(sleeve) if (sleeve.enabled and engine) else (sleeve.capital_usd, 0.0)
         open_rows = "\n".join(
-            f"| {t.symbol} | {t.qty:g} | {_money(t.entry_price)} | {_money(price(t.symbol))} | {_money(t.pnl(price(t.symbol)))} |"
+            f"| {t.symbol} | {t.qty:g} | {_money(t.entry_price)} | {_money(price(t.symbol, sleeve))} | {_money(t.pnl(price(t.symbol, sleeve)))} |"
             for t in trips if t.is_open) or "| – | | | | |"
         head = f"""{_yaml({"sleeve": sleeve.id, "enabled": sleeve.enabled, "strategy": sleeve.strategy or sleeve.id,
                            "params": sleeve.params, "capital_usd": sleeve.capital_usd, "tags": ["sleeve"]})}
@@ -224,8 +232,8 @@ Symbols: {", ".join(sleeve.symbols)} · settings: `{json.dumps(sleeve.params)}`
 # Personal Trader
 
 {START}
-Paper trading on Alpaca. Last engine run: {journal.kv_get("last_run", "never")} · kill switch: \
-{"ON" if engine.kill_switch.active else "off"}
+Paper trading on Alpaca (stocks, crypto) and OANDA (forex). Last engine run: {journal.kv_get("last_run", "never")} · kill switch: \
+{"ON" if engines[0].kill_switch.active else "off"}
 
 | Sleeve | Strategy | Value | Return | Closed trades |
 |---|---|---|---|---|

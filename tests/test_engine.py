@@ -231,7 +231,7 @@ def test_dashboard_shows_balance_strategies_and_trades(world):
                     "Trading history", "Recent orders", 'id="chart-data"'):
         assert section in page, section
     assert page.count("<span class='pill buy'>Long</span>") >= 7 * 2  # open trips listed on overview + history
-    assert "S1 trend following" in page and "B0 buy-and-hold" in page
+    assert "S1 Trend following" in page and "B0 Buy-and-hold benchmark" in page
 
 
 def test_local_server_serves_only_the_dashboard(world):
@@ -243,8 +243,8 @@ def test_local_server_serves_only_the_dashboard(world):
     from trader.engine.serve import make_handler
 
     world["engine"].run_once()
-    def build_engine(journal):  # like the real server: a fresh engine on the request's own journal connection
-        return Engine(world["settings"], world["broker"], journal, world["bars"], clock=world["clock"])
+    def build_engine(journal):  # like the real server: fresh engines on the request's own journal connection
+        return [Engine(world["settings"], world["broker"], journal, world["bars"], clock=world["clock"])]
 
     server = HTTPServer(("127.0.0.1", 0), make_handler(world["settings"], build_engine))
     threading.Thread(target=server.serve_forever, daemon=True).start()

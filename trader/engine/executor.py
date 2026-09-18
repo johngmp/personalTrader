@@ -53,7 +53,7 @@ class Executor:
     def build_context(self, order: OrderRequest) -> RiskContext:
         now = self.clock()
         asset_class = self.settings.asset_class(order.symbol)
-        account = self.broker.get_account()
+        account = self.account()
         self.journal.snapshot_equity(self.broker.name, account.equity, account.cash)
         quote = self.broker.get_quote(order.symbol, asset_class) if asset_class else None
         guards = self.settings.risk.guards
@@ -98,10 +98,19 @@ class Executor:
         result.broker_order, result.fills = self._track_fills(result.broker_order, order.sleeve_id, wait_for_fill_s)
         return result
 
+    def account(self):
+        """The broker account, with the day's starting equity filled in from the journal if the broker
+        doesn't report it (OANDA), so the daily loss limit works everywhere."""
+        account = self.broker.get_account()
+        if account.last_equity is None:
+            start = self.journal.first_equity_since(self.broker.name, trading_day_start(self.clock()))
+            account = account.model_copy(update={"last_equity": start or account.equity})
+        return account
+
     def sync_open_orders(self) -> list[Fill]:
-        """Pick up fills for orders that were still open (e.g. stock orders placed while the market was shut)."""
+        """Pick up fills for this broker's open orders (e.g. stock orders placed while the market was shut)."""
         fills: list[Fill] = []
-        for row in self.journal.open_orders():
+        for row in self.journal.open_orders(self.broker.name):
             bo = self.broker.get_order(row["broker_order_id"])
             fill = self.journal.record_fill_progress(bo, row["sleeve_id"], self._cost_model(bo.symbol))
             if fill:

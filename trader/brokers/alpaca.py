@@ -205,6 +205,10 @@ class AlpacaBroker(Broker):
                                                  limit_price=round(limit_price, 2) if limit_price else None))
         return self._convert(o, _asset_class(o.asset_class))
 
+    def order_step(self, symbol: str, asset_class: AssetClass) -> tuple[float, float] | None:
+        # Whole shares for stocks, so protective stops can rest at Alpaca as GTC orders; crypto by dollar amount.
+        return (1.0, 1.0) if asset_class is AssetClass.US_EQUITY else None
+
     def get_clock(self) -> MarketClock:
         clock = self._trading.get_clock()
         today = clock.timestamp.astimezone(EASTERN).date()
