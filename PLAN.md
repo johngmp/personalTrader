@@ -350,12 +350,12 @@ personalTrader/
 - **Exit:** a report of which S1–S4 pass Gate 1 (possibly none, which is still useful).
 - **Result (2026-09-18):** S1 trend ✅ PASS · S4 FX trend ✅ PASS · S2 rotation ✕ FAIL (robustness 66% < 70%) · S3 buy-the-dip ✕ FAIL (Sharpe 0.43 < SPY 0.84). Reports in `reports/backtests/`, log in `reports/research_log.jsonl`.
 
-### Phase 3: Paper engine live (~1 week)
-- [ ] Engine runner, order manager (broker-held stops), reconciler
-- [ ] **Vault writer:** engine creates/updates a trade note for every fill and close, plus `Sleeves/` stat notes and `Home.md` (no AI usage)
-- [ ] launchd job so the engine runs on its own schedule; health check alert if it goes silent
-- [ ] Telegram alerts; Streamlit dashboard
-- [ ] Start B0 + every S1–S3 sleeve that passed Gate 1 on Alpaca, **auto-executing on paper**
+### Phase 3: Paper engine live (~1 week) ✅ built 2026-09-18 · 7-day unattended check pending
+- [x] Engine runner, order manager (broker-held stops: GTC stop orders on whole shares; stop-limit + engine backup for crypto), reconciler
+- [x] **Vault writer:** engine creates/updates a trade note for every fill and close, plus `Sleeves/` stat notes and `Home.md` (no AI usage)
+- [x] launchd job so the engine runs on its own schedule (`ops/install-engine.sh` / `ops/uninstall-engine.sh`); "engine went silent" alert moves to the Phase 4 daily-digest task (a stopped engine can't alert about itself)
+- [x] Telegram alerts + /status /halt /resume (active once you add a bot token); dashboard as a self-refreshing HTML page (`data/dashboard.html`) instead of Streamlit: no server to keep running
+- [x] B0 + S1 enabled (approved 2026-09-18); `trader run --dry-run` verified against the real paper account. **Auto-execution starts when you run `ops/install-engine.sh`.**
 - **Exit:** 7 days unattended with zero reconciliation mismatches.
 
 ### Phase 4: AI + Quiver strategies (~1–2 weeks)

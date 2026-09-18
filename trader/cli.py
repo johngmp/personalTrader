@@ -8,6 +8,8 @@
   data            download / refresh daily price history for research
   backtest S1     one backtest with a strategy's default settings
   gate1 S1|all    full Gate 1 evaluation + HTML report in reports/backtests/
+  run             one engine cycle (the background schedule runs this every 15 minutes)
+  run --dry-run   same, on a copy of the journal: shows what it would do, sends nothing
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from trader.brokers.base import Broker, LiveTradingRefused
 from trader.config import Settings, load_secrets, load_settings
@@ -54,6 +57,7 @@ def cmd_status(settings: Settings, _: argparse.Namespace) -> int:
         day_pnl = account.equity - account.last_equity
         print(f"Mode: {settings.risk.mode.upper()} (Alpaca paper) · autonomy: {settings.risk.autonomy}")
         print(f"Kill switch: {'ON: ' + ks.reason if ks.active else 'off'}")
+        print(f"Last engine run: {journal.kv_get('last_run', 'never')} ({journal.kv_get('last_run_summary', '-')})")
         print(f"Equity {_money(account.equity)} · cash {_money(account.cash)} · "
               f"today {'+' if day_pnl >= 0 else ''}{_money(day_pnl)} · account status {account.status}")
         positions = broker.get_positions()
@@ -205,6 +209,57 @@ def cmd_gate1(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
+    import shutil
+    import tempfile
+
+    from trader.brokers.alpaca import AlpacaBroker
+    from trader.brokers.dry_run import DryRunBroker
+    from trader.data.live_bars import AlpacaDailyBars
+    from trader.engine.live import Engine, EngineBusy
+    from trader.notify.telegram import NullNotifier, from_env
+
+    secrets = load_secrets()
+    broker: Broker = AlpacaBroker(secrets.alpaca_api_key, secrets.alpaca_secret_key)
+    notifier = from_env()
+    if args.dry_run:
+        tmp = Path(tempfile.mkdtemp(prefix="trader-dry-run-"))
+        (tmp / "data").mkdir()
+        if settings.journal_path.exists():
+            shutil.copy(settings.journal_path, tmp / "data" / "journal.db")
+        if settings.kill_switch_path.exists():
+            shutil.copy(settings.kill_switch_path, tmp / settings.risk.guards.kill_switch_file)
+        settings = settings.model_copy(update={"root": tmp})
+        broker = DryRunBroker(broker)
+        notifier = NullNotifier()
+    journal = Journal(settings.journal_path)
+    try:
+        engine = Engine(settings, broker, journal, AlpacaDailyBars(secrets.alpaca_api_key, secrets.alpaca_secret_key),
+                        notifier=notifier)
+        try:
+            report = engine.run_once()
+        except EngineBusy as exc:
+            print(f"{datetime.now():%Y-%m-%d %H:%M} skipped: {exc}")
+            return 0
+        stamp = f"{datetime.now():%Y-%m-%d %H:%M}"
+        print(f"{stamp} {'DRY RUN ' if args.dry_run else ''}{report.summary()}")
+        for f in report.fills:
+            print(f"  fill: {f.sleeve_id} {f.side.value} {f.qty:g} {f.symbol} @ {_money(f.price)}")
+        for a in report.actions:
+            print(f"  {a}")
+        for p in report.problems:
+            print(f"  PROBLEM: {p}")
+        if args.dry_run:
+            print("\nWould send (nothing was sent):" if broker.would_send else "\nWould send nothing.")  # type: ignore[attr-defined]
+            for o in broker.would_send:  # type: ignore[attr-defined]
+                size = f"qty {o.qty:g}" if o.qty else _money(o.notional or 0)
+                stop = f" stop {o.stop_price:,.2f}" if o.stop_price else ""
+                print(f"  {o.sleeve_id} {o.side.value} {o.symbol} {size} {o.order_type.value}{stop} ({o.reason})")
+        return 1 if report.problems else 0
+    finally:
+        journal.close()
+
+
 def cmd_halt(settings: Settings, args: argparse.Namespace) -> int:
     KillSwitch(settings.kill_switch_path).engage(args.reason)
     print(f"Kill switch ON. No new orders will be sent. Reason: {args.reason}")
@@ -240,11 +295,13 @@ def main(argv: list[str] | None = None) -> int:
     p_g1 = sub.add_parser("gate1", help="full Gate 1 evaluation with HTML report")
     p_g1.add_argument("strategy", choices=["S1", "S2", "S3", "S4", "all"])
     p_g1.add_argument("--refresh", action="store_true", help="re-download price history first")
+    p_run = sub.add_parser("run", help="one engine cycle")
+    p_run.add_argument("--dry-run", action="store_true", help="show what would happen; send nothing")
 
     args = parser.parse_args(argv)
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
-                "gate1": cmd_gate1}
+                "gate1": cmd_gate1, "run": cmd_run}
     try:
         return handlers[args.command](load_settings(), args)
     except LiveTradingRefused as exc:

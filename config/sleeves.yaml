@@ -10,19 +10,27 @@ sleeves:
     symbols: [BTC/USD, ETH/USD, SPY]
 
   - id: B0
-    name: Buy-and-hold benchmarks
-    enabled: false
+    name: Buy-and-hold benchmark
+    enabled: true            # approved 2026-09-18 for Phase 3 paper trading
     broker: alpaca
     capital_usd: 10000
     symbols: [SPY, QQQ, BTC/USD]
+    # Holds a third in each and never sells, so no stops.
+    limits:
+      max_position_pct_of_sleeve: 34
+      risk_per_trade_pct: 1
+      max_leverage: 1.0
+      require_stop: false
+      max_drawdown_disable_pct: 100
 
   - id: S1
     name: Trend following
-    enabled: false
+    enabled: true            # approved 2026-09-18 after passing Gate 1
     broker: alpaca
     capital_usd: 10000
     symbols: [BTC/USD, ETH/USD, QQQ, SPY]
-    benchmark: SPY
+    benchmark: B0
+    params: {fast: 20, slow: 200, atr_mult: 2.5}   # chosen by Gate 1 on 1995-2017 data
 
   - id: S2
     name: Cross-asset momentum rotation

@@ -68,6 +68,8 @@ class SleeveConfig(_Strict):
     symbols: list[str]
     benchmark: str | None = None
     limits: SleeveLimits | None = None  # per-sleeve override of sleeve_defaults
+    strategy: str | None = None         # strategy code the live engine runs (defaults to the sleeve id)
+    params: dict[str, float | int | str] = Field(default_factory=dict)  # settings chosen by Gate 1
 
 
 class UniverseConfig(_Strict):

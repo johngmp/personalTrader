@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from trader.models import Account, AssetClass, BrokerOrder, OrderRequest, Position, Quote
+from trader.models import Account, AssetClass, BrokerOrder, MarketClock, OrderRequest, Position, Quote
 
 
 class LiveTradingRefused(RuntimeError):
@@ -32,3 +32,18 @@ class Broker(ABC):
 
     @abstractmethod
     def get_order(self, broker_order_id: str) -> BrokerOrder: ...
+
+    @abstractmethod
+    def get_open_orders(self) -> list[BrokerOrder]: ...
+
+    @abstractmethod
+    def cancel_order(self, broker_order_id: str) -> None: ...
+
+    @abstractmethod
+    def replace_stop(self, broker_order_id: str, client_order_id: str, stop_price: float,
+                     limit_price: float | None = None) -> BrokerOrder:
+        """Move a resting stop order (trailing stops). The replacement gets `client_order_id`, so its fills
+        are still attributed to the right sleeve."""
+
+    @abstractmethod
+    def get_clock(self) -> MarketClock: ...

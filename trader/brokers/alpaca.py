@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import (
@@ -14,15 +15,24 @@ from alpaca.data.requests import (
     StockLatestTradeRequest,
 )
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.enums import OrderType as AlpacaOrderType
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.requests import (
+    GetCalendarRequest,
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+    ReplaceOrderRequest,
+    StopLimitOrderRequest,
+    StopOrderRequest,
+)
 
 from trader.brokers.base import Broker, LiveTradingRefused
 from trader.models import (
     Account,
     AssetClass,
     BrokerOrder,
+    MarketClock,
     OrderRequest,
     OrderStatus,
     OrderType,
@@ -32,6 +42,7 @@ from trader.models import (
 )
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+EASTERN = ZoneInfo("America/New_York")
 
 _STATUS_MAP = {
     "new": OrderStatus.SUBMITTED,
@@ -53,6 +64,9 @@ _STATUS_MAP = {
     "rejected": OrderStatus.REJECTED,
 }
 
+_ORDER_TYPES = {"market": OrderType.MARKET, "limit": OrderType.LIMIT, "stop": OrderType.STOP,
+                "stop_limit": OrderType.STOP_LIMIT}
+
 _QUOTE_CURRENCIES = ("USDT", "USDC", "USD", "BTC")
 
 
@@ -64,6 +78,17 @@ def check_paper_credentials(api_key: str) -> None:
         )
     if os.environ.get("ALPACA_PAPER_TRADE", "true").strip().lower() in ("false", "0", "no"):
         raise LiveTradingRefused("ALPACA_PAPER_TRADE is set to false. This system only trades on paper.")
+
+
+def time_in_force(order: OrderRequest, asset_class: AssetClass) -> TimeInForce:
+    """Crypto: GTC. Stocks: GTC for whole-share limit/stop orders (so stops persist), otherwise DAY
+    (Alpaca requires DAY for market and fractional orders)."""
+    if asset_class is AssetClass.CRYPTO:
+        return TimeInForce.GTC
+    whole = order.qty is not None and float(order.qty).is_integer()
+    if whole and order.order_type in (OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT):
+        return TimeInForce.GTC
+    return TimeInForce.DAY
 
 
 def from_alpaca_symbol(symbol: str, asset_class: AssetClass) -> str:
@@ -152,15 +177,43 @@ class AlpacaBroker(Broker):
             qty=order.qty,
             notional=order.notional,
             side=OrderSide.BUY if order.side is Side.BUY else OrderSide.SELL,
-            # Crypto trades 24/7 and requires GTC/IOC; stocks use DAY (also required for fractional orders).
-            time_in_force=TimeInForce.GTC if asset_class is AssetClass.CRYPTO else TimeInForce.DAY,
+            time_in_force=time_in_force(order, asset_class),
             client_order_id=order.client_order_id,
         )
         if order.order_type is OrderType.LIMIT:
             request = LimitOrderRequest(type=AlpacaOrderType.LIMIT, limit_price=order.limit_price, **common)
+        elif order.order_type is OrderType.STOP:
+            request = StopOrderRequest(type=AlpacaOrderType.STOP, stop_price=order.stop_price, **common)
+        elif order.order_type is OrderType.STOP_LIMIT:
+            request = StopLimitOrderRequest(type=AlpacaOrderType.STOP_LIMIT, stop_price=order.stop_price,
+                                            limit_price=order.limit_price, **common)
         else:
             request = MarketOrderRequest(type=AlpacaOrderType.MARKET, **common)
         return self._convert(self._trading.submit_order(request), asset_class)
+
+    def get_open_orders(self) -> list[BrokerOrder]:
+        orders = self._trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
+        return [self._convert(o, _asset_class(o.asset_class)) for o in orders]
+
+    def cancel_order(self, broker_order_id: str) -> None:
+        self._trading.cancel_order_by_id(broker_order_id)
+
+    def replace_stop(self, broker_order_id: str, client_order_id: str, stop_price: float,
+                     limit_price: float | None = None) -> BrokerOrder:
+        o = self._trading.replace_order_by_id(
+            broker_order_id, ReplaceOrderRequest(stop_price=round(stop_price, 2), client_order_id=client_order_id,
+                                                 limit_price=round(limit_price, 2) if limit_price else None))
+        return self._convert(o, _asset_class(o.asset_class))
+
+    def get_clock(self) -> MarketClock:
+        clock = self._trading.get_clock()
+        today = clock.timestamp.astimezone(EASTERN).date()
+        sessions = self._trading.get_calendar(GetCalendarRequest(start=today - timedelta(days=10), end=today))
+        now = clock.timestamp.astimezone(timezone.utc)
+        closes = [s.close.replace(tzinfo=EASTERN).astimezone(timezone.utc) for s in sessions]
+        last_close = max((c for c in closes if c <= now), default=now - timedelta(days=1))
+        return MarketClock(is_open=clock.is_open, last_close=last_close,
+                           next_open=clock.next_open.astimezone(timezone.utc))
 
     def get_order(self, broker_order_id: str) -> BrokerOrder:
         o = self._trading.get_order_by_id(broker_order_id)
@@ -176,6 +229,9 @@ class AlpacaBroker(Broker):
             symbol=from_alpaca_symbol(o.symbol, asset_class),
             side=Side(side),
             status=_STATUS_MAP.get(raw, OrderStatus.SUBMITTED),
+            order_type=_ORDER_TYPES.get(str(getattr(o.order_type, "value", o.order_type)), OrderType.MARKET),
+            stop_price=_f(o.stop_price),
+            limit_price=_f(o.limit_price),
             qty=_f(o.qty),
             notional=_f(o.notional),
             filled_qty=_f(o.filled_qty) or 0.0,

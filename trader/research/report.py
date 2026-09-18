@@ -102,9 +102,12 @@ def _nice_log_ticks(lo: float, hi: float) -> list[float]:
 
 
 def line_chart(series: list[tuple[str, pd.Series]], *, log: bool, fmt: str, split: pd.Timestamp | None,
-               title: str) -> str:
+               title: str, resample: str | None = "W-FRI") -> str:
     """Inline SVG line chart (one y-axis) with a hover crosshair and tooltip. Weekly points keep it light."""
-    frame = pd.concat({name: s for name, s in series}, axis=1).resample("W-FRI").last().dropna(how="all")
+    frame = pd.concat({name: s for name, s in series}, axis=1)
+    if resample:
+        frame = frame.resample(resample).last()
+    frame = frame.dropna(how="all")
     W, H, L, R, T, B = 800, 310, 64, 150, 26, 28
     x0, x1 = frame.index[0], frame.index[-1]
     span = (x1 - x0).total_seconds() or 1.0
@@ -172,7 +175,8 @@ def line_chart(series: list[tuple[str, pd.Series]], *, log: bool, fmt: str, spli
         parts.append(f'<circle class="dot" r="4" fill="var({lines_js[j]["c"]})" stroke="var(--surface)" '
                      f'stroke-width="2" style="display:none"/>')
     parts.append(f'<rect x="{L}" y="{T}" width="{W - L - R}" height="{H - T - B}" fill="transparent"/></svg>')
-    data = {"x": [round(v, 1) for v in xs], "dates": [str(d.date()) for d in frame.index], "lines": lines_js}
+    stamp = (lambda d: str(d.date())) if resample else (lambda d: d.strftime("%Y-%m-%d %H:%M"))
+    data = {"x": [round(v, 1) for v in xs], "dates": [stamp(d) for d in frame.index], "lines": lines_js}
     legend = "".join(f'<span><span class="sw" style="background:var({SERIES[j][0]})"></span>{html.escape(n)}</span>'
                      for j, (n, _) in enumerate(series))
     return (f'<div class="legend">{legend}</div><div class="chart" data-fmt="{fmt}" '

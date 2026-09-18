@@ -7,10 +7,20 @@ exactly why an order was blocked.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from trader.config import Settings
-from trader.models import Account, AssetClass, CheckResult, OrderRequest, Position, Quote, RiskDecision, Side
+from trader.models import (
+    Account,
+    AssetClass,
+    CheckResult,
+    MarketClock,
+    OrderRequest,
+    Position,
+    Quote,
+    RiskDecision,
+    Side,
+)
 
 
 @dataclass
@@ -38,6 +48,7 @@ class RiskContext:
     kill_switch_active: bool = False
     kill_switch_reason: str = ""
     sleeve_disabled: bool = False
+    market: MarketClock | None = None          # US stock session state (None = treat as open)
 
 
 def _pct(value: float, of: float) -> float:
@@ -72,8 +83,15 @@ class RiskGate:
         # --- price data ---------------------------------------------------------------------
         price = ctx.quote.price
         age = (ctx.now - ctx.quote.ts).total_seconds()
-        add("fresh_price", 0 < price and age <= risk.guards.stale_data_seconds,
-            f"price is {age:.0f}s old (limit {risk.guards.stale_data_seconds}s); market may be closed")
+        if ctx.asset_class is AssetClass.US_EQUITY and ctx.market is not None and not ctx.market.is_open:
+            # Market closed: the order queues for the next open, so the latest session's closing price is
+            # as fresh as it gets. Anything older than that session is still stale.
+            fresh = ctx.quote.ts >= ctx.market.last_close - timedelta(minutes=15)
+            add("fresh_price", 0 < price and fresh,
+                f"last price is from {ctx.quote.ts:%Y-%m-%d %H:%M} UTC, before the latest session closed")
+        else:
+            add("fresh_price", 0 < price and age <= risk.guards.stale_data_seconds,
+                f"price is {age:.0f}s old (limit {risk.guards.stale_data_seconds}s); market may be closed")
         if price <= 0:
             return RiskDecision(approved=False, checks=checks)
 

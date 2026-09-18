@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from trader.models import Account, AssetClass, OrderRequest, Position, Quote, Side
+from trader.models import Account, AssetClass, MarketClock, OrderRequest, Position, Quote, Side
 from trader.risk.gate import RecentOrder, RiskContext, RiskGate
 
 from .conftest import NOW
@@ -164,3 +164,12 @@ def test_max_orders_per_day(gate):
 def test_every_failure_is_reported_not_just_the_first(gate):
     d = gate.check(buy(notional=5_000, stop=None), ctx(kill_switch_active=True, orders_today=99))
     assert {"kill_switch", "max_orders_per_day", "max_position_of_sleeve", "stop_required"} <= failed(d)
+
+
+def test_stock_orders_after_the_close_use_the_latest_session_price(gate):
+    closed = MarketClock(is_open=False, last_close=NOW - timedelta(hours=2), next_open=NOW + timedelta(hours=15))
+    spy = dict(asset_class=AssetClass.US_EQUITY, market=closed)
+    at_close = Quote(symbol="SPY", price=500, ts=NOW - timedelta(hours=2, minutes=1))
+    assert gate.check(buy(symbol="SPY", stop=490), ctx(quote=at_close, **spy)).approved
+    day_before = Quote(symbol="SPY", price=500, ts=NOW - timedelta(hours=26))
+    assert failed(gate.check(buy(symbol="SPY", stop=490), ctx(quote=day_before, **spy))) == {"fresh_price"}

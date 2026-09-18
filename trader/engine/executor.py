@@ -10,7 +10,7 @@ from typing import Callable
 from trader.brokers.base import Broker, LiveTradingRefused
 from trader.config import CostModel, Settings
 from trader.journal.db import Journal, trading_day_start
-from trader.models import BrokerOrder, Fill, OrderRequest, OrderStatus, Quote, RiskDecision
+from trader.models import AssetClass, BrokerOrder, Fill, OrderRequest, OrderStatus, Quote, RiskDecision
 from trader.risk.gate import RiskContext, RiskGate
 from trader.risk.kill_switch import KillSwitch
 
@@ -71,6 +71,7 @@ class Executor:
             recent_orders=self.journal.recent_orders(timedelta(seconds=guards.duplicate_order_window_s), now),
             kill_switch_active=self.kill_switch.active,
             kill_switch_reason=self.kill_switch.reason,
+            market=self.broker.get_clock() if asset_class is AssetClass.US_EQUITY else None,
         )
 
     def submit(self, order: OrderRequest, wait_for_fill_s: float = 10.0) -> ExecutionResult:

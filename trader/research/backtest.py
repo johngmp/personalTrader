@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from trader.config import CostModel, SleeveLimits
-from trader.risk.sizing import capped_weight, fit_to_leverage
+from trader.risk.sizing import plan_weights
 from trader.strategies.base import Holding, Strategy
 
 MIN_ORDER_USD = 1.0
@@ -147,45 +147,30 @@ def run_backtest(
 
 def _plan_orders(strategy: Strategy, date: pd.Timestamp, today: dict, book: _Book, values: dict[str, float],
                  equity: float, limits: SleeveLimits, pending: dict[str, _Order]) -> None:
-    """Turn today's targets into orders, sizing all of them together so exits free room for entries."""
+    """Turn today's targets into orders using the same weight planning as live trading."""
     holdings = {s: p.holding for s, p in book.positions.items()}
     targets = {s: t for s, t in strategy.on_bar(date, holdings).items() if s in today}
-
-    planned = {s: v / equity for s, v in values.items()}   # weight each symbol will have after today
-    changeable: set[str] = set()                           # new or resized positions (can be scaled down)
-    for symbol, target in targets.items():
+    for symbol, target in targets.items():  # trailing stops move without an order
         pos = book.positions.get(symbol)
-        if target.weight <= 0:
-            planned[symbol] = 0.0
-            continue
-        if pos is not None and target.stop is not None:
+        if pos is not None and target.weight > 0 and target.stop is not None:
             pos.holding.stop = target.stop
-        if pos is None or target.resize:
-            planned[symbol] = capped_weight(target.weight, today[symbol].close, target.stop, limits)
-            changeable.add(symbol)
-
-    fixed = sum(w for s, w in planned.items() if s not in changeable)
-    room = fit_to_leverage(sum(planned[s] for s in changeable), fixed, limits)
-    wanted = sum(planned[s] for s in changeable)
-    scale = room / wanted if wanted > 0 else 0.0
-
-    for symbol, target in targets.items():
+    prices = {s: today[s].close for s in targets}
+    current = {s: v / equity for s, v in values.items()}
+    for symbol, weight in plan_weights(targets, current, prices, limits).items():
         pos = book.positions.get(symbol)
-        price = today[symbol].close
-        if target.weight <= 0:
+        price = prices[symbol]
+        if weight <= 0:
             if pos:
-                pending[symbol] = _Order(-pos.holding.qty, reason=target.reason)
+                pending[symbol] = _Order(-pos.holding.qty, reason=targets[symbol].reason)
             continue
-        if symbol not in changeable:
-            continue
-        desired_qty = planned[symbol] * scale * equity / price
+        desired_qty = weight * equity / price
         if pos is None:
             if desired_qty * price >= MIN_ORDER_USD:
-                pending[symbol] = _Order(desired_qty, stop=target.stop, reason=target.reason)
+                pending[symbol] = _Order(desired_qty, stop=targets[symbol].stop, reason=targets[symbol].reason)
             continue
         gap = desired_qty - pos.holding.qty
         if abs(gap) * price >= max(MIN_ORDER_USD, REBALANCE_BAND * desired_qty * price):
-            pending[symbol] = _Order(gap, reason=target.reason)
+            pending[symbol] = _Order(gap, reason=targets[symbol].reason)
 
 
 def _execute(book: _Book, symbol: str, order: _Order, ref_price: float, date: pd.Timestamp,

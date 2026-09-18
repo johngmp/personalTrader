@@ -79,6 +79,43 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     cash              REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS positions_state (      -- strategy state for each open sleeve position
+    sleeve_id         TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    entry_price       REAL NOT NULL,
+    entry_date        TEXT NOT NULL,
+    stop              REAL,
+    initial_stop      REAL,
+    high_since_entry  REAL NOT NULL,
+    bars_held         INTEGER NOT NULL DEFAULT 0,
+    stop_order_id     TEXT,                        -- client_order_id of the resting broker stop order
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (sleeve_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS decisions (             -- last completed daily bar each sleeve acted on
+    sleeve_id         TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    bar_date          TEXT NOT NULL,
+    decided_at        TEXT NOT NULL,
+    PRIMARY KEY (sleeve_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS sleeve_equity (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                TEXT NOT NULL,
+    sleeve_id         TEXT NOT NULL,
+    equity            REAL NOT NULL,              -- capital + trading P&L at market prices
+    adjusted_equity   REAL NOT NULL,              -- equity minus the estimated cost haircut
+    invested          REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sleeve_equity ON sleeve_equity(sleeve_id, ts);
+
+CREATE TABLE IF NOT EXISTS kv (
+    key               TEXT PRIMARY KEY,
+    value             TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     ts                TEXT NOT NULL,
@@ -222,9 +259,10 @@ class Journal:
         return row["n"]
 
     def recent_orders(self, within: timedelta, now: datetime) -> list[RecentOrder]:
+        """Recent trade orders, for the duplicate check. Resting protective stops aren't trades."""
         rows = self.conn.execute(
             """SELECT sleeve_id, symbol, side, created_at FROM orders
-               WHERE created_at >= ? AND status NOT IN (?, ?)""",
+               WHERE created_at >= ? AND status NOT IN (?, ?) AND order_type IN ('market', 'limit')""",
             (_iso(now - within), OrderStatus.REJECTED.value, OrderStatus.PROPOSED.value),
         ).fetchall()
         return [RecentOrder(r["sleeve_id"], r["symbol"], Side(r["side"]), datetime.fromisoformat(r["created_at"]))
@@ -246,6 +284,89 @@ class Journal:
 
     def recent_order_rows(self, limit: int = 10) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+
+    # --- live strategy state ------------------------------------------------------------------
+
+    def position_states(self, sleeve_id: str | None = None) -> list[sqlite3.Row]:
+        if sleeve_id is None:
+            return self.conn.execute("SELECT * FROM positions_state ORDER BY sleeve_id, symbol").fetchall()
+        return self.conn.execute("SELECT * FROM positions_state WHERE sleeve_id=?", (sleeve_id,)).fetchall()
+
+    def position_state(self, sleeve_id: str, symbol: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM positions_state WHERE sleeve_id=? AND symbol=?",
+                                 (sleeve_id, symbol)).fetchone()
+
+    def upsert_position_state(self, sleeve_id: str, symbol: str, **fields) -> None:
+        existing = self.position_state(sleeve_id, symbol)
+        with self.conn:
+            if existing is None:
+                cols = {"sleeve_id": sleeve_id, "symbol": symbol, "updated_at": self._now(), **fields}
+                self.conn.execute(f"INSERT INTO positions_state ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                                  tuple(cols.values()))
+            elif fields:
+                sets = ", ".join(f"{k}=?" for k in fields)
+                self.conn.execute(f"UPDATE positions_state SET {sets}, updated_at=? WHERE sleeve_id=? AND symbol=?",
+                                  (*fields.values(), self._now(), sleeve_id, symbol))
+
+    def delete_position_state(self, sleeve_id: str, symbol: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM positions_state WHERE sleeve_id=? AND symbol=?", (sleeve_id, symbol))
+
+    def last_decided_bar(self, sleeve_id: str, symbol: str) -> str | None:
+        row = self.conn.execute("SELECT bar_date FROM decisions WHERE sleeve_id=? AND symbol=?",
+                                (sleeve_id, symbol)).fetchone()
+        return row["bar_date"] if row else None
+
+    def set_decided_bar(self, sleeve_id: str, symbol: str, bar_date: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO decisions (sleeve_id, symbol, bar_date, decided_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(sleeve_id, symbol) DO UPDATE SET bar_date=excluded.bar_date, decided_at=excluded.decided_at",
+                (sleeve_id, symbol, bar_date, self._now()))
+
+    def sleeve_cash_flow(self, sleeve_id: str) -> float:
+        """Money in minus money out from trading: sells (after the broker's USD fee) minus buys."""
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(CASE WHEN side='sell' THEN qty*price - broker_fee_usd ELSE -qty*price END), 0) AS cf
+               FROM fills WHERE sleeve_id=?""", (sleeve_id,)).fetchone()
+        return row["cf"]
+
+    def sleeve_haircut(self, sleeve_id: str) -> float:
+        row = self.conn.execute("SELECT COALESCE(SUM(cost_haircut_usd), 0) AS h FROM fills WHERE sleeve_id=?",
+                                (sleeve_id,)).fetchone()
+        return row["h"]
+
+    def record_sleeve_equity(self, sleeve_id: str, equity: float, adjusted: float, invested: float) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO sleeve_equity (ts, sleeve_id, equity, adjusted_equity, invested) VALUES (?,?,?,?,?)",
+                (self._now(), sleeve_id, equity, adjusted, invested))
+
+    def sleeve_equity_history(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM sleeve_equity ORDER BY ts").fetchall()
+
+    def fills(self, sleeve_id: str | None = None) -> list[sqlite3.Row]:
+        q = "SELECT f.*, o.stop_price AS order_stop, o.order_type, o.reason FROM fills f " \
+            "JOIN orders o ON o.client_order_id = f.client_order_id"
+        if sleeve_id is None:
+            return self.conn.execute(q + " ORDER BY f.ts, f.id").fetchall()
+        return self.conn.execute(q + " WHERE f.sleeve_id=? ORDER BY f.ts, f.id", (sleeve_id,)).fetchall()
+
+    def mark_order(self, client_order_id: str, status: OrderStatus, broker_status: str) -> None:
+        with self.conn:
+            self._set_status(client_order_id, status, broker_status=broker_status)
+
+    def kv_get(self, key: str, default: str | None = None) -> str | None:
+        row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def kv_set(self, key: str, value: str) -> None:
+        with self.conn:
+            self.conn.execute("INSERT INTO kv (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                              (key, value))
+
+    def recent_events(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
     # --- internals ----------------------------------------------------------------------------
 
