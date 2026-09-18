@@ -5,6 +5,9 @@
   sync            pick up fills for orders that were still open
   halt / resume   turn the kill switch on / off
   check-config    validate the files in config/
+  data            download / refresh daily price history for research
+  backtest S1     one backtest with a strategy's default settings
+  gate1 S1|all    full Gate 1 evaluation + HTML report in reports/backtests/
 """
 
 from __future__ import annotations
@@ -150,6 +153,58 @@ def cmd_sync(settings: Settings, _: argparse.Namespace) -> int:
     return 0
 
 
+def _research_bars(code: str, settings: Settings, refresh: bool = False):
+    from trader.data.history import load_many
+    from trader.research.evaluate import benchmark_symbols, strategy_setup
+
+    _, symbols, _, _ = strategy_setup(code, settings)
+    return load_many(sorted(set(symbols) | set(benchmark_symbols(code, symbols))), refresh=refresh)
+
+
+def cmd_data(settings: Settings, args: argparse.Namespace) -> int:
+    from trader.data.history import YAHOO_TICKERS, load_history
+
+    for symbol in YAHOO_TICKERS:
+        df = load_history(symbol, refresh=args.refresh)
+        print(f"  {symbol:<9} {len(df):>6} days  {df.index[0].date()} → {df.index[-1].date()}")
+    return 0
+
+
+def cmd_backtest(settings: Settings, args: argparse.Namespace) -> int:
+    from trader.research.backtest import run_backtest
+    from trader.research.evaluate import strategy_setup, symbol_costs
+    from trader.research.metrics import compute_metrics
+
+    cls, symbols, capital, limits = strategy_setup(args.strategy, settings)
+    strat = cls(params=dict(cls.default_params), symbols=symbols)
+    bars = _research_bars(args.strategy, settings)
+    res = run_backtest(strat, bars, capital, limits, symbol_costs(symbols, settings))
+    m = compute_metrics(res.equity.loc[strat.first_decision_date(bars):], res.trades, res.exposure)
+    print(f"{args.strategy} {cls.title} · {', '.join(symbols)} · settings {strat.params}")
+    print(f"{m.start} → {m.end}: yearly return {m.cagr:.1%} · Sharpe {m.sharpe:.2f} · worst drop "
+          f"{m.max_drawdown:.1%} · {m.n_trades} trades · win rate {m.win_rate:.0%} · invested {m.exposure:.0%} of the time")
+    print(f"Total trading costs paid: ${res.total_costs:,.0f}")
+    return 0
+
+
+def cmd_gate1(settings: Settings, args: argparse.Namespace) -> int:
+    from trader.research.evaluate import evaluate, log_result
+    from trader.research.report import write_report
+    from trader.strategies import REGISTRY
+
+    codes = list(REGISTRY) if args.strategy == "all" else [args.strategy]
+    for code in codes:
+        result = evaluate(code, settings, _research_bars(code, settings, refresh=args.refresh))
+        path = write_report(result)
+        log_result(result, path)
+        print(f"\n{code} {REGISTRY[code].title}: {'PASS' if result.passed else 'FAIL'}"
+              f"  (out-of-sample Sharpe {result.oos_metrics.sharpe:.2f} vs benchmark {result.bench_oos.sharpe:.2f})")
+        for c in result.checks:
+            print(f"  {'PASS' if c.passed else 'FAIL'}  {c.name}: {c.detail}")
+        print(f"  report: {path.relative_to(settings.root)}")
+    return 0
+
+
 def cmd_halt(settings: Settings, args: argparse.Namespace) -> int:
     KillSwitch(settings.kill_switch_path).engage(args.reason)
     print(f"Kill switch ON. No new orders will be sent. Reason: {args.reason}")
@@ -178,10 +233,18 @@ def main(argv: list[str] | None = None) -> int:
     p_halt = sub.add_parser("halt", help="turn the kill switch on")
     p_halt.add_argument("--reason", default="manual halt")
     sub.add_parser("resume", help="turn the kill switch off")
+    p_data = sub.add_parser("data", help="download/refresh daily price history for research")
+    p_data.add_argument("--refresh", action="store_true", help="re-download even if the cache is fresh")
+    p_bt = sub.add_parser("backtest", help="one backtest with default settings")
+    p_bt.add_argument("strategy", choices=["S1", "S2", "S3", "S4"])
+    p_g1 = sub.add_parser("gate1", help="full Gate 1 evaluation with HTML report")
+    p_g1.add_argument("strategy", choices=["S1", "S2", "S3", "S4", "all"])
+    p_g1.add_argument("--refresh", action="store_true", help="re-download price history first")
 
     args = parser.parse_args(argv)
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
-                "halt": cmd_halt, "resume": cmd_resume}
+                "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
+                "gate1": cmd_gate1}
     try:
         return handlers[args.command](load_settings(), args)
     except LiveTradingRefused as exc:

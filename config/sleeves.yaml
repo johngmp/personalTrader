@@ -31,6 +31,14 @@ sleeves:
     capital_usd: 10000
     symbols: [SPY, EFA, TLT, GLD, BIL]
     benchmark: SPY
+    # Rotation holds 1-2 whole ETFs (or cash via BIL) and exits by monthly re-ranking, not stops,
+    # so it needs its own limits. Everything else stays at the defaults.
+    limits:
+      max_position_pct_of_sleeve: 100
+      risk_per_trade_pct: 1
+      max_leverage: 1.0
+      require_stop: false
+      max_drawdown_disable_pct: 25
 
   - id: S3
     name: Short-term mean reversion
@@ -39,3 +47,10 @@ sleeves:
     capital_usd: 10000
     symbols: [SPY, QQQ]
     benchmark: SPY
+
+  - id: S4
+    name: FX trend following (goes live with OANDA in Phase 4b)
+    enabled: false
+    broker: oanda
+    capital_usd: 10000
+    symbols: [EUR/USD, AUD/USD, GBP/USD, USD/JPY, XAU/USD]

@@ -342,12 +342,13 @@ personalTrader/
 - [x] Project `.mcp.json` + MCP setup so you can use Claude interactively on the same accounts (read-only Alpaca toolsets)
 - **Exit:** a valid test order fills on Alpaca paper (a stock and a crypto pair) and is journaled; limit-breaking orders are rejected and logged.
 
-### Phase 2: Research lab (~1–2 weeks)
-- [ ] Historical data loader + cache (stocks, ETFs, crypto; FX history too, so S4 is ready for 4b)
-- [ ] Backtester: costs, next-bar fills, in/out-of-sample, walk-forward, robustness sweep, HTML report
-- [ ] S1–S3 as shared strategy classes; Gate 1 on each (S4 backtested here too, but only goes live in 4b)
-- [ ] `/research-lab` skill: "design → backtest → explain → revise", every variant logged
+### Phase 2: Research lab (~1–2 weeks) ✅ done 2026-09-18
+- [x] Historical data loader + cache (stocks, ETFs, crypto; FX history too, so S4 is ready for 4b)
+- [x] Backtester: costs, next-bar fills, in/out-of-sample, walk-forward, robustness sweep, HTML report (own engine instead of `vectorbt`: the grids are small enough, and it shares strategy + sizing code with live trading)
+- [x] S1–S3 as shared strategy classes; Gate 1 on each (S4 backtested here too, but only goes live in 4b)
+- [x] `/research-lab` skill: "design → backtest → explain → revise", every variant logged
 - **Exit:** a report of which S1–S4 pass Gate 1 (possibly none, which is still useful).
+- **Result (2026-09-18):** S1 trend ✅ PASS · S4 FX trend ✅ PASS · S2 rotation ✕ FAIL (robustness 66% < 70%) · S3 buy-the-dip ✕ FAIL (Sharpe 0.43 < SPY 0.84). Reports in `reports/backtests/`, log in `reports/research_log.jsonl`.
 
 ### Phase 3: Paper engine live (~1 week)
 - [ ] Engine runner, order manager (broker-held stops), reconciler

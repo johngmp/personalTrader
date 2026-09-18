@@ -10,6 +10,12 @@ symbols:
   BIL: us_equity
   BTC/USD: crypto
   ETH/USD: crypto
+  # Forex + gold: researched now, traded from Phase 4b (OANDA)
+  EUR/USD: forex
+  AUD/USD: forex
+  GBP/USD: forex
+  USD/JPY: forex
+  XAU/USD: forex
 
 # Symbols that tend to move together. Their combined exposure is capped by
 # account.max_correlated_exposure_pct in risk.yaml.

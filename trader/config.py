@@ -63,7 +63,7 @@ class SleeveConfig(_Strict):
     id: str
     name: str
     enabled: bool = False
-    broker: Literal["alpaca"] = "alpaca"
+    broker: Literal["alpaca", "oanda", "liquid"] = "alpaca"
     capital_usd: float
     symbols: list[str]
     benchmark: str | None = None
