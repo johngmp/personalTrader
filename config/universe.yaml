@@ -1,0 +1,18 @@
+# Every tradable symbol and its asset class. Orders for symbols not listed here are rejected.
+# Crypto uses Alpaca's "BASE/QUOTE" format.
+
+symbols:
+  SPY: us_equity
+  QQQ: us_equity
+  EFA: us_equity
+  TLT: us_equity
+  GLD: us_equity
+  BIL: us_equity
+  BTC/USD: crypto
+  ETH/USD: crypto
+
+# Symbols that tend to move together. Their combined exposure is capped by
+# account.max_correlated_exposure_pct in risk.yaml.
+correlation_groups:
+  crypto: [BTC/USD, ETH/USD]
+  us_growth: [QQQ, SPY]

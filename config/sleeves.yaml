@@ -1,0 +1,41 @@
+# Each sleeve is one strategy with its own virtual slice of the paper account.
+# Strategies are switched on in later phases, after they pass Gate 1 (see PLAN.md §6).
+
+sleeves:
+  - id: TEST
+    name: Pipeline smoke tests (`trader order --test`)
+    enabled: true
+    broker: alpaca
+    capital_usd: 1000
+    symbols: [BTC/USD, ETH/USD, SPY]
+
+  - id: B0
+    name: Buy-and-hold benchmarks
+    enabled: false
+    broker: alpaca
+    capital_usd: 10000
+    symbols: [SPY, QQQ, BTC/USD]
+
+  - id: S1
+    name: Trend following
+    enabled: false
+    broker: alpaca
+    capital_usd: 10000
+    symbols: [BTC/USD, ETH/USD, QQQ, SPY]
+    benchmark: SPY
+
+  - id: S2
+    name: Cross-asset momentum rotation
+    enabled: false
+    broker: alpaca
+    capital_usd: 10000
+    symbols: [SPY, EFA, TLT, GLD, BIL]
+    benchmark: SPY
+
+  - id: S3
+    name: Short-term mean reversion
+    enabled: false
+    broker: alpaca
+    capital_usd: 10000
+    symbols: [SPY, QQQ]
+    benchmark: SPY

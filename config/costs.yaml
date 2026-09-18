@@ -1,0 +1,21 @@
+# Cost haircut applied to every fill in the journal. Paper fills ignore spread,
+# slippage and fees, so strategies are judged on P&L after these costs.
+# Values are basis points (1 bp = 0.01%) per side.
+# fee_bps is an estimate added on top; broker_fee_bps is what the broker actually deducts,
+# so it is recorded as a real cost and kept out of the estimate to avoid counting it twice.
+
+us_equity:
+  half_spread_bps: 1.0
+  slippage_bps: 3.0
+  fee_bps: 0.5      # regulatory fees on sells, rounded up and applied to both sides
+
+crypto:
+  half_spread_bps: 5.0
+  slippage_bps: 10.0
+  fee_bps: 0.0
+  broker_fee_bps: 25.0  # Alpaca really charges this, on paper too: in coins on buys, in USD on sells
+
+forex:
+  half_spread_bps: 1.0
+  slippage_bps: 1.0
+  fee_bps: 0.0
