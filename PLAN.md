@@ -86,9 +86,9 @@ The key idea is that **Claude never places trades directly.** The Python engine 
 └───────────────────────────────┬─────────────────────────────────────────────────┘
                                 │ signal files (JSON: symbol, side, confidence, stop, reasoning)
                                 ▼
-DATA (Alpaca · yfinance/OpenBB · Quiver · OANDA from 4b)
+DATA (Alpaca prices + news · yfinance history/fundamentals · OANDA from 4b)
   ─► TRADING ENGINE (Python, runs by itself via macOS launchd, no AI needed)
-        rule sleeves: S1 trend · S2 rotation · S3 mean-rev · S4 FX trend · S7a/b Quiver
+        rule sleeves: S1 trend · S2 rotation · S3 mean-rev · S4 FX trend · (S7b insider buys, optional)
         AI sleeves:   S5 filter · S6 persona panel  ← read from signals/inbox
             │ proposed orders
             ▼
@@ -128,8 +128,8 @@ Test candidates only. Each must pass Gate 1 (§6) before getting paper money, ex
 | **S4** *(from Phase 4b)* | FX trend following with volatility sizing | EUR/USD, AUD/USD, USD/JPY, GBP/USD, XAU/USD on OANDA (+ copy on Liquid) | Daily | Engine | Cash |
 | **S5** | **AI filter A/B:** when S1/S3 want to enter, a scheduled `/analyst-team` skill (TradingAgents method: technical, news, sentiment and fundamentals analysts → bull/bear debate → risk check) can **veto** | Same as S1/S3 | Daily, only on days with entries | Scheduled task → engine | Unfiltered S1/S3 |
 | **S6** | `/investor-panel` skill (ai-hedge-fund method: Buffett, Munger, Lynch, Graham, Burry, Druckenmiller, Wood personas score each stock) → target weights | ~10 US large caps (Pro usage) | Weekly | Scheduled task → engine | SPY |
-| **S7a** *(Quiver)* | Congress-buys copy, buying only **after disclosure**, size-weighted, weekly rebalance | US stocks | Weekly | Engine | SPY |
-| **S7b** *(Quiver)* | Corporate insider cluster buys (SEC Form 4, ~2-day filing lag) | US stocks | Daily | Engine | SPY |
+| ~~S7a~~ | ~~Congress-buys copy~~, dropped: independent evidence shows it lags the S&P 500 after disclosure | | | | |
+| **S7b** *(optional)* | Corporate insider cluster buys (free SEC EDGAR Form 4 data, ~2-day filing lag) | US stocks | Daily | Engine | SPY |
 
 **Built-in improvements from the research:**
 - **Market regime filter** (trend + volatility)
@@ -181,7 +181,6 @@ guards:
 - Multiple assets or periods; ≥ 50 trades where frequency allows
 - **Better Sharpe than its benchmark**, max drawdown ≤ 25%, robust to small parameter changes
 - Number of variants tried is recorded, to guard against lucky finds
-- **S7a extra:** first re-run Quiver's advertised Congress Buys backtest ourselves, buying after disclosure
 
 **Gate 2: forward paper test (all sleeves, the real test)**
 - At least **90 days** and **≥ 30 closed trades** (monthly/weekly sleeves judged on consistency instead)
@@ -282,7 +281,7 @@ The vault is committed to git, so every change to learnings and strategies has a
 |------|-------|
 | **Building + research** | **Claude Code in the Claude desktop app** (your subscription) |
 | **Scheduled AI work** | **Claude desktop local scheduled tasks** (Code tab → Routines → Local) running project **skills** (`.claude/skills/`): `/analyst-team`, `/investor-panel`, `/daily-digest`, `/weekly-review`. Tools pre-approved per task so runs don't stall. |
-| **MCPs for Claude** | Alpaca MCP (**paper keys, read-only tools for scheduled tasks**), OpenBB MCP, QuiverQuant MCP; OANDA MCP (read-only) and Co-Invest MCP (paper) from Phase 4b; TradingView MCP optional for you |
+| **MCPs for Claude** | Alpaca MCP (**paper keys, read-only tools for scheduled tasks**), news tools included; OANDA MCP (read-only) and Co-Invest MCP (paper) from Phase 4b; TradingView MCP optional for you |
 | **Language / env** | Python 3.12 + `uv` (existing `pyproject.toml` with `alpaca-py`, pandas, numpy, pydantic, httpx, pyyaml, python-dotenv) |
 | **Brokers** | `alpaca-py` (Phase 1) · OANDA v20 via `httpx` (4b) · Liquid (4b) via the Co-Invest MCP using the Python `mcp` client (OAuth), or its REST API if Liquid grants access · IBKR `ib_async` later |
 | **Data** | Alpaca feeds + Alpaca/Benzinga news (OANDA from 4b) · OpenBB dropped: Alpaca news + `yfinance` cover what the AI needs · `yfinance` · OpenBB · Quiver API · economic calendar |
@@ -304,7 +303,7 @@ personalTrader/
 ├── config/                  # risk.yaml · sleeves.yaml · universe.yaml · costs.yaml
 ├── trader/
 │   ├── models.py            # Bar, Signal, Order, Fill, Position, SleeveState
-│   ├── data/                # alpaca_data, oanda_data, yf_history, quiver, calendar
+│   ├── data/                # history (Yahoo), live_bars (Alpaca), news, fundamentals; oanda_data in 4b
 │   ├── strategies/          # base.py, s1_trend.py, s2_rotation.py, ... (shared backtest & live)
 │   ├── signals/             # schema.py, inbox.py (validate + ingest AI signal files)
 │   ├── risk/                # gate.py, limits.py, kill_switch.py, regime.py
