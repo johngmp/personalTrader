@@ -192,7 +192,10 @@ class Engine:
             if not resting:
                 self._place_stop(sleeve_id, symbol, qty, stop, asset_class, report)  # type: ignore[arg-type]
             elif stop > (order_row["stop_price"] or 0) * (1 + STOP_MOVE_MIN):
-                self._move_stop(order_row, stop, asset_class, report)  # type: ignore[arg-type]
+                if asset_class is AssetClass.CRYPTO or market.is_open:
+                    self._move_stop(order_row, stop, asset_class, report)  # type: ignore[arg-type]
+                # else: the market is closed; the broker would only queue the change until the open,
+                # so move it on the first run after the open instead (same effect, no half-replaced orders).
 
     def _decide(self, report: RunReport) -> None:
         if self.kill_switch.active:
@@ -401,7 +404,9 @@ class Engine:
                                    limit_price=limit, reason="protective stop (trailed up)", client_order_id=new_id)
         self.journal.record_order(replacement, asset_class.value)
         self.journal.record_broker_order(self.broker.name, bo)
-        self.journal.mark_order(order_row["client_order_id"], OrderStatus.CANCELED, "replaced")
+        # The old order stays tracked until the broker confirms the replacement (Alpaca reports it as
+        # "replaced", which sync maps to canceled). If it somehow filled first, the fill is still recorded.
+        self.journal.mark_order(order_row["client_order_id"], OrderStatus.SUBMITTED, "replace requested")
         self.journal.upsert_position_state(order_row["sleeve_id"], order_row["symbol"], stop_order_id=new_id)
         report.actions.append(f"{order_row['sleeve_id']} trailed {order_row['symbol']} stop up to {stop:,.2f}")
 

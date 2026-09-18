@@ -258,3 +258,25 @@ def test_local_server_serves_only_the_dashboard(world):
             assert err.value.code == 404
     finally:
         server.shutdown()
+
+
+def test_stock_stops_only_move_while_the_market_is_open(world):
+    world["engine"].run_once()
+    before = _stops(world["broker"])["SPY"]
+    broker = world["broker"]
+    broker.clock = broker.clock.model_copy(update={"is_open": False})
+    world["step"]({s: 0.03 for s in START})               # new high after the close
+    assert _stops(broker)["SPY"] == before                 # not moved while closed...
+    assert _stops(broker)["BTC/USD"] > 0                   # (crypto trails any time)
+    broker.clock = broker.clock.model_copy(update={"is_open": True})
+    world["step"](None, hours=0.25)
+    assert _stops(broker)["SPY"] > before                  # ...moved on the first run after the open
+    assert sum(1 for o in broker.get_open_orders() if o.symbol == "SPY") == 1
+
+
+def test_alpaca_replaced_status_is_final():
+    from trader.brokers.alpaca import _STATUS_MAP
+    from trader.models import OrderStatus
+
+    assert _STATUS_MAP["replaced"] is OrderStatus.CANCELED
+    assert _STATUS_MAP["pending_replace"] is OrderStatus.SUBMITTED

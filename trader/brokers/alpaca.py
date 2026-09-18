@@ -51,8 +51,8 @@ _STATUS_MAP = {
     "accepted_for_bidding": OrderStatus.SUBMITTED,
     "held": OrderStatus.SUBMITTED,
     "calculated": OrderStatus.SUBMITTED,
-    "pending_replace": OrderStatus.SUBMITTED,
-    "replaced": OrderStatus.SUBMITTED,
+    "pending_replace": OrderStatus.SUBMITTED,   # still live until Alpaca completes the replacement
+    "replaced": OrderStatus.CANCELED,           # final: superseded by the replacement order
     "pending_cancel": OrderStatus.SUBMITTED,
     "partially_filled": OrderStatus.PARTIALLY_FILLED,
     "filled": OrderStatus.FILLED,
@@ -78,6 +78,23 @@ def check_paper_credentials(api_key: str) -> None:
         )
     if os.environ.get("ALPACA_PAPER_TRADE", "true").strip().lower() in ("false", "0", "no"):
         raise LiveTradingRefused("ALPACA_PAPER_TRADE is set to false. This system only trades on paper.")
+
+
+def _retry_reads(fn):
+    """Retry a READ-ONLY call once after a short pause if the connection drops (never used for orders)."""
+    import functools
+    import time
+
+    import requests
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (requests.ConnectionError, requests.Timeout):
+            time.sleep(2)
+            return fn(*args, **kwargs)
+    return wrapper
 
 
 def time_in_force(order: OrderRequest, asset_class: AssetClass) -> TimeInForce:
@@ -127,6 +144,7 @@ class AlpacaBroker(Broker):
     def is_paper(self) -> bool:
         return True
 
+    @_retry_reads
     def get_account(self) -> Account:
         a = self._trading.get_account()
         return Account(
@@ -139,6 +157,7 @@ class AlpacaBroker(Broker):
             is_paper=True,
         )
 
+    @_retry_reads
     def get_positions(self) -> list[Position]:
         positions = []
         for p in self._trading.get_all_positions():
@@ -155,6 +174,7 @@ class AlpacaBroker(Broker):
             )
         return positions
 
+    @_retry_reads
     def get_quote(self, symbol: str, asset_class: AssetClass) -> Quote:
         if asset_class is AssetClass.CRYPTO:
             q = self._crypto.get_crypto_latest_quote(CryptoLatestQuoteRequest(symbol_or_symbols=symbol))[symbol]
@@ -191,6 +211,7 @@ class AlpacaBroker(Broker):
             request = MarketOrderRequest(type=AlpacaOrderType.MARKET, **common)
         return self._convert(self._trading.submit_order(request), asset_class)
 
+    @_retry_reads
     def get_open_orders(self) -> list[BrokerOrder]:
         orders = self._trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
         return [self._convert(o, _asset_class(o.asset_class)) for o in orders]
@@ -209,6 +230,7 @@ class AlpacaBroker(Broker):
         # Whole shares for stocks, so protective stops can rest at Alpaca as GTC orders; crypto by dollar amount.
         return (1.0, 1.0) if asset_class is AssetClass.US_EQUITY else None
 
+    @_retry_reads
     def get_clock(self) -> MarketClock:
         clock = self._trading.get_clock()
         today = clock.timestamp.astimezone(EASTERN).date()
@@ -219,6 +241,7 @@ class AlpacaBroker(Broker):
         return MarketClock(is_open=clock.is_open, last_close=last_close,
                            next_open=clock.next_open.astimezone(timezone.utc))
 
+    @_retry_reads
     def get_order(self, broker_order_id: str) -> BrokerOrder:
         o = self._trading.get_order_by_id(broker_order_id)
         return self._convert(o, _asset_class(o.asset_class))
