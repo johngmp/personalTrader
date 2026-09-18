@@ -90,6 +90,7 @@ class Engine:
 
     def _run(self) -> RunReport:
         report = RunReport(started=self.clock())
+        self.journal.kv_set("last_run", report.started.isoformat(timespec="seconds"))  # shown on dashboard/vault
         steps: list[tuple[str, Callable[[RunReport], None]]] = [
             ("telegram commands", self._handle_commands),
             ("sync fills", self._sync_fills),
@@ -113,7 +114,6 @@ class Engine:
                 self.journal.log(msg, level="error")
         for msg in report.problems:
             self.notifier.send(f"⚠️ {msg}")
-        self.journal.kv_set("last_run", self.clock().isoformat(timespec="seconds"))
         self.journal.kv_set("last_run_summary", report.summary())
         self.journal.log(f"run finished: {report.summary()}")
         return report
