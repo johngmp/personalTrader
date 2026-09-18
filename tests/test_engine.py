@@ -221,3 +221,14 @@ def test_stock_orders_queue_when_the_market_is_closed(world):
     assert spy_orders and all(o.status is OrderStatus.SUBMITTED for o in spy_orders)
     assert not [p for p in report.problems if "SPY" in p]
     assert AssetClass.US_EQUITY  # queued orders fill at the next open via sync
+
+
+def test_dashboard_shows_balance_strategies_and_trades(world):
+    world["engine"].run_once()
+    world["step"]({s: 0.01 for s in START})
+    page = (world["settings"].root / "data" / "dashboard.html").read_text()
+    for section in ("Account balance", "Profit / loss", "Trading objectives", "Strategies", "Open positions",
+                    "Trading history", "Recent orders", 'id="chart-data"'):
+        assert section in page, section
+    assert page.count("<span class='pill buy'>Long</span>") >= 7 * 2  # open trips listed on overview + history
+    assert "S1 trend following" in page and "B0 buy-and-hold" in page

@@ -209,6 +209,8 @@ class Engine:
             self._decide_sleeve(sleeve, now, market, report)
 
     def _record_equity(self, report: RunReport) -> None:
+        account = self.broker.get_account()  # account history for the dashboard and the drawdown limit
+        self.journal.snapshot_equity(self.broker.name, account.equity, account.cash)
         for sleeve in self._live_sleeves():
             equity, invested = self.sleeve_value(sleeve)
             adjusted = equity - self.journal.sleeve_haircut(sleeve.id)
