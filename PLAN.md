@@ -386,6 +386,11 @@ personalTrader/
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.
+- **Planned starting capital: ~US$100** (noted 2026-09-18). Needs a *small-account mode*: fractional/dollar-amount
+  orders, engine-checked stops where the broker can't hold them (fractional shares), and only the 1–2 strategies that
+  pass Gate 2. $100-friendly venues: OANDA (1-unit minimum) and Alpaca crypto (~$1 minimum). Not suitable at $100:
+  Pepperstone (1,000-unit minimum needs leverage), IBKR ($2 minimum per order), Mitrade (no API).
+- Add overnight forex financing to S4's cost model before any live forex.
 
 ---
 
