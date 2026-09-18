@@ -1,8 +1,8 @@
-# Personal Trader: Build Plan (v5, awaiting approval)
+# Personal Trader: Build Plan (v5, approved 2026-09-18)
 
 A personal, multi-market trading system that uses Claude to research, run and review trading strategies across **US stocks/ETFs, crypto and forex**. It starts in **paper trading with auto-approve**, and its whole purpose in this phase is to *prove with numbers* whether any strategy makes money before real money is involved.
 
-> Software plan only, not investment advice. Nothing is built until you approve this document.
+> Software plan only, not investment advice. Approved 2026-09-18; phases are ticked off below as they are built.
 
 **Your requirements (from our chat):**
 - Based in **Australia**
