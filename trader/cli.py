@@ -10,6 +10,8 @@
   gate1 S1|all    full Gate 1 evaluation + HTML report in reports/backtests/
   run             one engine cycle (the background schedule runs this every 15 minutes)
   run --dry-run   same, on a copy of the journal: shows what it would do, sends nothing
+  news            latest headlines (Alpaca/Benzinga), stored in the journal; --json for AI skills
+  fundamentals X  company fundamentals snapshot (Yahoo); --json for AI skills
 """
 
 from __future__ import annotations
@@ -260,6 +262,50 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
         journal.close()
 
 
+def cmd_news(settings: Settings, args: argparse.Namespace) -> int:
+    import json
+
+    from trader.data.news import AlpacaNews, recent, refresh
+
+    symbols = [s.strip() for s in args.symbols.split(",")] if args.symbols else \
+        sorted({s for sl in settings.sleeves.values() if sl.enabled for s in sl.symbols})
+    secrets = load_secrets()
+    journal = Journal(settings.journal_path)
+    try:
+        new = refresh(journal, AlpacaNews(secrets.alpaca_api_key, secrets.alpaca_secret_key), symbols, args.hours)
+        items = recent(journal, symbols, args.hours)
+    finally:
+        journal.close()
+    if args.json:
+        print(json.dumps({"symbols": symbols, "hours": args.hours, "items": items}, indent=1))
+        return 0
+    print(f"{len(items)} headline(s) in the last {args.hours:g}h for {', '.join(symbols)} ({new} new)")
+    for i in items[: args.limit]:
+        print(f"  {i['created_at'][:16].replace('T', ' ')}  [{', '.join(i['symbols']) or '-'}] {i['headline']}")
+    return 0
+
+
+def cmd_fundamentals(settings: Settings, args: argparse.Namespace) -> int:
+    import json
+
+    from trader.data.fundamentals import load_fundamentals
+
+    snaps = [load_fundamentals(s.strip().upper(), refresh=args.refresh) for s in args.symbols.split(",")]
+    if args.json:
+        print(json.dumps(snaps if len(snaps) > 1 else snaps[0], indent=1))
+        return 0
+    for f in snaps:
+        pct = lambda v: "–" if v is None else f"{v:.1%}"  # noqa: E731
+        num = lambda v, d=1: "–" if v is None else f"{v:,.{d}f}"  # noqa: E731
+        print(f"{f['symbol']} {f.get('name') or ''} · {f.get('sector') or ''}")
+        print(f"  P/E {num(f['pe_trailing'])} (forward {num(f['pe_forward'])}) · P/B {num(f['price_to_book'])} · "
+              f"ROE {pct(f['return_on_equity'])} · net margin {pct(f['net_margin'])}")
+        print(f"  revenue growth {pct(f['revenue_growth_yoy'])} · earnings growth {pct(f['earnings_growth_yoy'])} · "
+              f"debt/equity {num(f['debt_to_equity_pct'], 0)}% · free cash flow "
+              f"{'–' if f['free_cash_flow_usd'] is None else '$' + format(f['free_cash_flow_usd'] / 1e9, ',.1f') + 'B'}")
+    return 0
+
+
 def cmd_halt(settings: Settings, args: argparse.Namespace) -> int:
     KillSwitch(settings.kill_switch_path).engage(args.reason)
     print(f"Kill switch ON. No new orders will be sent. Reason: {args.reason}")
@@ -295,13 +341,22 @@ def main(argv: list[str] | None = None) -> int:
     p_g1 = sub.add_parser("gate1", help="full Gate 1 evaluation with HTML report")
     p_g1.add_argument("strategy", choices=["S1", "S2", "S3", "S4", "all"])
     p_g1.add_argument("--refresh", action="store_true", help="re-download price history first")
+    p_news = sub.add_parser("news", help="latest headlines for enabled symbols (or --symbols)")
+    p_news.add_argument("--symbols", help="comma-separated, e.g. SPY,BTC/USD")
+    p_news.add_argument("--hours", type=float, default=48)
+    p_news.add_argument("--limit", type=int, default=20)
+    p_news.add_argument("--json", action="store_true")
+    p_fund = sub.add_parser("fundamentals", help="company fundamentals snapshot")
+    p_fund.add_argument("symbols", help="comma-separated, e.g. AAPL,MSFT")
+    p_fund.add_argument("--refresh", action="store_true")
+    p_fund.add_argument("--json", action="store_true")
     p_run = sub.add_parser("run", help="one engine cycle")
     p_run.add_argument("--dry-run", action="store_true", help="show what would happen; send nothing")
 
     args = parser.parse_args(argv)
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
-                "gate1": cmd_gate1, "run": cmd_run}
+                "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals}
     try:
         return handlers[args.command](load_settings(), args)
     except LiveTradingRefused as exc:

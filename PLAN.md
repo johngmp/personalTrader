@@ -61,7 +61,8 @@ A personal, multi-market trading system that uses Claude to research, run and re
 | **Future live** (not in this plan) | IBKR AU, OANDA AU, an AUSTRAC-registered crypto exchange | ⚠️ Alpaca *live* eligibility for Australia isn't confirmed; brokers sit behind swappable adapters | n/a | n/a |
 | Market data | Alpaca feeds (OANDA from Phase 4b), `yfinance`, OpenBB | ✅ | All | Free |
 | Smart money | QuiverQuant API + MCP | ✅ | US Congress/insider trades | ~US$30/mo (decision 6) |
-| Fundamentals (AI persona strategy) | `yfinance` / OpenBB free data first; Financial Datasets or FMP only if needed | ✅ | US stocks | Free to start |
+| Fundamentals (AI persona strategy) | `yfinance` (`trader fundamentals`); Financial Datasets or FMP only if needed | ✅ | US stocks | Free |
+| News (AI analyst team) | Alpaca's Benzinga feed via your existing keys (`trader news`), stored in the journal so AI decisions are auditable | ✅ | Stocks + crypto, history to 2016 | Free |
 | **AI** | **Your Claude subscription**: Claude Code in the desktop app for building and research; **desktop scheduled tasks** for AI strategies, the daily digest and the weekly review | ✅ | n/a | Already paying; uses your plan's usage limits (§9) |
 
 **Paper trading is optimistic.** Alpaca's paper account doesn't simulate slippage, market impact, dividends or regulatory fees, and Liquid's paper mode doesn't document how it handles funding. The journal subtracts a **cost haircut** (spread + slippage + fees + funding) from every fill, and strategies are judged on that adjusted P&L.
@@ -284,7 +285,7 @@ The vault is committed to git, so every change to learnings and strategies has a
 | **MCPs for Claude** | Alpaca MCP (**paper keys, read-only tools for scheduled tasks**), OpenBB MCP, QuiverQuant MCP; OANDA MCP (read-only) and Co-Invest MCP (paper) from Phase 4b; TradingView MCP optional for you |
 | **Language / env** | Python 3.12 + `uv` (existing `pyproject.toml` with `alpaca-py`, pandas, numpy, pydantic, httpx, pyyaml, python-dotenv) |
 | **Brokers** | `alpaca-py` (Phase 1) · OANDA v20 via `httpx` (4b) · Liquid (4b) via the Co-Invest MCP using the Python `mcp` client (OAuth), or its REST API if Liquid grants access · IBKR `ib_async` later |
-| **Data** | Alpaca feeds (OANDA from 4b) · `yfinance` · OpenBB · Quiver API · economic calendar |
+| **Data** | Alpaca feeds + Alpaca/Benzinga news (OANDA from 4b) · OpenBB dropped: Alpaca news + `yfinance` cover what the AI needs · `yfinance` · OpenBB · Quiver API · economic calendar |
 | **Backtesting** | `vectorbt` for parameter sweeps + our own trade-by-trade replay with costs; **same strategy code** for backtest and paper |
 | **Engine scheduling** | macOS **launchd** runs `trader run` on a timer (e.g. every 5 min; handles AEST vs New York time), independent of the Claude app |
 | **Storage** | SQLite `data/journal.db` (source of truth for numbers); AI signals as JSON files in `signals/` |
