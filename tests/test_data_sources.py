@@ -50,3 +50,49 @@ def test_fundamentals_snapshot_is_clean_and_comparable():
     assert snap["quarters"][0] == {"quarter_end": "2026-06-30", "revenue": 120, "operating_income": None,
                                    "net_income": 30, "eps_diluted": None}
     assert abs(snap["revenue_growth_same_quarter_last_year"] - 0.2) < 1e-9
+
+
+def test_telegram_setup_finds_the_private_chat_and_updates_env(tmp_path):
+    import httpx
+
+    from trader.notify.telegram import find_chat, set_env_value
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getMe"):
+            return httpx.Response(200, json={"ok": True, "result": {"username": "my_trader_bot"}})
+        return httpx.Response(200, json={"ok": True, "result": [
+            {"update_id": 1, "message": {"chat": {"id": -100, "type": "group"}, "text": "hi"}},
+            {"update_id": 2, "message": {"chat": {"id": 42, "type": "private", "first_name": "Sam"}, "text": "/start"}},
+        ]})
+
+    username, chat = find_chat("TOKEN", httpx.Client(transport=httpx.MockTransport(handler)))
+    assert username == "my_trader_bot" and chat["id"] == 42
+
+    env = tmp_path / ".env"
+    env.write_text("ALPACA_API_KEY=PKX\nTELEGRAM_CHAT_ID=\n")
+    set_env_value(env, "TELEGRAM_CHAT_ID", "42")
+    assert env.read_text() == "ALPACA_API_KEY=PKX\nTELEGRAM_CHAT_ID=42\n"
+
+
+def test_telegram_commands_only_from_the_owner_chat():
+    import httpx
+
+    from trader.notify.telegram import Telegram
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": [
+            {"update_id": 5, "message": {"chat": {"id": 999}, "text": "/halt"}},      # a stranger
+            {"update_id": 6, "message": {"chat": {"id": 42}, "text": "/status@my_trader_bot"}},
+        ]})
+
+    class Store(dict):
+        def kv_get(self, k, default=None):
+            return self.get(k, default)
+
+        def kv_set(self, k, v):
+            self[k] = v
+
+    store = Store()
+    bot = Telegram("TOKEN", "42", httpx.Client(transport=httpx.MockTransport(handler)))
+    assert bot.poll_commands(store) == ["/status"]
+    assert store["telegram_offset"] == "7"

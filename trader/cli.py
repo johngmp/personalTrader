@@ -13,6 +13,7 @@
   news            latest headlines (Alpaca/Benzinga), stored in the journal; --json for AI skills
   fundamentals X  company fundamentals snapshot (Yahoo); --json for AI skills
   serve           dashboard at http://localhost:8050 (read-only)
+  telegram-setup  finds your chat ID for the bot in .env and sends a test message
 """
 
 from __future__ import annotations
@@ -314,6 +315,44 @@ def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_telegram_setup(settings: Settings, _: argparse.Namespace) -> int:
+    import os
+
+    from dotenv import load_dotenv
+
+    from trader.notify.telegram import Telegram, find_chat, set_env_value
+
+    env_path = settings.root / ".env"
+    load_dotenv(env_path, override=True)
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        print("No TELEGRAM_BOT_TOKEN in .env yet.\n"
+              "1. In Telegram, message @BotFather, send /newbot, pick a name and a username ending in 'bot'.\n"
+              "2. Copy the token it gives you into .env as TELEGRAM_BOT_TOKEN=... (not into chat).\n"
+              "3. Open your new bot in Telegram, press Start (or send 'hi').\n"
+              "4. Run this command again.")
+        return 1
+    try:
+        username, chat = find_chat(token)
+    except ValueError as exc:
+        print(exc)
+        return 1
+    if chat is None:
+        print(f"Token works (bot @{username}), but nobody has messaged it yet.\n"
+              f"Open https://t.me/{username} in Telegram, press Start (or send 'hi'), then run this again.")
+        return 1
+    chat_id = str(chat["id"])
+    set_env_value(env_path, "TELEGRAM_CHAT_ID", chat_id)
+    who = " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x) or chat.get("username", "you")
+    Telegram(token, chat_id).send(
+        "✅ Personal Trader is connected.\n"
+        "You'll get a message for every buy, sell and problem, plus a summary each morning at 7am.\n"
+        "Commands: /status · /halt (stop new orders) · /resume")
+    print(f"Connected bot @{username} to {who}'s chat. Saved TELEGRAM_CHAT_ID to .env and sent a test message.\n"
+          "The engine uses it from its next run (within 15 minutes).")
+    return 0
+
+
 def cmd_halt(settings: Settings, args: argparse.Namespace) -> int:
     KillSwitch(settings.kill_switch_path).engage(args.reason)
     print(f"Kill switch ON. No new orders will be sent. Reason: {args.reason}")
@@ -360,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     p_fund.add_argument("--json", action="store_true")
     p_serve = sub.add_parser("serve", help="dashboard at http://localhost:8050")
     p_serve.add_argument("--port", type=int, default=8050)
+    sub.add_parser("telegram-setup", help="connect the Telegram bot in .env and send a test message")
     p_run = sub.add_parser("run", help="one engine cycle")
     p_run.add_argument("--dry-run", action="store_true", help="show what would happen; send nothing")
 
@@ -367,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
                 "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
-                "serve": cmd_serve}
+                "serve": cmd_serve, "telegram-setup": cmd_telegram_setup}
     try:
         return handlers[args.command](load_settings(), args)
     except LiveTradingRefused as exc:

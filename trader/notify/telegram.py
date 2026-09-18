@@ -77,3 +77,29 @@ def from_env() -> Notifier:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     return Telegram(token, chat_id) if token and chat_id else NullNotifier()
+
+
+def find_chat(token: str, client: httpx.Client | None = None) -> tuple[str, dict | None]:
+    """(bot username, the most recent private chat that messaged the bot, if any)."""
+    client = client or httpx.Client(timeout=10)
+    base = f"https://api.telegram.org/bot{token}"
+    me = client.get(f"{base}/getMe")
+    if me.status_code == 401:
+        raise ValueError("Telegram rejected the bot token. Copy it again from @BotFather.")
+    me.raise_for_status()
+    username = me.json()["result"]["username"]
+    updates = client.get(f"{base}/getUpdates", params={"timeout": 0}).json().get("result", [])
+    chats = [u["message"]["chat"] for u in updates if u.get("message", {}).get("chat", {}).get("type") == "private"]
+    return username, (chats[-1] if chats else None)
+
+
+def set_env_value(env_path, key: str, value: str) -> None:
+    """Set KEY=value in .env, replacing an existing line or adding one."""
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    for i, line in enumerate(lines):
+        if line.split("=", 1)[0].strip() == key:
+            lines[i] = f"{key}={value}"
+            break
+    else:
+        lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n")
