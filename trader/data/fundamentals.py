@@ -46,6 +46,9 @@ def snapshot_from_ticker(symbol: str, ticker: Any) -> dict:
     snap: dict[str, Any] = {"symbol": symbol, "as_of": datetime.now().strftime("%Y-%m-%d")}
     for yahoo, ours in INFO_FIELDS.items():
         snap[ours] = _clean(info.get(yahoo))
+    for ratio in ("pe_trailing", "pe_forward", "price_to_book", "ev_to_ebitda"):
+        if snap.get(ratio) in (0, 0.0):  # Yahoo sometimes reports 0 for "unknown"; a real ratio is never 0
+            snap[ratio] = None
     quarters = []
     try:
         stmt = ticker.quarterly_income_stmt
@@ -69,7 +72,7 @@ def load_fundamentals(symbol: str, refresh: bool = False, cache_dir: Path = CACH
             return json.loads(path.read_text())
     import yfinance as yf
 
-    snap = snapshot_from_ticker(symbol, yf.Ticker(symbol.replace("/", "-")))
+    snap = snapshot_from_ticker(symbol, yf.Ticker(symbol.replace("/", "-").replace(".", "-")))  # BRK.B -> BRK-B
     cache_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(snap, indent=1))
     return snap

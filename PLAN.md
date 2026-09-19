@@ -358,16 +358,17 @@ personalTrader/
 - [x] B0 + S1 enabled (approved 2026-09-18); `trader run --dry-run` verified against the real paper account. **Auto-execution starts when you run `ops/install-engine.sh`.**
 - **Exit:** 7 days unattended with zero reconciliation mismatches.
 
-### Phase 4: AI + Quiver strategies (~1–2 weeks)
-- [ ] Signal file schema + `trader signal` validation/ingest (with tests for malformed, stale and out-of-universe signals)
-- [ ] `/analyst-team` skill + S5 scheduled task (runs after the daily scan, only if S1/S3 have entries)
-- [ ] `/investor-panel` skill + S6 weekly scheduled task
-- [ ] `/daily-digest` (7am AEST) scheduled task → Telegram + `vault/Daily/`
-- [ ] **Learning loop:** `/weekly-review` scheduled task writes `vault/Weekly/`, adds post-trade reviews to the week's closed trades, maintains `learnings.md` (evidence-linked, capped, statuses) and drafts `Experiments/`
-- [ ] AI sleeves read `learnings.md` before each run and record the learnings version they used
-- [ ] Permission rules: scheduled tasks may write only to `vault/` and `signals/`, never `trader/` or `config/`
-- [ ] (optional) S7b insider cluster buys from free SEC EDGAR Form 4 data, through Gate 1 first. Quiver/S7a dropped.
-- [ ] Track subscription usage per run; tune how many tickers AI sleeves analyze
+### Phase 4: AI strategies + learning loop ✅ built 2026-09-19 (switched off until the Phase 3 check passes)
+- [x] Signal schema + `trader signal submit/validate/list`, stored in the journal with the learnings version used; tests for malformed, stale, future, duplicate, out-of-universe and over-limit signals
+- [x] `/analyst-team` skill + S5 sleeve (S1 rules; entries wait for approve/veto; skipped after 8h without a verdict). S3 failed Gate 1, so S5 filters S1 only
+- [x] `/investor-panel` skill + S6 sleeve (10 large US companies, weekly weights, ATR stops)
+- [x] `/daily-digest` skill (6:35am) → Telegram + `vault/Daily/`, including the "engine went silent" check; the engine's 7am summary remains the fallback
+- [x] **Learning loop:** `/weekly-review` skill writes `vault/Weekly/`, adds post-trade reviews, maintains `learnings.md` (evidence-linked, capped, statuses), tracks the S5 veto A/B tally and drafts `Experiments/`
+- [x] AI skills read `learnings.md` (adopted entries only as rules) and every signal records the learnings version
+- [x] Scheduled tasks are limited by their skill rules plus per-task tool approvals (only `uv run trader …`, `vault/`, `signals/`); the engine re-validates every signal and every order still passes the risk gate. Schedules and prompts in `ops/scheduled-tasks.md`
+- [ ] (optional, not built) S7b insider cluster buys from free SEC EDGAR Form 4 data, through Gate 1 first. Quiver/S7a dropped.
+- [ ] After switch-on: watch Pro usage per run; tune how many symbols the AI analyses
+- **Switch-on (after the Phase 3 check):** enable S5 and S6 in `config/sleeves.yaml`, create the four scheduled tasks, and do a first "Run now" of each while watching.
 - **Exit:** AI sleeves trading on paper for 2 weeks without stalled runs or usage-limit problems.
 
 ### Phase 4b: Add OANDA (forex) and Liquid (~1 week, once Phases 3–4 run smoothly)

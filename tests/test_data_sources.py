@@ -33,7 +33,7 @@ def test_news_is_stored_once_and_filtered_by_symbol_and_age(journal):
 
 class FakeTicker:
     info = {"shortName": "Example Corp", "trailingPE": 20.0, "profitMargins": 0.25, "revenueGrowth": float("nan"),
-            "dividendYield": 0.8}
+            "dividendYield": 0.8, "priceToBook": 0.0}
 
     @property
     def quarterly_income_stmt(self):
@@ -47,6 +47,7 @@ def test_fundamentals_snapshot_is_clean_and_comparable():
     assert snap["name"] == "Example Corp" and snap["pe_trailing"] == 20.0
     assert snap["revenue_growth_yoy"] is None          # NaN from Yahoo becomes null, not a fake number
     assert snap["dividend_yield_pct"] == 0.8            # Yahoo already reports this one in percent
+    assert snap["price_to_book"] is None                # a 0.0 ratio means "unknown", not a bargain
     assert snap["quarters"][0] == {"quarter_end": "2026-06-30", "revenue": 120, "operating_income": None,
                                    "net_income": 30, "eps_diluted": None}
     assert abs(snap["revenue_growth_same_quarter_last_year"] - 0.2) < 1e-9

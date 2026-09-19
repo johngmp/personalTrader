@@ -458,6 +458,14 @@ def cmd_signal(settings: Settings, args: argparse.Namespace) -> int:
             print("usage: trader signal submit FILE")
             return 2
         raw = json.loads(Path(args.file).read_text())
+        if args.action == "validate":
+            try:
+                sig = signals.validate(raw, settings, journal)
+            except signals.SignalRejected as exc:
+                print(f"INVALID: {exc}")
+                return 1
+            print(f"VALID {sig.kind} for {sig.sleeve} (not recorded; use `signal submit` to record it)")
+            return 0
         try:
             sig = signals.submit(raw, settings, journal)
         except signals.SignalRejected as exc:
@@ -481,6 +489,14 @@ def cmd_notify(settings: Settings, args: argparse.Namespace) -> int:
         return 1
     for i in range(0, len(text), 3800):  # Telegram's message size limit
         notifier.send(text[i:i + 3800])
+    if args.digest:  # the AI digest was sent, so the engine's plain 7am summary is skipped today
+        from zoneinfo import ZoneInfo
+
+        journal = Journal(settings.journal_path)
+        try:
+            journal.kv_set("last_digest", str(datetime.now(ZoneInfo("Australia/Sydney")).date()))
+        finally:
+            journal.close()
     print("sent")
     return 0
 
@@ -541,10 +557,11 @@ def main(argv: list[str] | None = None) -> int:
     p_tech = sub.add_parser("technicals", help="technical snapshot (JSON)")
     p_tech.add_argument("symbols", help="comma-separated")
     p_sig = sub.add_parser("signal", help="submit or list AI signals")
-    p_sig.add_argument("action", choices=["submit", "list"])
+    p_sig.add_argument("action", choices=["submit", "validate", "list"])
     p_sig.add_argument("file", nargs="?")
     p_note = sub.add_parser("notify", help="send a Telegram message")
     p_note.add_argument("--file")
+    p_note.add_argument("--digest", action="store_true", help="this is today's digest (engine skips its own)")
     p_note.add_argument("text", nargs="*")
     p_run = sub.add_parser("run", help="one engine cycle")
     p_run.add_argument("--dry-run", action="store_true", help="show what would happen; send nothing")
