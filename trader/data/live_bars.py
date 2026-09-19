@@ -43,10 +43,18 @@ class AlpacaDailyBars:
     def __init__(self, api_key: str, secret_key: str) -> None:
         from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 
-        self._stocks = StockHistoricalDataClient(api_key, secret_key)
-        self._crypto = CryptoHistoricalDataClient(api_key, secret_key)
+        from trader.brokers.alpaca import with_timeout
+
+        self._stocks = with_timeout(StockHistoricalDataClient(api_key, secret_key))
+        self._crypto = with_timeout(CryptoHistoricalDataClient(api_key, secret_key))
 
     def completed_bars(self, symbol: str, asset_class: AssetClass, now: datetime,
+                       market: MarketClock | None) -> pd.DataFrame:
+        from trader.brokers.alpaca import _retry_reads
+
+        return _retry_reads(self._completed_bars)(symbol, asset_class, now, market)
+
+    def _completed_bars(self, symbol: str, asset_class: AssetClass, now: datetime,
                        market: MarketClock | None) -> pd.DataFrame:
         from alpaca.data.enums import Adjustment, DataFeed
         from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest

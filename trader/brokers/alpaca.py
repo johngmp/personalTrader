@@ -80,6 +80,28 @@ def check_paper_credentials(api_key: str) -> None:
         raise LiveTradingRefused("ALPACA_PAPER_TRADE is set to false. This system only trades on paper.")
 
 
+HTTP_TIMEOUT_S = 20
+
+
+def with_timeout(client, seconds: float = HTTP_TIMEOUT_S):
+    """alpaca-py sends requests with NO timeout, so one stuck connection can freeze the engine (it happened on
+    2026-09-19: a price request hung for ~17 minutes). Give every request on this client a time limit."""
+    from requests.adapters import HTTPAdapter
+
+    class _TimeoutAdapter(HTTPAdapter):
+        def send(self, request, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = seconds
+            return super().send(request, **kwargs)
+
+    session = getattr(client, "_session", None)
+    if session is not None:
+        adapter = _TimeoutAdapter()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+    return client
+
+
 def _retry_reads(fn):
     """Retry a READ-ONLY call once after a short pause if the connection drops (never used for orders)."""
     import functools
@@ -132,13 +154,13 @@ class AlpacaBroker(Broker):
 
     def __init__(self, api_key: str, secret_key: str) -> None:
         check_paper_credentials(api_key)
-        self._trading = TradingClient(api_key, secret_key, paper=True)
+        self._trading = with_timeout(TradingClient(api_key, secret_key, paper=True))
         base_url = getattr(self._trading, "_base_url", PAPER_BASE_URL)
         base_url = str(getattr(base_url, "value", base_url))
         if "paper" not in base_url:
             raise LiveTradingRefused(f"Alpaca client points at {base_url}, not the paper endpoint.")
-        self._stocks = StockHistoricalDataClient(api_key, secret_key)
-        self._crypto = CryptoHistoricalDataClient(api_key, secret_key)
+        self._stocks = with_timeout(StockHistoricalDataClient(api_key, secret_key))
+        self._crypto = with_timeout(CryptoHistoricalDataClient(api_key, secret_key))
 
     @property
     def is_paper(self) -> bool:

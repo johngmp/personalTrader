@@ -48,7 +48,9 @@ class AlpacaNews:
     def __init__(self, api_key: str, secret_key: str) -> None:
         from alpaca.data.historical.news import NewsClient
 
-        self._client = NewsClient(api_key, secret_key)
+        from trader.brokers.alpaca import with_timeout
+
+        self._client = with_timeout(NewsClient(api_key, secret_key))
 
     def fetch(self, symbols: list[str], since: datetime, limit: int = 50) -> list[NewsItem]:
         from alpaca.data.requests import NewsRequest

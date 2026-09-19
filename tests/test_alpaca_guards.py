@@ -35,3 +35,26 @@ def test_paper_key_builds_a_paper_client(monkeypatch):
 )
 def test_crypto_symbols_are_normalised(raw, asset_class, expected):
     assert from_alpaca_symbol(raw, asset_class) == expected
+
+
+def test_every_alpaca_request_gets_a_timeout(monkeypatch):
+    """Regression: alpaca-py has no request timeout; a stuck request once froze a run for ~17 minutes."""
+    from requests.adapters import HTTPAdapter
+
+    from trader.brokers.alpaca import HTTP_TIMEOUT_S
+
+    import requests
+
+    seen = []
+
+    def fake_send(self, request, **kw):
+        seen.append(kw.get("timeout"))
+        response = requests.Response()
+        response.status_code, response._content, response.url = 200, b"{}", request.url
+        return response
+
+    monkeypatch.setattr(HTTPAdapter, "send", fake_send)
+    broker = AlpacaBroker("PKXXXXXXXXXXXXXX", "secret")
+    for client in (broker._trading, broker._stocks, broker._crypto):
+        client._session.send(requests.Request("GET", "https://paper-api.alpaca.markets/v2/clock").prepare())
+    assert seen == [HTTP_TIMEOUT_S] * 3
