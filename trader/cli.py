@@ -230,7 +230,6 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     from trader.engine.live import Coordinator, Engine, EngineBusy
     from trader.notify.telegram import NullNotifier, from_env
 
-    brokers = configured_brokers(settings)
     notifier = from_env()
     if args.dry_run:
         tmp = Path(tempfile.mkdtemp(prefix="trader-dry-run-"))
@@ -240,10 +239,12 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
         if settings.kill_switch_path.exists():
             shutil.copy(settings.kill_switch_path, tmp / settings.risk.guards.kill_switch_file)
         settings = settings.model_copy(update={"root": tmp})
-        brokers = [(DryRunBroker(b), bars) for b, bars in brokers]
         notifier = NullNotifier()
     journal = Journal(settings.journal_path)
     try:
+        brokers = configured_brokers(settings, journal)
+        if args.dry_run:  # shadow sleeves send nothing anyway; wrap the real brokers so nothing is sent
+            brokers = [(b if b.name == "shadow" else DryRunBroker(b), bars) for b, bars in brokers]
         engines = [Engine(settings, b, journal, bars, notifier=notifier) for b, bars in brokers]  # type: ignore[arg-type]
         try:
             reports = Coordinator(settings, journal, engines, notifier).run_once()
@@ -252,6 +253,11 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
             return 0
         stamp = f"{datetime.now():%Y-%m-%d %H:%M}"
         problems = 0
+        if not args.dry_run:
+            from trader.notify.heartbeat import ping
+
+            all_problems = [p for r in reports for p in r.problems]
+            ping(ok=not all_problems, message="\n".join(all_problems) or " · ".join(r.summary() for r in reports))
         for engine, report in zip(engines, reports):
             print(f"{stamp} {'DRY RUN ' if args.dry_run else ''}{engine.broker.name}: {report.summary()}")
             for f in report.fills:
@@ -261,7 +267,7 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
             for p in report.problems:
                 print(f"  PROBLEM: {p}")
             problems += len(report.problems)
-            if args.dry_run:
+            if args.dry_run and hasattr(engine.broker, "would_send"):  # shadow never sends anything anyway
                 sent = engine.broker.would_send  # type: ignore[attr-defined]
                 print("  Would send (nothing was sent):" if sent else "  Would send nothing.")
                 for o in sent:
@@ -366,7 +372,7 @@ def _read_only_engines(settings: Settings, journal: Journal):
     from trader.engine.brokers_setup import configured_brokers
     from trader.engine.live import Engine
 
-    return [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings)]  # type: ignore[arg-type]
+    return [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings, journal)]  # type: ignore[arg-type]
 
 
 def cmd_context(settings: Settings, args: argparse.Namespace) -> int:
@@ -532,9 +538,9 @@ def main(argv: list[str] | None = None) -> int:
     p_data = sub.add_parser("data", help="download/refresh daily price history for research")
     p_data.add_argument("--refresh", action="store_true", help="re-download even if the cache is fresh")
     p_bt = sub.add_parser("backtest", help="one backtest with default settings")
-    p_bt.add_argument("strategy", choices=["S1", "S2", "S3", "S4"])
+    p_bt.add_argument("strategy", choices=["S1", "S2", "S3", "S4", "S8"])
     p_g1 = sub.add_parser("gate1", help="full Gate 1 evaluation with HTML report")
-    p_g1.add_argument("strategy", choices=["S1", "S2", "S3", "S4", "all"])
+    p_g1.add_argument("strategy", choices=["S1", "S2", "S3", "S4", "S8", "all"])
     p_g1.add_argument("--refresh", action="store_true", help="re-download price history first")
     p_news = sub.add_parser("news", help="latest headlines for enabled symbols (or --symbols)")
     p_news.add_argument("--symbols", help="comma-separated, e.g. SPY,BTC/USD")

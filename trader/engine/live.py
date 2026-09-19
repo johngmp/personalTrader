@@ -133,7 +133,8 @@ class Engine:
     def _sync_fills(self, report: RunReport) -> None:
         for fill in self.executor.sync_open_orders():
             report.fills.append(fill)
-            self.notifier.send(_fill_text(fill))
+            if self.broker.name != "shadow":  # shadow trades are research: logged, not pushed to your phone
+                self.notifier.send(_fill_text(fill))
 
     def _reconcile(self, report: RunReport) -> None:
         """Journal holdings (this broker's sleeves together) must equal the broker's position in each symbol."""
@@ -165,7 +166,8 @@ class Engine:
                 self._cancel_stop(state)
                 self.journal.delete_position_state(state["sleeve_id"], state["symbol"])
                 report.actions.append(f"{state['sleeve_id']} {state['symbol']} position closed")
-                self.notifier.send(f"✅ {state['sleeve_id']} closed its {state['symbol']} position.")
+                if self.broker.name != "shadow":
+                    self.notifier.send(f"✅ {state['sleeve_id']} closed its {state['symbol']} position.")
 
     def _protect(self, report: RunReport) -> None:
         market = self.broker.get_clock()
@@ -205,7 +207,12 @@ class Engine:
         now = self.clock()
         market = self.broker.get_clock()
         for sleeve in self._live_sleeves():
-            self._decide_sleeve(sleeve, now, market, report)
+            try:  # one sleeve's problem (e.g. missing data) must not stop the others deciding
+                self._decide_sleeve(sleeve, now, market, report)
+            except Exception as exc:
+                msg = f"{sleeve.id} decisions failed: {type(exc).__name__}: {exc}"
+                report.problems.append(msg)
+                self.journal.log(msg, level="error")
 
     def _record_equity(self, report: RunReport) -> None:
         account = self.broker.get_account()  # account history for the dashboard and the drawdown limit
@@ -422,8 +429,9 @@ class Engine:
             report.actions.append(f"sent {what}")
             for fill in result.fills or []:
                 report.fills.append(fill)
-                self.notifier.send(_fill_text(fill, order.reason))
-            if not result.fills and order.order_type is OrderType.MARKET:
+                if self.broker.name != "shadow":
+                    self.notifier.send(_fill_text(fill, order.reason))
+            if not result.fills and order.order_type is OrderType.MARKET and self.broker.name != "shadow":
                 self.notifier.send(f"🕒 Queued {what}; fills when the market opens.")
         return result
 

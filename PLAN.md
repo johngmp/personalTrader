@@ -378,6 +378,13 @@ personalTrader/
 - [ ] New sleeves start their own 90-day Gate 2 clock
 - **Exit:** both venues reconcile cleanly for 7 days.
 
+### Improvements added 2026-09-19 (from the "how to improve" review)
+- [x] **Shadow strategies** (`broker: shadow`): full engine + risk gate on live Alpaca prices, no orders sent; research before a paper slice. Separate dashboard chart, quiet on Telegram, excluded from account totals
+- [x] **S8 diversified trend following** (19 markets across stocks, bonds, real assets, sectors, the dollar and crypto): Gate 1 PASS (out-of-sample Sharpe 0.98 vs 0.73; walk-forward 0.77; worst drop −22.7%). Running in **shadow** from 2026-09-19; a real paper slice needs your OK
+- [x] **Outside heartbeat** (`HEARTBEAT_URL`, e.g. healthchecks.io): alerts you if the engine stops running, even if the Mac is off
+- [x] Engine: one sleeve failing no longer stops the other sleeves' decisions
+- [ ] Next candidates: volatility targeting; market-regime filter experiment; FX carry + trend; post-earnings drift; MAE/MFE per trade; deflated Sharpe in Gate 1; `vault/Knowledge/` research notes
+
 ### Phase 5: Tournament (≥ 90 days, mostly waiting)
 - [ ] Weekly scoreboard in Telegram + dashboard
 - [ ] Monthly experiment session with you: run the proposed experiments in the research lab; approved ones become challenger versions (e.g. S3 v2 vs v1) logged in `Changelog.md`

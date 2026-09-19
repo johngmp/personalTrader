@@ -61,6 +61,26 @@ class TrendFollowing(Strategy):
 
 
 @dataclass
+class BroadTrend(TrendFollowing):
+    """S8: the same trend rules across ~20 markets that tend not to move together.
+
+    Research on trend following (e.g. Hurst, Ooi & Pedersen, "A Century of Evidence on Trend-Following
+    Investing") finds its edge comes mostly from diversification across many markets, not from one asset.
+    """
+
+    name: ClassVar[str] = "S8"
+    title: ClassVar[str] = "Trend following, diversified"
+    default_symbols: ClassVar[list[str]] = [
+        "SPY", "QQQ", "IWM", "EFA", "EEM",          # stock indices: US large, tech, small; developed; emerging
+        "TLT", "IEF",                                # US government bonds: long and medium
+        "GLD", "SLV", "DBC", "USO", "VNQ",           # gold, silver, broad commodities, oil, real estate
+        "XLE", "XLU", "XLV",                         # energy, utilities, health care sectors
+        "UUP",                                       # US dollar
+        "BTC/USD", "ETH/USD", "SOL/USD",             # crypto
+    ]
+
+
+@dataclass
 class FXTrend(TrendFollowing):
     """S4: the same trend rules on currency pairs and gold (goes live with OANDA in Phase 4b)."""
 

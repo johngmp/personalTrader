@@ -92,3 +92,14 @@ sleeves:
       max_leverage: 1.0
       require_stop: true
       max_drawdown_disable_pct: 25
+
+  # --- Shadow tests: live prices, NO orders sent (research before a paper slice) --------------------
+  - id: S8
+    name: Trend following, diversified (19 markets)
+    enabled: true            # shadow only: safe to run; promoting it to real paper trading needs your OK
+    broker: shadow
+    capital_usd: 10000
+    symbols: [SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD, SLV, DBC, USO, VNQ, XLE, XLU, XLV, UUP, BTC/USD, ETH/USD, SOL/USD]
+    benchmark: B0
+    strategy: S8
+    params: {fast: 20, slow: 200, atr_mult: 2.5}   # chosen by Gate 1 (2026-09-19): PASS, out-of-sample Sharpe 0.98

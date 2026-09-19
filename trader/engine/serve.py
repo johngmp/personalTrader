@@ -53,11 +53,9 @@ def serve(settings: Settings, port: int = 8050) -> None:
 
     from trader.engine.brokers_setup import configured_brokers
 
-    brokers = configured_brokers(settings)
-
     def build_engine(journal: Journal) -> list[Engine]:
         # Used only to read values; run_once is never called here.
-        return [Engine(settings, broker, journal, bars) for broker, bars in brokers]
+        return [Engine(settings, broker, journal, bars) for broker, bars in configured_brokers(settings, journal)]
 
     server = HTTPServer((HOST, port), make_handler(settings, build_engine))
     print(f"Dashboard at http://localhost:{port} (Ctrl+C to stop)", flush=True)

@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 # Categorical colours validated on the dark surface (entity keeps its colour everywhere).
 SERIES_COLORS = {"alpaca": "#c98500", "oanda": "#9085e9", "S1": "#3987e5", "B0": "#d95926", "S4": "#199e70"}
-BROKER_LABELS = {"alpaca": "Alpaca (stocks & crypto)", "oanda": "OANDA (forex)"}
+SHADOW_COLOR = "#9085e9"  # shadow strategies get their own chart (a 4th colour in one chart fails the CVD check)
+BROKER_LABELS = {"alpaca": "Alpaca (stocks & crypto)", "oanda": "OANDA (forex)", "shadow": "Shadow (no orders)"}
 
 
 def _money(x: float | None, signed: bool = False, cents: bool = True) -> str:
@@ -63,7 +64,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
     risk = settings.risk.account
     kill_switch = engines[0].kill_switch
     accounts, account_series = [], {}
-    for engine in engines:
+    for engine in (e for e in engines if e.broker.name != "shadow"):  # shadow isn't an account
         acct = engine.executor.account()
         snaps = journal.conn.execute("SELECT ts, equity FROM equity_snapshots WHERE broker=? ORDER BY ts",
                                      (engine.broker.name,)).fetchall()
@@ -156,6 +157,8 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "charts": {
             "account": account_series,
             "sleeves": {sid: _downsample(pts) for sid, pts in sleeve_series.items() if sid in SERIES_COLORS},
+            "shadow": {sid: _downsample(pts) for sid, pts in sleeve_series.items()
+                       if settings.sleeves.get(sid) is not None and settings.sleeves[sid].broker == "shadow"},
         },
     }
 
@@ -196,8 +199,8 @@ def render(d: dict) -> str:
         _tile("Fees paid", _money(d["fees"]), "charged by Alpaca"),
     ])
     sleeve_cards = "".join(
-        f"""<div class="card sleeve"><div class="row"><span class="dot" style="background:{SERIES_COLORS.get(s['id'], '#898781')}"></span>
-<b>{s['id']}</b><span class="subtle">{html.escape(s['name'])}</span>{'<span class="pill closed">benchmark</span>' if s['benchmark'] else ''}</div>
+        f"""<div class="card sleeve"><div class="row"><span class="dot" style="background:{SHADOW_COLOR if s.get('broker') == 'shadow' else SERIES_COLORS.get(s['id'], '#898781')}"></span>
+<b>{s['id']}</b><span class="subtle">{html.escape(s['name'])}</span>{'<span class="pill closed">benchmark</span>' if s['benchmark'] else ''}{'<span class="pill open">shadow · no orders</span>' if s.get('broker') == 'shadow' else ''}</div>
 <div class="big">{_money(s['equity'])}</div>
 <div class="row gap"><span class="{_tone(s['return'])}">{_pct(s['return'])}</span>
 <span class="subtle">after est. costs {_pct(s['adjusted_return'])}</span></div>
@@ -220,8 +223,16 @@ def render(d: dict) -> str:
                         for w in d["warnings"]) or "<li class='subtle'>No warnings.</li>"
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
     total_base = d["start_equity"] or 1
-    chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"], "colors": SERIES_COLORS,
+    chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"],
+                             "shadow": d["charts"]["shadow"], "colors": {**SERIES_COLORS, "shadow": SHADOW_COLOR},
                              "labels": BROKER_LABELS})
+    shadow_ids = sorted(d["charts"]["shadow"])
+    shadow_card = "" if not shadow_ids else f"""<div class="card chartcard"><div class="row"><div>
+<div class="label">Shadow tests · live prices, no orders sent</div>
+<div class="subtle">{html.escape(", ".join(shadow_ids))}: value of each $10,000 strategy. Research only; not in the account totals.</div>
+</div><div class="spacer"></div><div class="ranges" data-for="shadow"><button data-r="1W">1W</button><button data-r="1M">1M</button>
+<button data-r="All" class="on">All</button></div></div>
+<div class="chart" id="shadow-chart" aria-label="Shadow strategy values over time"></div></div>"""
     breakdown = " · ".join(f"<span><i class='sw' style='background:{SERIES_COLORS.get(x['broker'], '#898781')}'></i>"
                            f"{html.escape(x['label'])} {_money(x['account'].equity)}</span>" for x in d["accounts"])
     legend_sleeves = "".join(f"<span><i style='background:{SERIES_COLORS[s['id']]}'></i>{s['id']} {html.escape(s['name'])}</span>"
@@ -272,6 +283,7 @@ def render(d: dict) -> str:
 <button data-r="3M">3M</button><button data-r="All" class="on">All</button></div></div>
 <div class="legend">{legend_sleeves}</div>
 <div class="chart" id="sleeves-chart" aria-label="Sleeve values over time"></div></div>
+{shadow_card}
 <h2>Open positions</h2><div class="card scroll"><table>{trade_head}{open_rows or "<tr><td colspan=13 class='subtle'>No open positions.</td></tr>"}</table></div>
 </section>
 <section data-panel="trades" hidden><h2>Trading history</h2>
@@ -457,9 +469,12 @@ JS = r"""
       ks.map(function (k) { return { name: ks.length > 1 ? (data.labels[k] || k).split(' (')[0] : 'Account',
         color: data.colors[k], pts: data.account[k] }; }), r, ks.length === 1); },
     sleeves: function (r) { draw(document.getElementById('sleeves-chart'), Object.keys(data.sleeves).sort().map(function (k) {
-      return { name: k, color: data.colors[k], pts: data.sleeves[k] }; }), r, false); }
+      return { name: k, color: data.colors[k], pts: data.sleeves[k] }; }), r, false); },
+    shadow: function (r) { var el = document.getElementById('shadow-chart'); if (!el) return;
+      var ks = Object.keys(data.shadow).sort();
+      draw(el, ks.map(function (k) { return { name: k, color: data.colors.shadow, pts: data.shadow[k] }; }), r, ks.length === 1); }
   };
-  var current = { account: 'All', sleeves: 'All' };
+  var current = { account: 'All', sleeves: 'All', shadow: 'All' };
   document.querySelectorAll('.ranges').forEach(function (box) {
     box.addEventListener('click', function (ev) {
       var b = ev.target.closest('button'); if (!b) return;
@@ -467,7 +482,7 @@ JS = r"""
       current[box.dataset.for] = b.dataset.r; charts[box.dataset.for](b.dataset.r);
     });
   });
-  function redraw() { charts.account(current.account); charts.sleeves(current.sleeves); }
+  function redraw() { charts.account(current.account); charts.sleeves(current.sleeves); charts.shadow(current.shadow); }
   window.addEventListener('resize', redraw); redraw();
   document.querySelectorAll('.tab').forEach(function (tab) {
     tab.addEventListener('click', function () {

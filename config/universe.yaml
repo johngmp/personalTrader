@@ -10,6 +10,19 @@ symbols:
   BIL: us_equity
   BTC/USD: crypto
   ETH/USD: crypto
+  SOL/USD: crypto
+  # Extra markets for S8 (diversified trend following)
+  IWM: us_equity
+  EEM: us_equity
+  IEF: us_equity
+  SLV: us_equity
+  DBC: us_equity
+  USO: us_equity
+  VNQ: us_equity
+  XLE: us_equity
+  XLU: us_equity
+  XLV: us_equity
+  UUP: us_equity
   # Large US companies for S6 (AI investor panel)
   AAPL: us_equity
   MSFT: us_equity
@@ -31,6 +44,6 @@ symbols:
 # Symbols that tend to move together. Their combined exposure is capped by
 # account.max_correlated_exposure_pct in risk.yaml.
 correlation_groups:
-  crypto: [BTC/USD, ETH/USD]
+  crypto: [BTC/USD, ETH/USD, SOL/USD]
   us_growth: [QQQ, SPY]
   us_mega_tech: [QQQ, AAPL, MSFT, NVDA, GOOGL, AMZN, META]

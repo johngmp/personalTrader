@@ -28,7 +28,7 @@ from trader.strategies.base import Strategy
 RESEARCH_LOG = PROJECT_ROOT / "reports" / "research_log.jsonl"
 
 # Benchmarks per strategy: None = equal-weight buy-and-hold of the strategy's own symbols; [] = cash.
-BENCHMARKS: dict[str, list[str] | None] = {"S1": None, "S2": ["SPY"], "S3": ["SPY"], "S4": []}
+BENCHMARKS: dict[str, list[str] | None] = {"S1": None, "S2": ["SPY"], "S3": ["SPY"], "S4": [], "S8": None}
 
 
 @dataclass

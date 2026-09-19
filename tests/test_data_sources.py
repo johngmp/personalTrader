@@ -97,3 +97,17 @@ def test_telegram_commands_only_from_the_owner_chat():
     bot = Telegram("TOKEN", "42", httpx.Client(transport=httpx.MockTransport(handler)))
     assert bot.poll_commands(store) == ["/status"]
     assert store["telegram_offset"] == "7"
+
+
+def test_heartbeat_pings_success_or_fail(monkeypatch):
+    from trader.notify import heartbeat
+
+    calls = []
+    monkeypatch.setattr(heartbeat.httpx, "post", lambda url, content, timeout: calls.append(url))
+    monkeypatch.delenv("HEARTBEAT_URL", raising=False)
+    heartbeat.ping(True)
+    assert calls == []                                   # not configured: silent
+    monkeypatch.setenv("HEARTBEAT_URL", "https://hc-ping.com/abc")
+    heartbeat.ping(True)
+    heartbeat.ping(False, "stops failed")
+    assert calls == ["https://hc-ping.com/abc", "https://hc-ping.com/abc/fail"]

@@ -23,6 +23,7 @@ YAHOO_TICKERS: dict[str, str] = {
     "BIL": "BIL",
     "BTC/USD": "BTC-USD",
     "ETH/USD": "ETH-USD",
+    "SOL/USD": "SOL-USD",
     "EUR/USD": "EURUSD=X",
     "AUD/USD": "AUDUSD=X",
     "GBP/USD": "GBPUSD=X",
