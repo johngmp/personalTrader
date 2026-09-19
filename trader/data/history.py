@@ -41,7 +41,8 @@ def _cache_path(symbol: str, cache_dir: Path) -> Path:
 def _download(symbol: str) -> pd.DataFrame:
     import yfinance as yf
 
-    ticker = YAHOO_TICKERS.get(symbol)
+    # US stocks use their own ticker (BRK.B -> BRK-B); crypto/forex need an explicit mapping.
+    ticker = YAHOO_TICKERS.get(symbol) or (symbol.replace(".", "-") if "/" not in symbol else None)
     if ticker is None:
         raise KeyError(f"no Yahoo ticker mapped for {symbol}; add it to YAHOO_TICKERS")
     df = yf.download(ticker, start="1995-01-01", auto_adjust=True, progress=False, multi_level_index=False)

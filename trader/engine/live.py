@@ -17,7 +17,7 @@ from __future__ import annotations
 import fcntl
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -41,6 +41,7 @@ CRYPTO_STOP_LIMIT_GAP = 0.03    # crypto stop-limit floor 3% below the stop; the
 STOP_MOVE_MIN = 0.002           # only move a resting stop when it changes by >0.2%
 MIN_ORDER_USD = 1.0
 SIZING_MARGIN = 0.98            # size entries 2% under the limits, so small price moves can't breach them
+AI_VERDICT_WAIT = timedelta(hours=8)  # analyst-team entries skip if the AI hasn't answered by then
 
 
 @dataclass
@@ -246,6 +247,14 @@ class Engine:
             report.problems.append(f"{sleeve.id}: no price history for {missing}")
             return
         strategy.setup(bars)
+        from trader.signals import store as signals
+
+        new_weights = None
+        if sleeve.ai == "investor-panel":
+            new_weights = signals.latest_weights(self.journal, sleeve.id, now)
+            if new_weights is None:
+                return  # nothing to do until the weekly investor panel submits new weights
+            strategy.weights = {w.symbol: w.weight for w in new_weights[1].weights}  # type: ignore[attr-defined]
 
         due: dict[pd.Timestamp, list[str]] = {}
         for symbol in sleeve.symbols:
@@ -253,7 +262,7 @@ class Engine:
                 continue
             latest = bars[symbol].index[-1]
             last = self.journal.last_decided_bar(sleeve.id, symbol)
-            if last is not None and latest <= pd.Timestamp(last):
+            if last is not None and latest <= pd.Timestamp(last) and new_weights is None:
                 continue
             self._advance_state(sleeve.id, symbol, bars[symbol], last)
             due.setdefault(latest, []).append(symbol)
@@ -279,19 +288,61 @@ class Engine:
                         self.journal.upsert_position_state(sleeve.id, symbol, stop=new_stop)
             prices = live
             current = {s: q * prices[s] / equity for s, q in held.items() if equity > 0}
+            deferred: set[str] = set()
             for symbol, weight in plan_weights(targets, current, prices, limits).items():
                 reason = targets[symbol].reason
                 if weight <= 0:
                     self._exit(sleeve.id, symbol, reason, report)
                 elif symbol not in held:
+                    if sleeve.ai == "analyst-team":
+                        reason = self._ai_gate(sleeve.id, symbol, date, targets[symbol], strategy, bars, now,
+                                               report, deferred)
+                        if reason is None:
+                            continue
                     dollars = weight * equity * SIZING_MARGIN
                     self._enter(sleeve.id, symbol, dollars, prices[symbol], targets[symbol].stop, reason, report)
                 else:
                     self._resize(sleeve.id, symbol, weight * equity / prices[symbol] - held[symbol], prices[symbol],
                                  reason, report)
             for symbol in symbols:
-                self.journal.set_decided_bar(sleeve.id, symbol, str(date.date()))
-            report.actions.append(f"{sleeve.id} decided on {date.date()} bar for {', '.join(symbols)}")
+                if symbol not in deferred:  # candidates waiting for an AI verdict are re-checked next run
+                    self.journal.set_decided_bar(sleeve.id, symbol, str(date.date()))
+            report.actions.append(f"{sleeve.id} decided on {date.date()} bar for {', '.join(symbols)}"
+                                  + (f" (waiting for AI on {', '.join(sorted(deferred))})" if deferred else ""))
+        if new_weights is not None:
+            signals.mark_applied(self.journal, new_weights[0])
+            report.actions.append(f"{sleeve.id} applied investor-panel weights {new_weights[0]}")
+
+    def _ai_gate(self, sleeve_id: str, symbol: str, date: pd.Timestamp, target, strategy: Strategy,
+                 bars: dict[str, pd.DataFrame], now: datetime, report: RunReport, deferred: set[str]) -> str | None:
+        """Entries in analyst-team sleeves need an AI 'approve'. Returns the reason to trade with, or None."""
+        from trader.signals import store as signals
+
+        bar = str(date.date())
+        verdict = signals.verdict_for(self.journal, sleeve_id, symbol, bar)
+        if verdict is None:
+            age = signals.request_age(self.journal, sleeve_id, symbol, bar, now)
+            if age is None:
+                row = strategy.row(symbol, date) or {}
+                closes = bars[symbol]["close"]
+                context = {"rule_reason": target.reason, "close": float(closes.iloc[-1]), "stop": target.stop,
+                           "indicators": {k: (None if pd.isna(v) else round(float(v), 6)) for k, v in row.items()},
+                           "return_20d": float(closes.iloc[-1] / closes.iloc[-21] - 1) if len(closes) > 21 else None,
+                           "return_60d": float(closes.iloc[-1] / closes.iloc[-61] - 1) if len(closes) > 61 else None}
+                signals.request_verdict(self.journal, sleeve_id, symbol, bar, context, now)
+                report.actions.append(f"{sleeve_id} asked the AI analyst team about {symbol}")
+                deferred.add(symbol)
+            elif age > AI_VERDICT_WAIT:
+                signals.expire_request(self.journal, sleeve_id, symbol, bar)
+                report.actions.append(f"{sleeve_id} skipped {symbol}: no AI verdict within {AI_VERDICT_WAIT}")
+            else:
+                deferred.add(symbol)
+            return None
+        if verdict.verdict == "veto":
+            report.actions.append(f"{sleeve_id} AI vetoed {symbol} ({verdict.confidence:.0%}): {verdict.reasoning[:120]}")
+            self.journal.log(f"{sleeve_id} AI veto {symbol} {bar}: {verdict.reasoning[:300]}")
+            return None
+        return f"{target.reason}; AI approved ({verdict.confidence:.0%})"
 
     def _advance_state(self, sleeve_id: str, symbol: str, bars: pd.DataFrame, last_decided: str | None) -> None:
         """Count the new bars since the last decision for an open position (days held, highest close)."""

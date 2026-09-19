@@ -70,6 +70,9 @@ class SleeveConfig(_Strict):
     limits: SleeveLimits | None = None  # per-sleeve override of sleeve_defaults
     strategy: str | None = None         # strategy code the live engine runs (defaults to the sleeve id)
     params: dict[str, float | int | str] = Field(default_factory=dict)  # settings chosen by Gate 1
+    # AI involvement (Phase 4): "analyst-team" = rule entries need an AI approve/veto verdict first;
+    # "investor-panel" = target weights come from the weekly AI investor panel.
+    ai: Literal["analyst-team", "investor-panel"] | None = None
 
 
 class UniverseConfig(_Strict):

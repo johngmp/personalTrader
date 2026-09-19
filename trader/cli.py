@@ -14,6 +14,14 @@
   fundamentals X  company fundamentals snapshot (Yahoo); --json for AI skills
   serve           dashboard at http://localhost:8050 (read-only)
   telegram-setup  finds your chat ID for the bot in .env and sends a test message
+
+For the AI skills (Phase 4):
+  context --json          accounts, sleeves, positions, recent trades, signals, learnings version
+  candidates --json       entries waiting for an AI analyst-team verdict
+  technicals SYMBOL       trend / momentum / volatility snapshot
+  signal submit FILE      validate and record an AI signal (prints why if rejected)
+  signal list             recent AI signals and their status
+  notify [--file F] TEXT  send a Telegram message
 """
 
 from __future__ import annotations
@@ -354,6 +362,129 @@ def cmd_telegram_setup(settings: Settings, _: argparse.Namespace) -> int:
     return 0
 
 
+def _read_only_engines(settings: Settings, journal: Journal):
+    from trader.engine.brokers_setup import configured_brokers
+    from trader.engine.live import Engine
+
+    return [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings)]  # type: ignore[arg-type]
+
+
+def cmd_context(settings: Settings, args: argparse.Namespace) -> int:
+    import json
+
+    from trader.engine.dashboard import collect
+    from trader.signals import store as signals
+
+    journal = Journal(settings.journal_path)
+    try:
+        d = collect(settings, journal, _read_only_engines(settings, journal))
+        now = d["now"]
+        trips = []
+        for t in d["trips"]:
+            closed_recent = t.exit_ts and (now - datetime.fromisoformat(t.exit_ts)).days <= args.days
+            if t.is_open or closed_recent:
+                px = d["price"](t.symbol) if t.is_open else None
+                r = t.r_multiple(px)
+                trips.append({"trade_id": t.trade_id, "sleeve": t.sleeve_id, "symbol": t.symbol,
+                              "status": "open" if t.is_open else "closed", "entry_time": t.entry_ts,
+                              "entry_price": round(t.entry_price, 6), "exit_time": t.exit_ts,
+                              "exit_price": t.exit_price, "qty": t.buy_qty, "initial_stop": t.initial_stop,
+                              "pnl_usd": round(t.pnl(px), 2), "r_multiple": None if r is None else round(r, 2),
+                              "reason_in": t.entry_reason, "reason_out": t.exit_reason})
+        out = {
+            "now": now.isoformat(timespec="seconds"), "learnings_version": signals.learnings_version(),
+            "kill_switch": d["kill_switch"], "last_engine_run": d["last_run"],
+            "accounts": [{"broker": a["broker"], "equity": round(a["account"].equity, 2),
+                          "day_change_pct": round(a["day_pct"], 5), "drawdown_from_peak": round(a["drawdown"], 5)}
+                         for a in d["accounts"]],
+            "total_equity": round(d["total"], 2), "total_pnl_since_start": round(d["total_pnl"], 2),
+            "sleeves": [{k: (round(v, 5) if isinstance(v, float) else v) for k, v in s.items()} for s in d["sleeves"]],
+            "strategy_kpis": d["kpis"], "trades_open_or_closed_last_days": trips,
+            "open_orders": [dict(r) for r in journal.open_orders()],
+            "ai_signals_recent": signals.recent_signals(journal, 10),
+            "ai_requests_pending": signals.pending_requests(journal),
+            "warnings_recent": [dict(w) for w in d["warnings"]],
+            "disabled_sleeves": [{"id": s.id, "name": s.name, "ai": s.ai} for s in settings.sleeves.values()
+                                 if not s.enabled and s.id != "TEST"],
+        }
+    finally:
+        journal.close()
+    print(json.dumps(out, indent=1, default=str))
+    return 0
+
+
+def cmd_candidates(settings: Settings, args: argparse.Namespace) -> int:
+    import json
+
+    from trader.signals import store as signals
+
+    journal = Journal(settings.journal_path)
+    try:
+        pending = signals.pending_requests(journal, args.sleeve)
+    finally:
+        journal.close()
+    if args.json:
+        print(json.dumps({"learnings_version": signals.learnings_version(), "candidates": pending}, indent=1, default=str))
+    else:
+        print(f"{len(pending)} candidate(s) waiting for an AI verdict")
+        for p in pending:
+            print(f"  {p['sleeve_id']} {p['symbol']} (bar {p['bar_date']}): {p['context'].get('rule_reason')}")
+    return 0
+
+
+def cmd_technicals(settings: Settings, args: argparse.Namespace) -> int:
+    import json
+
+    from trader.research.technicals import snapshot
+
+    snaps = [snapshot(s.strip()) for s in args.symbols.split(",")]
+    print(json.dumps(snaps if len(snaps) > 1 else snaps[0], indent=1))
+    return 0
+
+
+def cmd_signal(settings: Settings, args: argparse.Namespace) -> int:
+    import json
+
+    from trader.signals import store as signals
+
+    journal = Journal(settings.journal_path)
+    try:
+        if args.action == "list":
+            for s in signals.recent_signals(journal, 20):
+                print(f"  {s['received_at'][:16]} {s['sleeve_id']:<4} {s['kind']:<15} bar {s['bar_date']} "
+                      f"{s['status']:<9} {s['reason'] or ''}")
+            return 0
+        if not args.file:
+            print("usage: trader signal submit FILE")
+            return 2
+        raw = json.loads(Path(args.file).read_text())
+        try:
+            sig = signals.submit(raw, settings, journal)
+        except signals.SignalRejected as exc:
+            print(f"REJECTED: {exc}")
+            return 1
+        n = len(sig.verdicts) or len(sig.weights)
+        print(f"ACCEPTED {sig.kind} {sig.id} for {sig.sleeve} ({n} item(s)). The engine acts on it within 15 minutes.")
+        return 0
+    finally:
+        journal.close()
+
+
+def cmd_notify(settings: Settings, args: argparse.Namespace) -> int:
+    from trader.notify.telegram import NullNotifier, from_env
+
+    load_secrets()  # loads .env (Telegram settings) into the environment
+    text = Path(args.file).read_text() if args.file else " ".join(args.text)
+    notifier = from_env()
+    if isinstance(notifier, NullNotifier):
+        print("Telegram is not set up (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env).")
+        return 1
+    for i in range(0, len(text), 3800):  # Telegram's message size limit
+        notifier.send(text[i:i + 3800])
+    print("sent")
+    return 0
+
+
 def cmd_halt(settings: Settings, args: argparse.Namespace) -> int:
     KillSwitch(settings.kill_switch_path).engage(args.reason)
     print(f"Kill switch ON. No new orders will be sent. Reason: {args.reason}")
@@ -401,6 +532,20 @@ def main(argv: list[str] | None = None) -> int:
     p_serve = sub.add_parser("serve", help="dashboard at http://localhost:8050")
     p_serve.add_argument("--port", type=int, default=8050)
     sub.add_parser("telegram-setup", help="connect the Telegram bot in .env and send a test message")
+    p_ctx = sub.add_parser("context", help="state for the AI skills (JSON)")
+    p_ctx.add_argument("--json", action="store_true", help="(always JSON)")
+    p_ctx.add_argument("--days", type=int, default=7, help="include trades closed in the last N days")
+    p_cand = sub.add_parser("candidates", help="entries waiting for an AI verdict")
+    p_cand.add_argument("--sleeve")
+    p_cand.add_argument("--json", action="store_true")
+    p_tech = sub.add_parser("technicals", help="technical snapshot (JSON)")
+    p_tech.add_argument("symbols", help="comma-separated")
+    p_sig = sub.add_parser("signal", help="submit or list AI signals")
+    p_sig.add_argument("action", choices=["submit", "list"])
+    p_sig.add_argument("file", nargs="?")
+    p_note = sub.add_parser("notify", help="send a Telegram message")
+    p_note.add_argument("--file")
+    p_note.add_argument("text", nargs="*")
     p_run = sub.add_parser("run", help="one engine cycle")
     p_run.add_argument("--dry-run", action="store_true", help="show what would happen; send nothing")
 
@@ -408,7 +553,8 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
                 "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
-                "serve": cmd_serve, "telegram-setup": cmd_telegram_setup}
+                "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
+                "candidates": cmd_candidates, "technicals": cmd_technicals, "signal": cmd_signal, "notify": cmd_notify}
     try:
         return handlers[args.command](load_settings(), args)
     except LiveTradingRefused as exc:

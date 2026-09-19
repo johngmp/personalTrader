@@ -63,3 +63,32 @@ sleeves:
     capital_usd: 10000
     symbols: [EUR/USD, AUD/USD, GBP/USD, XAU/USD]   # USD-quoted only; USD/JPY dropped (its P&L is in yen)
     params: {fast: 50, slow: 150, atr_mult: 3.5}    # chosen by Gate 1 (re-run 2026-09-18 on these 4 symbols)
+
+  # --- Phase 4: AI strategies (built 2026-09-19; switched on after the Phase 3 check) ---------------
+  - id: S5
+    name: Trend following + AI analyst veto
+    enabled: false
+    broker: alpaca
+    capital_usd: 5000            # AI sleeves get smaller slices (risk.yaml ai_sleeve_capital_pct)
+    symbols: [BTC/USD, ETH/USD, QQQ, SPY]
+    benchmark: S1                # A/B test: same rules as S1, plus the AI's approve/veto on entries
+    strategy: S1
+    params: {fast: 20, slow: 200, atr_mult: 2.5}
+    ai: analyst-team
+
+  - id: S6
+    name: AI investor panel
+    enabled: false
+    broker: alpaca
+    capital_usd: 5000
+    symbols: [AAPL, MSFT, NVDA, GOOGL, AMZN, META, JPM, BRK.B, JNJ, XOM]
+    benchmark: SPY
+    strategy: S6
+    params: {stop_atr: 3.0}
+    ai: investor-panel
+    limits:
+      max_position_pct_of_sleeve: 15
+      risk_per_trade_pct: 1
+      max_leverage: 1.0
+      require_stop: true
+      max_drawdown_disable_pct: 25

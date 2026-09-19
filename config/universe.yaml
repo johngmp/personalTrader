@@ -10,6 +10,17 @@ symbols:
   BIL: us_equity
   BTC/USD: crypto
   ETH/USD: crypto
+  # Large US companies for S6 (AI investor panel)
+  AAPL: us_equity
+  MSFT: us_equity
+  NVDA: us_equity
+  GOOGL: us_equity
+  AMZN: us_equity
+  META: us_equity
+  JPM: us_equity
+  BRK.B: us_equity
+  JNJ: us_equity
+  XOM: us_equity
   # Forex + gold: researched now, traded from Phase 4b (OANDA)
   EUR/USD: forex
   AUD/USD: forex
@@ -22,3 +33,4 @@ symbols:
 correlation_groups:
   crypto: [BTC/USD, ETH/USD]
   us_growth: [QQQ, SPY]
+  us_mega_tech: [QQQ, AAPL, MSFT, NVDA, GOOGL, AMZN, META]

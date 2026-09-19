@@ -5,3 +5,4 @@ __pycache__/
 /data/
 KILL_SWITCH
 .pytest_cache/
+signals/
