@@ -15,6 +15,7 @@
   serve           dashboard at http://localhost:8050 (read-only)
   telegram-setup  finds your chat ID for the bot in .env and sends a test message
   ctrader-setup   stores the cTrader Open API app credentials in .env (prompted, not echoed)
+  ctrader-auth    approve the app against your cTrader DEMO account and store its tokens
 
 For the AI skills (Phase 4):
   context --json          accounts, sleeves, positions, recent trades, signals, learnings version
@@ -374,6 +375,94 @@ def cmd_ctrader_setup(settings: Settings, _: argparse.Namespace) -> int:
     return 0
 
 
+def _wait_for_oauth_code(timeout_s: float = 300) -> str:
+    """Serve http://localhost:8765 until cTrader redirects back with ?code=..., then stop.
+
+    Bound to 127.0.0.1 so nothing off this machine can reach it, and it serves exactly one request.
+    """
+    import http.server
+    from urllib.parse import parse_qs, urlparse
+
+    captured: dict[str, str] = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802  (stdlib naming)
+            params = parse_qs(urlparse(self.path).query)
+            captured["code"] = (params.get("code") or [""])[0]
+            captured["error"] = (params.get("error") or params.get("errorCode") or [""])[0]
+            ok = bool(captured["code"])
+            body = ("<h2>Connected.</h2><p>You can close this tab and go back to the terminal.</p>" if ok
+                    else "<h2>No authorization code came back.</h2><p>Check the terminal.</p>")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(f"<html><body style='font-family:sans-serif;padding:3em'>{body}</body></html>"
+                             .encode())
+
+        def log_message(self, *_args) -> None:
+            return  # the request URL holds the code; keep it out of the terminal
+
+    server = http.server.HTTPServer(("127.0.0.1", 8765), Handler)
+    server.timeout = timeout_s
+    try:
+        server.handle_request()
+    finally:
+        server.server_close()
+    if captured.get("error"):
+        raise RuntimeError(f"cTrader refused the authorization: {captured['error']}")
+    if not captured.get("code"):
+        raise RuntimeError("Timed out waiting for cTrader to redirect back to localhost:8765.")
+    return captured["code"]
+
+
+def cmd_ctrader_auth(settings: Settings, _: argparse.Namespace) -> int:
+    """Grant the app access to a cTrader account and store the resulting tokens."""
+    import os
+    import webbrowser
+
+    from dotenv import load_dotenv
+
+    from trader.brokers.ctrader_auth import (
+        REDIRECT_URI,
+        CTraderAuthError,
+        authorize_url,
+        exchange_code,
+        save_tokens,
+    )
+
+    load_dotenv(settings.root / ".env", override=True)
+    client_id = os.environ.get("CTRADER_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("CTRADER_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        print("No cTrader app credentials in .env. Run `trader ctrader-setup` first.")
+        return 1
+
+    url = authorize_url(client_id)
+    print("A browser window will open so you can approve this app.\n"
+          "IMPORTANT: grant access to your DEMO account only. If a live account is listed, leave it off.\n"
+          f"\nIf the browser doesn't open, paste this in yourself:\n{url}\n"
+          f"\nWaiting for cTrader to redirect back to {REDIRECT_URI} ...")
+    webbrowser.open(url)
+    try:
+        code = _wait_for_oauth_code()
+    except RuntimeError as exc:
+        print(f"\n{exc}")
+        return 1
+
+    # The authorization code is only valid for about a minute, so exchange it straight away.
+    try:
+        tokens = exchange_code(code, client_id, client_secret)
+    except CTraderAuthError as exc:
+        print(f"\nCould not exchange the code for tokens: {exc}")
+        return 1
+
+    path = settings.root / "data" / "ctrader_tokens.json"
+    save_tokens(path, tokens)
+    print(f"\nConnected. Tokens saved to {path} (owner-only).")
+    print(f"  access token expires {tokens.expires_at:%Y-%m-%d %H:%M UTC} (refreshed automatically before then)")
+    return 0
+
+
 def cmd_telegram_setup(settings: Settings, _: argparse.Namespace) -> int:
     import os
 
@@ -599,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--port", type=int, default=8050)
     sub.add_parser("telegram-setup", help="connect the Telegram bot in .env and send a test message")
     sub.add_parser("ctrader-setup", help="store the cTrader Open API app credentials in .env")
+    sub.add_parser("ctrader-auth", help="grant the app access to your cTrader demo account")
     p_ctx = sub.add_parser("context", help="state for the AI skills (JSON)")
     p_ctx.add_argument("--json", action="store_true", help="(always JSON)")
     p_ctx.add_argument("--days", type=int, default=7, help="include trades closed in the last N days")
@@ -622,7 +712,7 @@ def main(argv: list[str] | None = None) -> int:
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
                 "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
-                "ctrader-setup": cmd_ctrader_setup,
+                "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
                 "candidates": cmd_candidates, "technicals": cmd_technicals, "signal": cmd_signal, "notify": cmd_notify}
     try:
         return handlers[args.command](load_settings(), args)
