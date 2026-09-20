@@ -2,6 +2,7 @@
 
 - Decisions are made at a day's close and filled at the NEXT trading day's open (no same-bar fills).
 - Every fill pays half the spread + slippage in price, plus fees (estimated and broker-charged).
+- Open positions pay a daily carry cost (forex swap), so holding for weeks is not treated as free.
 - Stops are checked against each day's low; a gap below the stop fills at the (worse) open price.
 - Position sizes come from the same sizing rules and sleeve limits used for live trading.
 - Buys can't spend more cash than the sleeve has (no hidden leverage).
@@ -118,13 +119,19 @@ def run_backtest(
                 pending.pop(symbol, None)
                 _execute(book, symbol, _Order(-pos.holding.qty), fill, date, costs[symbol], "stop")
 
-        # 3) Mark to market at the close.
+        # 3) Mark to market at the close, and pay to carry whatever is still open overnight.
         for symbol, bar in today.items():
             last_close[symbol] = bar.close
             pos = book.positions.get(symbol)
             if pos:
                 pos.holding.bars_held += 1
                 pos.holding.high_since_entry = max(pos.holding.high_since_entry, bar.close)
+                carry = costs[symbol].carry_bps_per_day / 10_000
+                if carry:
+                    charge = pos.holding.qty * bar.close * carry
+                    book.cash -= charge
+                    book.symbol_cash[symbol] -= charge
+                    book.total_costs += charge
         values = {s: p.holding.qty * last_close[s] for s, p in book.positions.items()}
         equity = book.cash + sum(values.values())
         equity_curve.append(equity)

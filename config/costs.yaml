@@ -19,3 +19,8 @@ forex:
   half_spread_bps: 1.0
   slippage_bps: 1.0
   fee_bps: 0.0
+  # Overnight financing (swap), charged every day a position stays open. PLACEHOLDER: ~2.5%/yr, pending
+  # the real per-symbol Swap Long figures from Fusion. This matters far more than the numbers above --
+  # S4 holds for weeks, so swap is roughly 40x its trading cost. Measured 2026-09-20 on 2000-2026 data,
+  # S4's CAGR falls 2.09% -> 1.11% -> 0.13% at 0 / 1.0 / 2.0 bps per day: it breaks even near 2.0.
+  carry_bps_per_day: 1.0

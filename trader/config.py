@@ -93,6 +93,10 @@ class CostModel(_Strict):
     slippage_bps: float
     fee_bps: float                # estimated fees the paper broker does NOT charge
     broker_fee_bps: float = 0.0   # fees the broker really charges, taken from what you receive
+    # Cost of HOLDING, charged per day on the position's value, not per trade. Forex pays this as swap
+    # (overnight financing) every night. For a strategy that holds for weeks it dwarfs the trading cost,
+    # so leaving it at zero flatters any slow strategy. Positive = it costs you to hold.
+    carry_bps_per_day: float = 0.0
 
     @property
     def total_bps(self) -> float:
