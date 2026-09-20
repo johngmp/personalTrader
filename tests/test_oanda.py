@@ -172,7 +172,10 @@ class Bars:
 
 
 def test_two_brokers_each_trade_only_their_own_sleeves(settings, journal):
-    s4 = settings.sleeves["S4"].model_copy(update={"enabled": True, "params": {"fast": 50, "slow": 150, "atr_mult": 3.5}})
+    # Pin the broker here rather than inheriting it from config/sleeves.yaml: this test is about routing
+    # sleeves to the right broker, and it shouldn't break when a sleeve is repointed at a different one.
+    s4 = settings.sleeves["S4"].model_copy(update={"enabled": True, "broker": "oanda",
+                                                   "params": {"fast": 50, "slow": 150, "atr_mult": 3.5}})
     settings.sleeves["S4"] = s4
     now = datetime(2026, 9, 18, 15, 0, tzinfo=timezone.utc)
     alpaca, oanda = SimBroker(name="alpaca", crypto_fee_bps=25), SimBroker(name="oanda")  # like the real brokers

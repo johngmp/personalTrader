@@ -63,7 +63,7 @@ class SleeveConfig(_Strict):
     id: str
     name: str
     enabled: bool = False
-    broker: Literal["alpaca", "oanda", "liquid", "shadow"] = "alpaca"  # shadow = live prices, no orders sent
+    broker: Literal["alpaca", "oanda", "ctrader", "liquid", "shadow"] = "alpaca"  # shadow = live prices, no orders sent
     capital_usd: float
     symbols: list[str]
     benchmark: str | None = None

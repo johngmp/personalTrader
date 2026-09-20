@@ -57,12 +57,14 @@ sleeves:
     benchmark: SPY
 
   - id: S4
-    name: FX trend following (goes live with OANDA in Phase 4b)
+    name: FX trend following (Fusion Markets demo, via cTrader)
     enabled: false
-    broker: oanda
+    broker: ctrader        # was oanda, until OANDA's live-account KYC blocked signup (2026-09-20)
     capital_usd: 10000
     symbols: [EUR/USD, AUD/USD, GBP/USD, XAU/USD]   # USD-quoted only; USD/JPY dropped (its P&L is in yen)
     params: {fast: 50, slow: 150, atr_mult: 3.5}    # chosen by Gate 1 (re-run 2026-09-18 on these 4 symbols)
+    # Gate 1 must be re-run before this is enabled: the params above were fitted with OANDA's spreads,
+    # and Fusion's are different. Costs live in config/costs.yaml under `forex`, not per broker.
 
   # --- Phase 4: AI strategies (built 2026-09-19; switched on after the Phase 3 check) ---------------
   - id: S5

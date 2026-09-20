@@ -5,13 +5,13 @@ tags: ["home"]
 # Personal Trader
 
 <!-- engine:start -->
-Paper trading on Alpaca (stocks, crypto) and OANDA (forex). Last engine run: 2026-09-19T10:13:05+00:00 · kill switch: off
+Paper trading on Alpaca (stocks, crypto) and OANDA (forex). Last engine run: 2026-09-20T02:15:17+00:00 · kill switch: off
 
 | Sleeve | Strategy | Value | Return | Closed trades |
 |---|---|---|---|---|
-| [[Sleeves/B0\|B0]] | Buy-and-hold benchmark | $10,161.67 | +1.62% | 0 |
-| [[Sleeves/S1\|S1]] | Trend following | $10,118.68 | +1.19% | 0 |
-| [[Sleeves/S8\|S8]] | Trend following, diversified (19 markets) | $9,994.50 | -0.06% | 0 |
+| [[Sleeves/B0\|B0]] | Buy-and-hold benchmark | $10,156.76 | +1.57% | 0 |
+| [[Sleeves/S1\|S1]] | Trend following | $10,109.23 | +1.09% | 0 |
+| [[Sleeves/S8\|S8]] | Trend following, diversified (19 markets) | $9,986.02 | -0.14% | 0 |
 
 ## Latest trades
 - [[Trades/2026/09/2026-09-19_S8_SOL-USD_364ca6|2026-09-19 S8 SOL/USD]]

@@ -2,6 +2,7 @@
 
 - Alpaca always.
 - OANDA once OANDA_API_TOKEN and OANDA_ACCOUNT_ID are in .env and a forex sleeve is enabled.
+- cTrader (Fusion Markets demo) is not connectable yet — enabling one of its sleeves raises.
 - Shadow (live Alpaca prices, no orders sent) when a sleeve with `broker: shadow` is enabled.
 """
 
@@ -34,6 +35,15 @@ def configured_brokers(settings: Settings, journal: Journal | None = None) -> li
         from trader.data.oanda_bars import OandaDailyBars
 
         out.append((OandaBroker(token, account), OandaDailyBars(token)))
+    if wants("ctrader"):
+        # The conversions and the demo-only guard exist (trader/brokers/ctrader.py); the connection does
+        # not, because it needs an app Spotware has to approve first. Fail loudly: a sleeve that is
+        # switched on but silently never trades is the kind of thing you notice a month late.
+        raise RuntimeError(
+            "A sleeve is set to broker 'ctrader', but the cTrader connection isn't built yet — only the "
+            "conversions and the demo-only guard are. Disable that sleeve, or finish the adapter once "
+            "Spotware approves the Open API application."
+        )
     if journal is not None and wants("shadow"):
         from trader.brokers.shadow import ShadowBroker
 
