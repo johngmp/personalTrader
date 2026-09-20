@@ -35,11 +35,15 @@ NAME = "shadow"
 class ShadowBroker(Broker):
     name = NAME
 
-    def __init__(self, real: Broker, journal: Journal, settings: Settings) -> None:
+    def __init__(self, real: Broker, journal: Journal, settings: Settings, name: str = NAME) -> None:
+        # `name` lets several shadow brokers run side by side, each with its own price source: the
+        # Alpaca-priced one for stocks and crypto, a Yahoo-priced one for FX. Sleeves pick which by
+        # their `broker` field, and orders are kept apart in the journal by the same name.
+        self.name = name
         self.real = real
         self.journal = journal
         self.settings = settings
-        self.sleeves = [s for s in settings.sleeves.values() if s.broker == NAME]
+        self.sleeves = [s for s in settings.sleeves.values() if s.broker == name]
 
     @property
     def is_paper(self) -> bool:
@@ -123,7 +127,7 @@ class ShadowBroker(Broker):
                                      "raw_status": "filled (shadow)"})
 
     def get_open_orders(self) -> list[BrokerOrder]:
-        return [self.get_order(r["broker_order_id"]) for r in self.journal.open_orders(NAME)]
+        return [self.get_order(r["broker_order_id"]) for r in self.journal.open_orders(self.name)]
 
     def cancel_order(self, broker_order_id: str) -> None:
         return None  # the engine marks it canceled in the journal, which is all a shadow order is

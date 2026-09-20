@@ -83,9 +83,12 @@ class RiskGate:
         # --- price data ---------------------------------------------------------------------
         price = ctx.quote.price
         age = (ctx.now - ctx.quote.ts).total_seconds()
-        if ctx.asset_class is AssetClass.US_EQUITY and ctx.market is not None and not ctx.market.is_open:
+        if ctx.asset_class in (AssetClass.US_EQUITY, AssetClass.FOREX) and ctx.market is not None \
+                and not ctx.market.is_open:
             # Market closed: the order queues for the next open, so the latest session's closing price is
             # as fresh as it gets. Anything older than that session is still stale.
+            # Forex closes every weekend, so without this a Sunday run could never place an FX order.
+            # Crypto is excluded on purpose: its market never closes, so a stale crypto price is a fault.
             fresh = ctx.quote.ts >= ctx.market.last_close - timedelta(minutes=15)
             add("fresh_price", 0 < price and fresh,
                 f"last price is from {ctx.quote.ts:%Y-%m-%d %H:%M} UTC, before the latest session closed")

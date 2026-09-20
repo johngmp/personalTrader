@@ -105,3 +105,17 @@ sleeves:
     benchmark: B0
     strategy: S8
     params: {fast: 20, slow: 200, atr_mult: 2.5}   # chosen by Gate 1 (2026-09-19): PASS, out-of-sample Sharpe 0.98
+
+  - id: S9
+    name: FX trend (shadow, Yahoo prices, no broker)
+    enabled: true            # shadow only: prices come from Yahoo, nothing is ever sent to a broker
+    broker: shadow_fx
+    capital_usd: 10000
+    symbols: [EUR/USD, AUD/USD, GBP/USD, XAU/USD]
+    benchmark: B0
+    strategy: S4             # the same FX trend rules S4 would have traded on cTrader
+    params: {fast: 50, slow: 150, atr_mult: 3.5}
+    # Runs with no credentials at all, so forex is measurable whether or not cTrader is ever approved.
+    # Expect it to do poorly: measured 2026-09-20, these rules return 2.09%/yr at Sharpe 0.49 BEFORE
+    # any swap cost, and break even once swap reaches ~2 bps/day. This sleeve exists to find out in
+    # public rather than in a backtest -- every signal is journalled and scored against B0.

@@ -48,4 +48,13 @@ def configured_brokers(settings: Settings, journal: Journal | None = None) -> li
         from trader.brokers.shadow import ShadowBroker
 
         out.append((ShadowBroker(alpaca, journal, settings), alpaca_bars))
+    if journal is not None and wants("shadow_fx"):
+        # Forex with no broker at all: Yahoo prices, shadow execution. Needs no credentials, so it runs
+        # whether or not cTrader is ever approved.
+        from trader.brokers.shadow import ShadowBroker
+        from trader.data.fx_quotes import YahooFXFeed
+        from trader.data.yahoo_bars import YahooDailyBars
+
+        feed = YahooFXFeed()
+        out.append((ShadowBroker(feed, journal, settings, name="shadow_fx"), YahooDailyBars()))
     return out
