@@ -14,6 +14,7 @@
   fundamentals X  company fundamentals snapshot (Yahoo); --json for AI skills
   serve           dashboard at http://localhost:8050 (read-only)
   telegram-setup  finds your chat ID for the bot in .env and sends a test message
+  ctrader-setup   stores the cTrader Open API app credentials in .env (prompted, not echoed)
 
 For the AI skills (Phase 4):
   context --json          accounts, sleeves, positions, recent trades, signals, learnings version
@@ -330,6 +331,49 @@ def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ctrader_setup(settings: Settings, _: argparse.Namespace) -> int:
+    """Store the cTrader Open API app credentials in .env.
+
+    Prompted rather than passed as arguments, so the secret never lands in shell history. The secret is
+    typed blind and never printed back.
+    """
+    import getpass
+    import os
+    import stat
+
+    from dotenv import load_dotenv
+
+    from trader.notify.telegram import set_env_value
+
+    env_path = settings.root / ".env"
+    load_dotenv(env_path, override=True)
+    print("cTrader Open API credentials (from openapi.ctrader.com -> Applications -> your app).\n"
+          "These identify the APP, not your trading account. Nothing is printed back.\n")
+
+    existing = os.environ.get("CTRADER_CLIENT_ID", "").strip()
+    prompt = f"Client ID [{existing}]: " if existing else "Client ID: "
+    client_id = input(prompt).strip() or existing
+    if not client_id:
+        print("No Client ID given; nothing written.")
+        return 1
+    secret = getpass.getpass("Client Secret (typing is hidden): ").strip()
+    if not secret:
+        print("No Client Secret given; nothing written.")
+        return 1
+    if secret == client_id:
+        print("The Client Secret and Client ID are identical, which means one was pasted twice.")
+        return 1
+
+    set_env_value(env_path, "CTRADER_CLIENT_ID", client_id)
+    set_env_value(env_path, "CTRADER_CLIENT_SECRET", secret)
+    env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # owner read/write only
+    print(f"\nSaved to {env_path} (permissions set to owner-only).")
+    print(f"  CTRADER_CLIENT_ID     = {client_id}")
+    print(f"  CTRADER_CLIENT_SECRET = {'*' * 8} ({len(secret)} characters)")
+    print("\nNext: `uv run trader ctrader-auth` to grant the app access to your DEMO account.")
+    return 0
+
+
 def cmd_telegram_setup(settings: Settings, _: argparse.Namespace) -> int:
     import os
 
@@ -554,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
     p_serve = sub.add_parser("serve", help="dashboard at http://localhost:8050")
     p_serve.add_argument("--port", type=int, default=8050)
     sub.add_parser("telegram-setup", help="connect the Telegram bot in .env and send a test message")
+    sub.add_parser("ctrader-setup", help="store the cTrader Open API app credentials in .env")
     p_ctx = sub.add_parser("context", help="state for the AI skills (JSON)")
     p_ctx.add_argument("--json", action="store_true", help="(always JSON)")
     p_ctx.add_argument("--days", type=int, default=7, help="include trades closed in the last N days")
@@ -577,6 +622,7 @@ def main(argv: list[str] | None = None) -> int:
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
                 "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
+                "ctrader-setup": cmd_ctrader_setup,
                 "candidates": cmd_candidates, "technicals": cmd_technicals, "signal": cmd_signal, "notify": cmd_notify}
     try:
         return handlers[args.command](load_settings(), args)
