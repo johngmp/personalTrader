@@ -47,6 +47,11 @@ class Guards(_Strict):
     kill_switch_file: str = "KILL_SWITCH"
     refuse_if_paper_flag_but_live_endpoint: bool = True
     stale_data_seconds: int = 300
+    # Forex prices come from a free delayed feed (Yahoo), not a broker, so 300s is the wrong yardstick:
+    # gold routinely arrives 10-15 minutes old. The check exists to catch a DEAD feed, and for a daily
+    # strategy holding for weeks a price this old changes position size by a rounding error. Anything
+    # older than this while the FX market is open does mean something is broken.
+    stale_forex_seconds: int = 3600
     duplicate_order_window_s: int = 60
 
 

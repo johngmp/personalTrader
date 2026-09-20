@@ -93,8 +93,10 @@ class RiskGate:
             add("fresh_price", 0 < price and fresh,
                 f"last price is from {ctx.quote.ts:%Y-%m-%d %H:%M} UTC, before the latest session closed")
         else:
-            add("fresh_price", 0 < price and age <= risk.guards.stale_data_seconds,
-                f"price is {age:.0f}s old (limit {risk.guards.stale_data_seconds}s); market may be closed")
+            limit = (risk.guards.stale_forex_seconds if ctx.asset_class is AssetClass.FOREX
+                     else risk.guards.stale_data_seconds)
+            add("fresh_price", 0 < price and age <= limit,
+                f"price is {age:.0f}s old (limit {limit}s); market may be closed")
         if price <= 0:
             return RiskDecision(approved=False, checks=checks)
 

@@ -78,7 +78,7 @@ def test_an_empty_frame_survives_bar_completion():
 
 # --- the weekend freshness rule -------------------------------------------------------------------
 
-def fresh_price_check(settings, asset_class: AssetClass, quote_age_s: float):
+def fresh_price_check(settings, asset_class: AssetClass, quote_age_s: float, market_open: bool = False):
     """Run one buy through the real risk gate and return just its fresh_price verdict."""
     from trader.models import Account, MarketClock, Quote
     from trader.risk.gate import RiskContext, RiskGate
@@ -92,7 +92,7 @@ def fresh_price_check(settings, asset_class: AssetClass, quote_age_s: float):
         quote=Quote(symbol=symbol, price=price, ts=SUNDAY - timedelta(seconds=quote_age_s)),
         asset_class=asset_class, sleeve_holdings={}, peak_equity=100_000, orders_today=0,
         # Market shut since Friday's 5pm New York close, as it is every weekend.
-        market=MarketClock(is_open=False, last_close=SUNDAY - timedelta(hours=40),
+        market=MarketClock(is_open=market_open, last_close=SUNDAY - timedelta(hours=40),
                            next_open=SUNDAY + timedelta(hours=8)),
     )
     order = OrderRequest(sleeve_id="S1", symbol=symbol, side=Side.BUY, notional=2_000.0,
@@ -115,3 +115,20 @@ def test_crypto_never_gets_the_weekend_excuse(settings):
 
 def test_a_forex_price_older_than_the_last_close_is_still_stale(settings):
     assert not fresh_price_check(settings, AssetClass.FOREX, quote_age_s=60 * 3600).passed
+
+
+# --- delayed free data, market open ---------------------------------------------------------------
+
+def test_a_twelve_minute_old_forex_price_is_accepted_while_the_market_is_open(settings):
+    """Yahoo's gold feed runs 10-15 minutes behind. Under the 300s rule that was rejected every run."""
+    assert fresh_price_check(settings, AssetClass.FOREX, quote_age_s=12 * 60, market_open=True).passed
+
+
+def test_crypto_still_gets_the_strict_limit_while_its_market_is_open(settings):
+    """Crypto comes from a real broker feed; 12 minutes old there means something is wrong."""
+    assert not fresh_price_check(settings, AssetClass.CRYPTO, quote_age_s=12 * 60, market_open=True).passed
+
+
+def test_a_genuinely_dead_forex_feed_is_still_caught(settings):
+    """The check must still do its job: hours old with the market open means the feed is broken."""
+    assert not fresh_price_check(settings, AssetClass.FOREX, quote_age_s=5 * 3600, market_open=True).passed

@@ -24,7 +24,13 @@ if TYPE_CHECKING:
 # Categorical colours validated on the dark surface (entity keeps its colour everywhere).
 SERIES_COLORS = {"alpaca": "#c98500", "oanda": "#9085e9", "S1": "#3987e5", "B0": "#d95926", "S4": "#199e70"}
 SHADOW_COLOR = "#9085e9"  # shadow strategies get their own chart (a 4th colour in one chart fails the CVD check)
-BROKER_LABELS = {"alpaca": "Alpaca (stocks & crypto)", "oanda": "OANDA (forex)", "shadow": "Shadow (no orders)"}
+BROKER_LABELS = {"alpaca": "Alpaca (stocks & crypto)", "oanda": "OANDA (forex)", "shadow": "Shadow (no orders)",
+                 "shadow_fx": "Shadow FX (no orders)"}
+
+
+def is_shadow(broker: str | None) -> bool:
+    """Every shadow broker, whatever prices it uses: `shadow` (Alpaca) and `shadow_fx` (Yahoo)."""
+    return bool(broker) and broker.startswith("shadow")
 
 
 def _money(x: float | None, signed: bool = False, cents: bool = True) -> str:
@@ -158,7 +164,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
             "account": account_series,
             "sleeves": {sid: _downsample(pts) for sid, pts in sleeve_series.items() if sid in SERIES_COLORS},
             "shadow": {sid: _downsample(pts) for sid, pts in sleeve_series.items()
-                       if settings.sleeves.get(sid) is not None and settings.sleeves[sid].broker == "shadow"},
+                       if settings.sleeves.get(sid) is not None and is_shadow(settings.sleeves[sid].broker)},
         },
     }
 
@@ -199,8 +205,8 @@ def render(d: dict) -> str:
         _tile("Fees paid", _money(d["fees"]), "charged by Alpaca"),
     ])
     sleeve_cards = "".join(
-        f"""<div class="card sleeve"><div class="row"><span class="dot" style="background:{SHADOW_COLOR if s.get('broker') == 'shadow' else SERIES_COLORS.get(s['id'], '#898781')}"></span>
-<b>{s['id']}</b><span class="subtle">{html.escape(s['name'])}</span>{'<span class="pill closed">benchmark</span>' if s['benchmark'] else ''}{'<span class="pill open">shadow · no orders</span>' if s.get('broker') == 'shadow' else ''}</div>
+        f"""<div class="card sleeve"><div class="row"><span class="dot" style="background:{SHADOW_COLOR if is_shadow(s.get('broker')) else SERIES_COLORS.get(s['id'], '#898781')}"></span>
+<b>{s['id']}</b><span class="subtle">{html.escape(s['name'])}</span>{'<span class="pill closed">benchmark</span>' if s['benchmark'] else ''}{'<span class="pill open">shadow · no orders</span>' if is_shadow(s.get('broker')) else ''}</div>
 <div class="big">{_money(s['equity'])}</div>
 <div class="row gap"><span class="{_tone(s['return'])}">{_pct(s['return'])}</span>
 <span class="subtle">after est. costs {_pct(s['adjusted_return'])}</span></div>
