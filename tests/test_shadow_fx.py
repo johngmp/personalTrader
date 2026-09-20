@@ -132,3 +132,18 @@ def test_crypto_still_gets_the_strict_limit_while_its_market_is_open(settings):
 def test_a_genuinely_dead_forex_feed_is_still_caught(settings):
     """The check must still do its job: hours old with the market open means the feed is broken."""
     assert not fresh_price_check(settings, AssetClass.FOREX, quote_age_s=5 * 3600, market_open=True).passed
+
+
+# --- shadow money is not real money ---------------------------------------------------------------
+
+def test_every_shadow_broker_is_excluded_from_account_totals():
+    """Regression: the dashboard matched the literal name "shadow", so shadow_fx's $10k inflated the
+    account balance by $10,000. Any broker whose name starts with "shadow" is virtual."""
+    from trader.engine.dashboard import BROKER_LABELS, is_shadow
+
+    assert is_shadow("shadow") and is_shadow("shadow_fx")
+    assert not is_shadow("alpaca") and not is_shadow("oanda") and not is_shadow("ctrader")
+    assert not is_shadow(None) and not is_shadow("")
+    # Anything the dashboard can label as a shadow broker must also be treated as one.
+    for name in BROKER_LABELS:
+        assert is_shadow(name) == ("no orders" in BROKER_LABELS[name])

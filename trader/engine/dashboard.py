@@ -70,7 +70,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
     risk = settings.risk.account
     kill_switch = engines[0].kill_switch
     accounts, account_series = [], {}
-    for engine in (e for e in engines if e.broker.name != "shadow"):  # shadow isn't an account
+    for engine in (e for e in engines if not is_shadow(e.broker.name)):  # shadow money isn't real money
         acct = engine.executor.account()
         snaps = journal.conn.execute("SELECT ts, equity FROM equity_snapshots WHERE broker=? ORDER BY ts",
                                      (engine.broker.name,)).fetchall()
