@@ -76,6 +76,30 @@ class OrderRequest(BaseModel):
         return self
 
 
+def price_decimals(price: float, asset_class: AssetClass) -> int:
+    """How many decimals a price in this market is quoted to.
+
+    Stocks and crypto are cents. Forex is not: rounding EUR/USD's 0.69823 to 0.70 moves the stop 18 pips,
+    which silently changes the risk the gate approved. Gold trades in the thousands and quotes to cents;
+    JPY pairs sit in the hundreds and quote to three places; the majors quote to five.
+    """
+    if asset_class is not AssetClass.FOREX:
+        return 2
+    if price >= 1000:
+        return 2
+    if price >= 100:
+        return 3
+    return 5
+
+
+def round_price(price: float, asset_class: AssetClass) -> float:
+    return round(price, price_decimals(price, asset_class))
+
+
+def format_price(price: float, asset_class: AssetClass) -> str:
+    return f"{price:,.{price_decimals(price, asset_class)}f}"
+
+
 class Quote(BaseModel):
     symbol: str
     price: float

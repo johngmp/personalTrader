@@ -28,7 +28,18 @@ from trader.config import Settings, SleeveConfig
 from trader.data.live_bars import BarSource
 from trader.engine.executor import ExecutionResult, Executor
 from trader.journal.db import DUST_QTY, Journal
-from trader.models import AssetClass, Fill, MarketClock, OrderRequest, OrderStatus, OrderType, Side, new_client_order_id
+from trader.models import (
+    AssetClass,
+    Fill,
+    MarketClock,
+    OrderRequest,
+    OrderStatus,
+    OrderType,
+    Side,
+    format_price,
+    new_client_order_id,
+    round_price,
+)
 from trader.notify.telegram import Notifier, NullNotifier
 from trader.risk.kill_switch import KillSwitch
 from trader.risk.sizing import plan_weights
@@ -42,6 +53,9 @@ STOP_MOVE_MIN = 0.002           # only move a resting stop when it changes by >0
 MIN_ORDER_USD = 1.0
 SIZING_MARGIN = 0.98            # size entries 2% under the limits, so small price moves can't breach them
 AI_VERDICT_WAIT = timedelta(hours=8)  # analyst-team entries skip if the AI hasn't answered by then
+# Shadow sleeves are research and stay off your phone. These are the exception: their whole purpose is to
+# reach it, because you execute them by hand and nothing else will move your stop for you.
+HAND_EXECUTED = {"shadow_fx"}
 
 
 @dataclass
@@ -130,11 +144,15 @@ class Engine:
     def _handle_commands(self, report: RunReport) -> None:
         report.actions += handle_commands(self.notifier, self.journal, self.kill_switch, [self])
 
+    def _should_notify(self) -> bool:
+        """Real brokers always message you. Shadow sleeves stay quiet, except the hand-executed ones."""
+        return not self.broker.name.startswith("shadow") or self.broker.name in HAND_EXECUTED
+
     def _sync_fills(self, report: RunReport) -> None:
         for fill in self.executor.sync_open_orders():
             report.fills.append(fill)
-            if self.broker.name != "shadow":  # shadow trades are research: logged, not pushed to your phone
-                self.notifier.send(_fill_text(fill))
+            if self._should_notify():
+                self.notifier.send(_fill_text(fill, asset_class=self.settings.asset_class(fill.symbol)))
 
     def _reconcile(self, report: RunReport) -> None:
         """Journal holdings (this broker's sleeves together) must equal the broker's position in each symbol."""
@@ -292,7 +310,14 @@ class Engine:
                 if state is not None and target.weight > 0 and target.stop is not None:
                     new_stop = max(state["stop"] or 0.0, target.stop)
                     if new_stop != state["stop"]:
+                        old_stop = state["stop"]
                         self.journal.upsert_position_state(sleeve.id, symbol, stop=new_stop)
+                        # Only sleeves you execute by hand need telling: everywhere else the stop is a
+                        # real resting order at the broker and moves without you.
+                        if self.broker.name in HAND_EXECUTED and (not old_stop
+                                                                  or new_stop > old_stop * (1 + STOP_MOVE_MIN)):
+                            self.notifier.send(_stop_move_text(sleeve.id, symbol, old_stop, new_stop,
+                                                               self.settings.asset_class(symbol)))
             prices = live
             current = {s: q * prices[s] / equity for s, q in held.items() if equity > 0}
             deferred: set[str] = set()
@@ -430,7 +455,7 @@ class Engine:
             for fill in result.fills or []:
                 report.fills.append(fill)
                 if self.broker.name != "shadow":
-                    self.notifier.send(_fill_text(fill, order.reason))
+                    self.notifier.send(_fill_text(fill, order.reason, self.settings.asset_class(order.symbol)))
             if not result.fills and order.order_type is OrderType.MARKET and self.broker.name != "shadow":
                 self.notifier.send(f"🕒 Queued {what}; fills when the market opens.")
         return result
@@ -443,11 +468,12 @@ class Engine:
                                  limit_price=round(stop * (1 - CRYPTO_STOP_LIMIT_GAP), 2), reason="protective stop")
         else:
             order = OrderRequest(sleeve_id=sleeve_id, symbol=symbol, side=Side.SELL, qty=qty,
-                                 order_type=OrderType.STOP, stop_price=round(stop, 2), reason="protective stop")
+                                 order_type=OrderType.STOP, stop_price=round_price(stop, asset_class),
+                                 reason="protective stop")
         result = self.executor.submit(order, wait_for_fill_s=0.0)
         if result.decision.approved and not result.error:
             self.journal.upsert_position_state(sleeve_id, symbol, stop_order_id=order.client_order_id)
-            report.actions.append(f"{sleeve_id} stop for {symbol} at {stop:,.2f}")
+            report.actions.append(f"{sleeve_id} stop for {symbol} at {format_price(stop, asset_class)}")
         else:
             report.problems.append(f"could not place {sleeve_id} stop for {symbol}: "
                                    f"{result.error or result.decision.summary()}")
@@ -459,7 +485,8 @@ class Engine:
         bo = self.broker.replace_stop(order_row["broker_order_id"], new_id, stop, limit)
         order_type = OrderType(order_row["order_type"])
         replacement = OrderRequest(sleeve_id=order_row["sleeve_id"], symbol=order_row["symbol"], side=Side.SELL,
-                                   qty=order_row["qty"], order_type=order_type, stop_price=round(stop, 2),
+                                   qty=order_row["qty"], order_type=order_type,
+                                   stop_price=round_price(stop, asset_class),
                                    limit_price=limit, reason="protective stop (trailed up)", client_order_id=new_id)
         self.journal.record_order(replacement, asset_class.value)
         self.journal.record_broker_order(self.broker.name, bo)
@@ -467,7 +494,8 @@ class Engine:
         # "replaced", which sync maps to canceled). If it somehow filled first, the fill is still recorded.
         self.journal.mark_order(order_row["client_order_id"], OrderStatus.SUBMITTED, "replace requested")
         self.journal.upsert_position_state(order_row["sleeve_id"], order_row["symbol"], stop_order_id=new_id)
-        report.actions.append(f"{order_row['sleeve_id']} trailed {order_row['symbol']} stop up to {stop:,.2f}")
+        report.actions.append(f"{order_row['sleeve_id']} trailed {order_row['symbol']} stop up to "
+                              f"{format_price(stop, asset_class)}")
 
     def _cancel_stop(self, state) -> None:
         if not state["stop_order_id"]:
@@ -518,10 +546,22 @@ class Engine:
         return status_text([self])
 
 
-def _fill_text(fill: Fill, reason: str = "") -> str:
+def _fill_text(fill: Fill, reason: str = "", asset_class: AssetClass | None = None) -> str:
     verb = "Bought" if fill.side is Side.BUY else "Sold"
     extra = f" ({reason})" if reason else ""
-    return f"{'🟢' if fill.side is Side.BUY else '🔴'} {fill.sleeve_id} {verb} {fill.qty:g} {fill.symbol} @ ${fill.price:,.2f}{extra}"
+    ac = asset_class or AssetClass.US_EQUITY
+    money = "" if ac is AssetClass.FOREX else "$"   # 1.14890 is a rate, not a dollar amount
+    return (f"{'🟢' if fill.side is Side.BUY else '🔴'} {fill.sleeve_id} {verb} {fill.qty:g} {fill.symbol} "
+            f"@ {money}{format_price(fill.price, ac)}{extra}")
+
+
+def _stop_move_text(sleeve_id: str, symbol: str, old: float | None, new: float,
+                    asset_class: AssetClass) -> str:
+    """Manual execution lives or dies on this one: a trailing stop that moves and isn't copied across
+    leaves the real position exposed exactly where the tested rules say it should have exited."""
+    was = format_price(old, asset_class) if old else "none"
+    return (f"📈 {sleeve_id} · {symbol} stop moves {was} → {format_price(new, asset_class)}\n"
+            f"Move your stop if you are following this by hand.")
 
 
 # --- shared across brokers --------------------------------------------------------------------------
