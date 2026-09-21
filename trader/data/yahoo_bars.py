@@ -23,17 +23,24 @@ MAX_CACHE_AGE = timedelta(hours=6)
 
 
 def drop_forming_bar(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
-    """Drop the bar for the current FX day, which is still being written.
+    """Drop bars that are not complete forex days: the one still being written, and weekend stubs.
 
     The forex day rolls at 5pm New York, so before that the date to drop is today's New York date and
     after it the day has closed and the bar can be used.
+
+    Weekend-dated bars are dropped outright. The forex week runs Sunday 5pm to Friday 5pm New York, so
+    the Sunday evening session belongs to Monday's day -- but Yahoo's gold feed labels it as its own
+    Sunday bar. In 26 years of history EUR/USD has none and gold has exactly one, which is the live stub
+    (range 0.54% against a normal 0.99%). Deciding on it would mean the live engine acting on a kind of
+    bar the backtest has never seen.
     """
     if df.empty:
         return df
     ny = now.astimezone(EASTERN)
     rollover = ny.replace(hour=17, minute=0, second=0, microsecond=0)
     current_day = ny.date() if ny < rollover else (ny + timedelta(days=1)).date()
-    return df[df.index < pd.Timestamp(current_day)]
+    df = df[df.index < pd.Timestamp(current_day)]
+    return df[df.index.dayofweek < 5]
 
 
 class YahooDailyBars:

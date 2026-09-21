@@ -147,3 +147,13 @@ def test_every_shadow_broker_is_excluded_from_account_totals():
     # Anything the dashboard can label as a shadow broker must also be treated as one.
     for name in BROKER_LABELS:
         assert is_shadow(name) == ("no orders" in BROKER_LABELS[name])
+
+
+def test_weekend_stub_bars_are_dropped():
+    """Yahoo's gold feed labels the Sunday-evening open as its own bar. The forex day rolls at 5pm New
+    York, so that session belongs to Monday -- and in 26 years the backtest has seen exactly one such
+    bar, so deciding on it means acting on data the strategy was never tested against."""
+    df = frame_for(["2026-09-18", "2026-09-19", "2026-09-20", "2026-09-21"])  # Fri, Sat, Sun, Mon
+    kept = list(drop_forming_bar(df, datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)).index.dayofweek)
+    assert 5 not in kept and 6 not in kept          # no Saturday, no Sunday
+    assert kept == [4, 0]                            # Friday and Monday survive
