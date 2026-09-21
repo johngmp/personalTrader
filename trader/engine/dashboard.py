@@ -159,6 +159,8 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "sleeves": sleeves, "trips": sorted(trips, key=lambda t: t.entry_ts, reverse=True), "price": price,
         "states": {(s["sleeve_id"], s["symbol"]): s for s in journal.position_states()},
         "orders": journal.recent_order_rows(25),
+        "research": latest_research(settings),
+        "blocked": blocked_orders(journal),
         "warnings": [e for e in journal.recent_events(60) if e["level"] in ("warning", "error", "critical")][:12],
         "charts": {
             "account": account_series,
@@ -167,6 +169,60 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
                        if settings.sleeves.get(sid) is not None and is_shadow(settings.sleeves[sid].broker)},
         },
     }
+
+
+def latest_research(settings: Settings) -> list[dict]:
+    """The most recent Gate 1 verdict per strategy, newest first.
+
+    This is the evidence a sleeve is trading on. Without it the dashboard shows what a strategy IS doing
+    and never whether it earned the right to -- which is how S4 nearly got switched on.
+    """
+    log = settings.root / "reports" / "research_log.jsonl"
+    if not log.exists():
+        return []
+    newest: dict[str, dict] = {}
+    for line in log.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # a half-written line is not worth failing a page render over
+        code = row.get("strategy")
+        if code and row.get("ts", "") >= newest.get(code, {}).get("ts", ""):
+            newest[code] = row
+    return sorted(newest.values(), key=lambda r: r.get("ts", ""), reverse=True)
+
+
+def blocked_orders(journal: Journal, limit: int = 15) -> list[dict]:
+    """Orders the risk gate refused, with the reason. Invisible everywhere else on the dashboard."""
+    rows = journal.conn.execute(
+        "SELECT o.created_at, o.sleeve_id, o.side, o.symbol, o.qty, o.notional, r.summary "
+        "FROM risk_decisions r JOIN orders o ON o.client_order_id = r.client_order_id "
+        "WHERE r.approved = 0 ORDER BY r.ts DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _research_card(r: dict, sleeves: list[dict]) -> str:
+    """One Gate 1 verdict, and -- the part that matters -- whether that sleeve is trading anyway."""
+    code = r.get("strategy", "?")
+    passed = r.get("verdict") == "PASS"
+    live = next((s for s in sleeves if s["id"] == code), None)
+    trading_for_real = live is not None and not is_shadow(live.get("broker"))
+    oos, bench = r.get("oos_sharpe"), r.get("benchmark_oos_sharpe")
+    failed = [c for c in (r.get("failed_checks") or [])]
+    # A failing strategy that is live with real money is the one thing this page exists to shout about.
+    alarm = failed and trading_for_real
+    return f"""<div class="card sleeve"><div class="row">
+<span class="dot" style="background:{'#199e70' if passed else '#d95926'}"></span><b>{html.escape(code)}</b>
+<span class="pill {'open' if passed else 'closed'}">{'PASS' if passed else 'FAIL'}</span>
+{'<span class="pill closed">trading anyway</span>' if alarm else ''}</div>
+<div class="big {'up' if passed else 'down'}">{'–' if oos is None else f'{oos:+.2f}'}</div>
+<div class="row gap"><span class="subtle">out-of-sample Sharpe vs benchmark
+{'–' if bench is None else f'{bench:+.2f}'}</span></div>
+<div class="subtle">walk-forward {('%+.2f' % r['wf_sharpe']) if r.get('wf_sharpe') is not None else '–'}
+ · {r.get('trials', '?')} settings tried · {html.escape(str(r.get('ts', ''))[:10])}</div>
+<div class="subtle">{html.escape(', '.join(r.get('symbols') or []))}</div>
+{('<div class="subtle down">fails: ' + html.escape('; '.join(failed)) + '</div>') if failed else ''}
+</div>"""
 
 
 def _tile(label: str, value: str, sub: str = "", tone: str = "") -> str:
@@ -227,6 +283,14 @@ def render(d: dict) -> str:
         f"<td class='why'>{html.escape(r['reason'] or '')}</td></tr>" for r in d["orders"])
     warn_rows = "".join(f"<li><span class='subtle'>{w['ts'][:16].replace('T', ' ')}</span> {html.escape(w['message'])}</li>"
                         for w in d["warnings"]) or "<li class='subtle'>No warnings.</li>"
+    research_cards = "".join(_research_card(r, d["sleeves"]) for r in d["research"]) or \
+        "<p class='subtle'>No Gate 1 results yet. Run <code>trader gate1 all</code>.</p>"
+    blocked_rows = "".join(
+        f"<tr><td class='subtle'>{b['created_at'][:19].replace('T', ' ')}</td><td>{html.escape(b['sleeve_id'])}</td>"
+        f"<td>{html.escape(b['side'])}</td><td>{html.escape(b['symbol'])}</td>"
+        f"<td class='num'>{(format(b['qty'], 'g') if b['qty'] else _money(b['notional']))}</td>"
+        f"<td class='why'>{html.escape(b['summary'] or '')}</td></tr>" for b in d["blocked"]) or \
+        "<tr><td colspan=6 class='subtle'>Nothing has been blocked.</td></tr>"
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
     total_base = d["start_equity"] or 1
     chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"],
@@ -255,7 +319,8 @@ def render(d: dict) -> str:
 <nav class="tabs" role="tablist">
 <button class="tab active" data-tab="overview" role="tab">Overview</button>
 <button class="tab" data-tab="trades" role="tab">Trading history</button>
-<button class="tab" data-tab="orders" role="tab">Orders &amp; warnings</button></nav>
+<button class="tab" data-tab="orders" role="tab">Orders &amp; warnings</button>
+<button class="tab" data-tab="evidence" role="tab">Evidence</button></nav>
 <main>
 <section data-panel="overview">
 <div class="grid top">
@@ -299,6 +364,16 @@ def render(d: dict) -> str:
 <section data-panel="orders" hidden><h2>Recent orders</h2><div class="card scroll"><table><tr><th>Time (UTC)</th><th>Sleeve</th><th>Side</th>
 <th>Symbol</th><th>Type</th><th>Size</th><th>Stop</th><th>Status</th><th>Reason</th></tr>{order_rows}</table></div>
 <h2>Warnings</h2><div class="card"><ul class="warnings">{warn_rows}</ul></div></section>
+<section data-panel="evidence" hidden>
+<h2>Does each strategy deserve its money?</h2>
+<p class="subtle">The most recent Gate 1 result per strategy: parameters chosen on the first 70% of history,
+then judged on the 30% they never saw. Sharpe is measured in excess of cash, so 0 means "no better than
+T-bills". A strategy that fails here has not earned real money, whatever its recent run looks like.</p>
+<div class="grid sleeves">{research_cards}</div>
+<h2>Blocked by the risk gate</h2>
+<p class="subtle">Orders the strategies wanted to place and the gate refused. Nothing here reached a broker.</p>
+<div class="card scroll"><table><tr><th>Time (UTC)</th><th>Sleeve</th><th>Side</th><th>Symbol</th>
+<th>Size</th><th>Why it was blocked</th></tr>{blocked_rows}</table></div></section>
 </main><div class="tip" id="tip" hidden></div>
 <script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script></body></html>"""
 
