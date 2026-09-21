@@ -37,12 +37,35 @@ def max_drawdown(equity: pd.Series) -> float:
     return float((equity / equity.cummax() - 1).min()) if len(equity) else 0.0
 
 
+def risk_free_returns(index: pd.DatetimeIndex, symbol: str = "BIL") -> pd.Series:
+    """Daily return of holding cash (1-3 month T-bills), aligned to `index`.
+
+    Loaded from the same cached history as everything else. BIL starts in 2007; earlier dates get 0,
+    which understates the hurdle (rates were higher then) and so is generous to the strategy.
+    """
+    from trader.data.history import load_history
+
+    try:
+        closes = load_history(symbol)["close"]
+    except Exception:
+        return pd.Series(0.0, index=index)
+    return closes.reindex(index.union(closes.index)).ffill().reindex(index).pct_change().fillna(0.0)
+
+
 def compute_metrics(equity: pd.Series, trades: list[TradeRecord] | None = None,
-                    exposure: pd.Series | None = None) -> Metrics:
+                    exposure: pd.Series | None = None, risk_free: pd.Series | None = None) -> Metrics:
+    """Risk-adjusted numbers. `risk_free` is a daily return series for cash; pass None to assume 0%.
+
+    Sharpe and Sortino are computed on returns in EXCESS of cash, which is the textbook definition and
+    the only one that means anything when rates are not zero: earning 4% while cash pays 4% is a Sharpe
+    of 0, not of 1. Assuming 0% flatters every strategy by roughly (risk-free rate / volatility).
+    """
     equity = equity.dropna()
     if len(equity) < 2 or equity.iloc[0] <= 0:
         raise ValueError("need at least two positive equity points")
     returns = equity.pct_change().dropna()
+    if risk_free is not None:
+        returns = returns - risk_free.reindex(returns.index).fillna(0.0)
     days = (equity.index[-1] - equity.index[0]).days
     years = max(days / 365.25, 1e-9)
     periods_per_year = len(returns) / years  # ~252 for stocks, ~365 when crypto trades every day

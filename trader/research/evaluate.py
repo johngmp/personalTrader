@@ -21,14 +21,23 @@ import pandas as pd
 
 from trader.config import PROJECT_ROOT, CostModel, Settings, SleeveLimits
 from trader.research.backtest import BacktestResult, run_backtest
-from trader.research.metrics import Metrics, buy_and_hold, compute_metrics
+from trader.research.metrics import Metrics, buy_and_hold, compute_metrics, risk_free_returns
 from trader.strategies import REGISTRY
 from trader.strategies.base import Strategy
 
 RESEARCH_LOG = PROJECT_ROOT / "reports" / "research_log.jsonl"
 
 # Benchmarks per strategy: None = equal-weight buy-and-hold of the strategy's own symbols; [] = cash.
-BENCHMARKS: dict[str, list[str] | None] = {"S1": None, "S2": ["SPY"], "S3": ["SPY"], "S4": [], "S8": None}
+#
+# "Cash" as [] is a FLAT LINE: 0% return, so anything with a positive Sharpe cleared it. That is no bar
+# at all -- S4 passed on 2026-09-21 with Sharpe 0.29 while being plainly worse than doing nothing with
+# the money. Real cash pays interest: BIL (1-3 month T-bills) returned 1.39%/yr at Sharpe 2.84 with a
+# 0.78% drawdown, against S4's 2.09%/yr at Sharpe 0.49 with a 13.6% drawdown.
+# The deeper fix is in metrics.compute_metrics, which now measures Sharpe in EXCESS of cash. With that,
+# BIL's own Sharpe is ~0 and "beats benchmark" means "earned more than cash, per unit of risk" --
+# which is the question. BIL starts in 2007; earlier dates contribute flat cash, understating the
+# hurdle (rates were higher then) and so being generous to the strategy.
+BENCHMARKS: dict[str, list[str] | None] = {"S1": None, "S2": ["SPY"], "S3": ["SPY"], "S4": ["BIL"], "S8": None}
 
 
 @dataclass
@@ -79,7 +88,7 @@ def _grid(cls: type[Strategy]) -> list[dict]:
 
 def _slice_metrics(res: BacktestResult, start, end) -> Metrics:
     eq = res.equity.loc[start:end]
-    return compute_metrics(eq, res.trades, res.exposure)
+    return compute_metrics(eq, res.trades, res.exposure, risk_free=risk_free_returns(eq.index))
 
 
 def _neighbours(params: dict, grid: dict[str, list]) -> list[dict]:
@@ -144,8 +153,8 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
     bench_label = "cash (0%)" if not bench_syms else "buy & hold " + ", ".join(bench_syms)
     bench_costs = {s: c.total_bps + c.broker_fee_bps for s, c in symbol_costs(bench_syms, settings).items()}
     bench = buy_and_hold(bars, bench_syms, calendar, capital, bench_costs)
-    bench_is = compute_metrics(bench.loc[eval_start:split])
-    bench_oos = compute_metrics(bench.loc[split:end])
+    bench_is = _cash_adjusted(bench.loc[eval_start:split])
+    bench_oos = _cash_adjusted(bench.loc[split:end])
 
     # Walk-forward: choose on the previous `wf_train_years`, trade the next `wf_test_years`.
     wf_returns = []
@@ -162,8 +171,8 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
         rets = rets[~rets.index.duplicated(keep="first")]
         wf_equity = capital * (1 + rets).cumprod()
         wf_equity = pd.concat([pd.Series([capital], index=[rets.index[0] - pd.Timedelta(days=1)]), wf_equity])
-        wf_m = compute_metrics(wf_equity)
-        bench_wf = compute_metrics(bench.loc[wf_equity.index[1]:end])
+        wf_m = _cash_adjusted(wf_equity)
+        bench_wf = _cash_adjusted(bench.loc[wf_equity.index[1]:end])
 
     neighbour_sharpes = [_slice_metrics(runs[_key(n)], eval_start, split).sharpe for n in _neighbours(chosen, cls.param_grid)]
     robustness = float(np.median(neighbour_sharpes) / is_m.sharpe) if neighbour_sharpes and is_m.sharpe > 0 else 0.0
@@ -209,9 +218,14 @@ def benchmark_symbols(code: str, symbols: list[str]) -> list[str]:
     return symbols if bench is None else bench
 
 
+def _cash_adjusted(equity: pd.Series) -> Metrics:
+    """Metrics whose Sharpe is measured in excess of cash, like every other figure in a Gate 1 report."""
+    return compute_metrics(equity, risk_free=risk_free_returns(equity.index))
+
+
 def _safe_sharpe(equity: pd.Series) -> float:
     try:
-        return compute_metrics(equity).sharpe
+        return _cash_adjusted(equity).sharpe
     except ValueError:
         return float("-inf")
 
