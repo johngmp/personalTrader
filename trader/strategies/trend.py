@@ -14,7 +14,7 @@ from typing import ClassVar
 import pandas as pd
 
 from trader.strategies.base import Holding, Strategy, Target
-from trader.strategies.indicators import atr, sma
+from trader.strategies.indicators import atr, efficiency_ratio, sma
 
 
 @dataclass
@@ -25,6 +25,15 @@ class TrendFollowing(Strategy):
     param_grid: ClassVar[dict] = {"fast": [20, 50], "slow": [100, 150, 200], "atr_mult": [2.5, 3.5, 4.5]}
     default_params: ClassVar[dict] = {"fast": 50, "slow": 200, "atr_mult": 3.5}
     atr_n: ClassVar[int] = 20
+    # Regime filter: skip NEW entries when the market is chopping. Kept OUT of param_grid and defaulting
+    # to 0.0 (off) because it failed Gate 1 on 2026-10-01: in-sample selection turned it off for S1, and
+    # for S8 it chose 0.25 but came out slightly worse out-of-sample (0.778 -> 0.768) and in walk-forward
+    # (0.671 -> 0.638), while tripling the grid from 18 to 54 trials.
+    # Worth keeping the code: at FIXED parameters it cut out-of-sample drawdown a lot (S1 -16.3% -> -8.2%,
+    # S8 -22.7% -> -13.1%). That was measured by looking at the out-of-sample period, so it cannot be
+    # acted on -- but it suggests retesting against a drawdown-aware objective rather than Sharpe, which
+    # does not reward the thing this filter actually does.
+    er_n: ClassVar[int] = 20
 
     @property
     def warmup_bars(self) -> int:
@@ -38,10 +47,12 @@ class TrendFollowing(Strategy):
                 "fast": sma(df["close"], int(self.params["fast"])),
                 "slow": sma(df["close"], int(self.params["slow"])),
                 "atr": atr(df, self.atr_n),
+                "er": efficiency_ratio(df["close"], self.er_n),
             })
 
     def on_bar(self, date: pd.Timestamp, holdings: dict[str, Holding]) -> dict[str, Target]:
         k = float(self.params["atr_mult"])
+        min_er = float(self.params.get("min_er", 0.0))
         targets: dict[str, Target] = {}
         for symbol in self.symbols:
             row = self.row(symbol, date)
@@ -50,7 +61,8 @@ class TrendFollowing(Strategy):
             in_trend = row["close"] > row["slow"] and row["fast"] > row["slow"]
             held = holdings.get(symbol)
             if held is None or held.qty <= 0:
-                if in_trend:
+                trending_cleanly = min_er <= 0 or (not isnan(row["er"]) and row["er"] >= min_er)
+                if in_trend and trending_cleanly:
                     targets[symbol] = Target(weight=1.0, stop=row["close"] - k * row["atr"], reason="trend up")
             elif not in_trend:
                 targets[symbol] = Target(weight=0.0, reason="trend ended")

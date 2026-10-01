@@ -30,3 +30,15 @@ def rsi(series: pd.Series, n: int) -> pd.Series:
 def momentum(series: pd.Series, n: int) -> pd.Series:
     """Total return over the last n bars."""
     return series / series.shift(n) - 1
+
+
+def efficiency_ratio(series: pd.Series, n: int) -> pd.Series:
+    """Kaufman's Efficiency Ratio: how much of the movement actually went somewhere.
+
+    Net change over n bars divided by the total distance travelled getting there. 1.0 is a straight line;
+    near 0 is a market that thrashed about and ended where it started. Used as a regime filter -- trend
+    following loses money in chop, and this measures chop directly rather than inferring it.
+    """
+    direction = (series - series.shift(n)).abs()
+    distance = series.diff().abs().rolling(n, min_periods=n).sum()
+    return direction / distance.replace(0, np.nan)

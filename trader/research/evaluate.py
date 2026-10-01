@@ -230,11 +230,12 @@ def _safe_sharpe(equity: pd.Series) -> float:
         return float("-inf")
 
 
-def distinct_trials(code: str, current: list[dict], symbols: list[str], log: Path = RESEARCH_LOG) -> int:
+def distinct_trials(code: str, current: list[dict], symbols: list[str], log: Path | None = None) -> int:
     """Distinct (settings, symbols) combinations ever tested for a strategy, including this run.
 
     Re-running the same test doesn't add trials; trying new settings or symbols does.
     """
+    log = log if log is not None else RESEARCH_LOG   # read at CALL time: a default binds at import
     seen = {_key({**p, "_symbols": sorted(symbols)}) for p in current}
     if log.exists():
         for line in log.read_text().splitlines():
@@ -253,8 +254,9 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def log_result(result: Gate1Result, report_path: Path | None, log: Path = RESEARCH_LOG) -> None:
+def log_result(result: Gate1Result, report_path: Path | None, log: Path | None = None) -> None:
     """Append one line per Gate 1 run, so the total number of variants ever tried stays visible."""
+    log = log if log is not None else RESEARCH_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),

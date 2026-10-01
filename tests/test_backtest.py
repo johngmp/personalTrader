@@ -155,3 +155,33 @@ def test_buy_and_hold_benchmark_pays_entry_cost():
     bench = buy_and_hold(bars, ["X"], bars["X"].index, 1000, {"X": 40.0})
     assert bench.iloc[0] == pytest.approx(1000 * 0.996)
     assert bench.iloc[-1] == pytest.approx(1000 * 0.996 * 1.2)
+
+
+def test_efficiency_ratio_tells_a_trend_from_chop():
+    """A straight line scores ~1; a market that thrashes and ends where it started scores ~0."""
+    import pandas as pd
+    from trader.strategies.indicators import efficiency_ratio
+
+    trend = pd.Series(range(1, 41), dtype=float)
+    chop = pd.Series([10.0 + (1 if i % 2 else -1) for i in range(40)])
+    assert efficiency_ratio(trend, 20).iloc[-1] == pytest.approx(1.0)
+    assert efficiency_ratio(chop, 20).iloc[-1] < 0.2
+
+
+def test_the_regime_filter_is_off_by_default():
+    """It failed Gate 1, so it must not be silently on, and must stay out of the searched grid."""
+    from trader.strategies.trend import TrendFollowing
+
+    assert "min_er" not in TrendFollowing.param_grid
+    assert float(TrendFollowing.default_params.get("min_er", 0.0)) == 0.0
+
+
+def test_the_regime_filter_only_blocks_entries_never_forces_an_exit():
+    """Exiting on a low reading would churn positions that are working."""
+    import inspect
+
+    from trader.strategies.trend import TrendFollowing
+
+    source = inspect.getsource(TrendFollowing.on_bar)
+    before_exit = source.split("elif not in_trend")[0]
+    assert "trending_cleanly" in before_exit and "trending_cleanly" not in source.split("elif not in_trend")[1]

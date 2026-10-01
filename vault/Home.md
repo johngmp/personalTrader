@@ -5,26 +5,31 @@ tags: ["home"]
 # Personal Trader
 
 <!-- engine:start -->
-Paper trading on Alpaca (stocks, crypto) and OANDA (forex). Last engine run: 2026-09-21T02:41:03+00:00 · kill switch: off
+Paper trading on Alpaca (stocks, crypto) and OANDA (forex). Last engine run: 2026-10-01T00:19:54+00:00 · kill switch: off
 
 | Sleeve | Strategy | Value | Return | Closed trades |
 |---|---|---|---|---|
-| [[Sleeves/B0\|B0]] | Buy-and-hold benchmark | $10,163.09 | +1.63% | 0 |
-| [[Sleeves/S1\|S1]] | Trend following | $10,125.50 | +1.25% | 0 |
-| [[Sleeves/S8\|S8]] | Trend following, diversified (19 markets) | $9,995.07 | -0.05% | 0 |
-| [[Sleeves/S9\|S9]] | FX trend (shadow, Yahoo prices, no broker) | $10,000.00 | +0.00% | 0 |
+| [[Sleeves/B0\|B0]] | Buy-and-hold benchmark | $10,334.51 | +3.35% | 0 |
+| [[Sleeves/S1\|S1]] | Trend following | $10,226.89 | +2.27% | 0 |
+| [[Sleeves/S8\|S8]] | Trend following, diversified (19 markets) | $9,951.01 | -0.49% | 2 |
+| [[Sleeves/S9\|S9]] | FX trend (shadow, Yahoo prices, no broker) | $9,973.08 | -0.27% | 1 |
 
 ## Latest trades
+- [[Trades/2026/09/2026-09-21_S9_AUD-USD_104d84|2026-09-21 S9 AUD/USD]]
+- [[Trades/2026/09/2026-09-21_S8_UUP_bb4ff1|2026-09-21 S8 UUP]]
+- [[Trades/2026/09/2026-09-21_S8_XLV_1c4e44|2026-09-21 S8 XLV]]
+- [[Trades/2026/09/2026-09-21_S8_XLE_c647cf|2026-09-21 S8 XLE]]
+- [[Trades/2026/09/2026-09-21_S8_USO_0145fe|2026-09-21 S8 USO]]
+- [[Trades/2026/09/2026-09-21_S8_DBC_8745e4|2026-09-21 S8 DBC]]
+- [[Trades/2026/09/2026-09-21_S8_EEM_524826|2026-09-21 S8 EEM]]
+- [[Trades/2026/09/2026-09-21_S8_EFA_0f4131|2026-09-21 S8 EFA]]
+- [[Trades/2026/09/2026-09-21_S8_IWM_8b465a|2026-09-21 S8 IWM]]
+- [[Trades/2026/09/2026-09-21_S8_QQQ_0749a3|2026-09-21 S8 QQQ]]
+- [[Trades/2026/09/2026-09-21_S8_SPY_604279|2026-09-21 S8 SPY]]
 - [[Trades/2026/09/2026-09-19_S8_SOL-USD_364ca6|2026-09-19 S8 SOL/USD]]
 - [[Trades/2026/09/2026-09-19_S8_ETH-USD_53434c|2026-09-19 S8 ETH/USD]]
 - [[Trades/2026/09/2026-09-19_S8_BTC-USD_14402a|2026-09-19 S8 BTC/USD]]
 - [[Trades/2026/09/2026-09-18_S1_SPY_be47fe|2026-09-18 S1 SPY]]
-- [[Trades/2026/09/2026-09-18_S1_QQQ_8f41cc|2026-09-18 S1 QQQ]]
-- [[Trades/2026/09/2026-09-18_B0_QQQ_974cbb|2026-09-18 B0 QQQ]]
-- [[Trades/2026/09/2026-09-18_B0_SPY_304462|2026-09-18 B0 SPY]]
-- [[Trades/2026/09/2026-09-18_S1_ETH-USD_8e48bd|2026-09-18 S1 ETH/USD]]
-- [[Trades/2026/09/2026-09-18_S1_BTC-USD_554231|2026-09-18 S1 BTC/USD]]
-- [[Trades/2026/09/2026-09-18_B0_BTC-USD_aa481d|2026-09-18 B0 BTC/USD]]
 
 See also: [[Learnings/learnings]] · [[Changelog]]
 <!-- engine:end -->
