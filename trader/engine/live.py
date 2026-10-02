@@ -123,7 +123,8 @@ class Engine:
             ("position state", self._refresh_states),  # register positions filled just now...
             ("protective stops", self._protect),       # ...so they get their stop in this same run
             ("sleeve values", self._record_equity),
-            *([("vault", self._write_vault), ("dashboard", self._write_dashboard), ("daily digest", self._digest)]
+            *([("AUD rate", self._record_fx_rate), ("vault", self._write_vault),
+               ("dashboard", self._write_dashboard), ("daily digest", self._digest)]
               if self.shared_outputs else []),
         ]
         for name, step in steps:
@@ -239,6 +240,12 @@ class Engine:
             equity, invested = self.sleeve_value(sleeve)
             adjusted = equity - self.journal.sleeve_haircut(sleeve.id)
             self.journal.record_sleeve_equity(sleeve.id, equity, adjusted, invested)
+
+    def _record_fx_rate(self, report: RunReport) -> None:
+        """Store AUD per USD so the dashboard and menu bar never make a network call to render."""
+        from trader.money import fetch_rate, store_rate
+
+        store_rate(self.journal, fetch_rate(self.clock()))
 
     def _write_vault(self, report: RunReport) -> None:
         from trader.journal.vault import write_vault

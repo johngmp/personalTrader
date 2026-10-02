@@ -19,6 +19,7 @@ import rumps
 
 from trader.config import Settings, load_settings
 from trader.journal.db import Journal
+from trader.money import format_aud, stored_rate
 from trader.risk.kill_switch import KillSwitch
 
 REFRESH_S = 60
@@ -56,6 +57,7 @@ class TraderBar(rumps.App):
                                     cfg.broker.startswith("shadow")))
             last_run = journal.kv_get("last_run")
             return {"rows": rows, "sleeves": sleeves, "last_run": last_run,
+                    "rate": stored_rate(journal),
                     "summary": journal.kv_get("last_run_summary", "")}
         finally:
             journal.close()
@@ -85,6 +87,10 @@ class TraderBar(rumps.App):
             self.title = f"PT {'+' if pnl >= 0 else '−'}${abs(pnl):,.0f}"
             items.append(rumps.MenuItem(f"Account  {_money(now_eq)}"))
             items.append(rumps.MenuItem(f"P&L      {_money(pnl, signed=True)}  ({pnl / start:+.2%})"))
+            aud = format_aud(now_eq, snap.get("rate"))
+            if aud:   # empty when there is no trustworthy rate; a wrong one is worse than none
+                items.append(rumps.MenuItem(f"In AUD   {aud}   "
+                                            f"({format_aud(pnl, snap['rate'], signed=True)})"))
 
         # Staleness is the thing most worth knowing at a glance: a flat number from a dead engine
         # looks exactly like a flat number from a quiet market.

@@ -76,6 +76,11 @@ def cmd_status(settings: Settings, _: argparse.Namespace) -> int:
         print(f"Last engine run: {journal.kv_get('last_run', 'never')} ({journal.kv_get('last_run_summary', '-')})")
         print(f"Equity {_money(account.equity)} · cash {_money(account.cash)} · "
               f"today {'+' if day_pnl >= 0 else ''}{_money(day_pnl)} · account status {account.status}")
+        from trader.money import format_aud, stored_rate
+
+        rate = stored_rate(journal)
+        if rate and not rate.is_stale():
+            print(f"       {format_aud(account.equity, rate)} at {1 / rate.aud_per_usd:.4f} AUD/USD")
         positions = broker.get_positions()
         print(f"\nPositions ({len(positions)}):")
         for p in positions:

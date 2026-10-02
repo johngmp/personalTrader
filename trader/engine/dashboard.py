@@ -16,6 +16,7 @@ import pandas as pd
 
 from trader.config import Settings
 from trader.journal.db import Journal, trading_day_start
+from trader.money import format_aud, stored_rate
 from trader.journal.vault import Trip, round_trips
 
 if TYPE_CHECKING:
@@ -159,6 +160,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "sleeves": sleeves, "trips": sorted(trips, key=lambda t: t.entry_ts, reverse=True), "price": price,
         "states": {(s["sleeve_id"], s["symbol"]): s for s in journal.position_states()},
         "orders": journal.recent_order_rows(25),
+        "rate": stored_rate(journal),
         "research": latest_research(settings),
         "blocked": blocked_orders(journal),
         "warnings": [e for e in journal.recent_events(60) if e["level"] in ("warning", "error", "critical")][:12],
@@ -291,6 +293,12 @@ def render(d: dict) -> str:
         f"<td class='num'>{(format(b['qty'], 'g') if b['qty'] else _money(b['notional']))}</td>"
         f"<td class='why'>{html.escape(b['summary'] or '')}</td></tr>" for b in d["blocked"]) or \
         "<tr><td colspan=6 class='subtle'>Nothing has been blocked.</td></tr>"
+    # USD is the currency these assets trade in and the one strategies are judged in; AUD is what the
+    # account holder actually spends. Shown alongside, never instead.
+    aud_total = format_aud(d["total"], d["rate"])
+    aud_line = (f'<div class="subtle">{aud_total} at {1 / d["rate"].aud_per_usd:.4f} AUD/USD '
+                f'({format_aud(d["total_pnl"], d["rate"], signed=True)} since the start)</div>'
+                if aud_total else "")
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
     total_base = d["start_equity"] or 1
     chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"],
@@ -326,7 +334,8 @@ def render(d: dict) -> str:
 <div class="grid top">
 <div class="card chartcard"><div class="row"><div><div class="label">Account balance · all paper accounts</div>
 <div class="hero">{_money(d['total'])}</div>
-<div class="{_tone(d['day_pnl'])}">{_money(d['day_pnl'], signed=True)} ({_pct(d['day_pct'])}) today</div></div>
+<div class="{_tone(d['day_pnl'])}">{_money(d['day_pnl'], signed=True)} ({_pct(d['day_pct'])}) today</div>
+{aud_line}</div>
 <div class="spacer"></div><div class="ranges" data-for="account">
 <button data-r="1D">1D</button><button data-r="1W">1W</button><button data-r="1M">1M</button><button data-r="3M">3M</button>
 <button data-r="YTD">YTD</button><button data-r="All" class="on">All</button></div></div>
