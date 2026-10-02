@@ -17,6 +17,7 @@
   ctrader-setup   stores the cTrader Open API app credentials in .env (prompted, not echoed)
   ctrader-auth    approve the app against your cTrader DEMO account and store its tokens
   menubar         account P&L in the Mac menu bar (read-only, plus halt/resume)
+  excursions S1   MAE/MFE per trade: is the stop in the right place?
 
 For the AI skills (Phase 4):
   context --json          accounts, sleeves, positions, recent trades, signals, learnings version
@@ -330,6 +331,54 @@ def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
     from trader.engine.serve import serve
 
     serve(settings, port=args.port)
+    return 0
+
+
+def cmd_excursions(settings: Settings, args: argparse.Namespace) -> int:
+    """How far trades went against you, and in your favour, before closing.
+
+    The P&L alone cannot tell you whether a stop is in the right place. MAE on WINNERS can: if winners
+    routinely take 0.9R of heat, a 1R stop is about to start cutting them off; if they never go past
+    0.5R, it is not the stop costing you money.
+    """
+    import numpy as np
+
+    from trader.data.history import load_many
+    from trader.research.backtest import run_backtest
+    from trader.research.evaluate import strategy_setup, symbol_costs
+    from trader.strategies import REGISTRY
+
+    codes = [args.strategy] if args.strategy and args.strategy != "all" else list(REGISTRY)
+    for code in codes:
+        if code not in REGISTRY:
+            print(f"Unknown strategy {code}. Choose from {list(REGISTRY)} or 'all'.")
+            return 2
+        cls, symbols, capital, limits = strategy_setup(code, settings)
+        sleeve = settings.sleeves.get(code)
+        params = dict(sleeve.params) if sleeve and sleeve.params else dict(cls.default_params)
+        result = run_backtest(cls(params=params, symbols=symbols), load_many(symbols), capital, limits,
+                              symbol_costs(symbols, settings))
+        trades = [t for t in result.trades if t.mae_r is not None and t.r_multiple is not None]
+        if not trades:
+            print(f"{code}: no completed trades with a recorded stop.")
+            continue
+        won = [t for t in trades if t.pnl > 0]
+        lost = [t for t in trades if t.pnl <= 0]
+        pct = lambda xs, p: float(np.percentile(xs, p)) if xs else float("nan")  # noqa: E731
+        print(f"\n{code} {cls.title}: {len(trades)} trades, {len(won)} winners "
+              f"({len(won) / len(trades):.0%}), params {params}")
+        print(f"  {'':14}{'median':>9}{'75th':>9}{'90th':>9}{'worst':>9}")
+        for label, values in (("MAE winners", [t.mae_r for t in won]), ("MAE losers", [t.mae_r for t in lost]),
+                              ("MFE winners", [t.mfe_r for t in won]), ("MFE losers", [t.mfe_r for t in lost])):
+            if values:
+                print(f"  {label:14}{pct(values, 50):>9.2f}{pct(values, 75):>9.2f}"
+                      f"{pct(values, 90):>9.2f}{max(values):>9.2f}")
+        threatened = [t for t in won if t.mae_r >= 0.9]
+        gave_back = [t for t in lost if t.mfe_r > 1.0]
+        print(f"  winners that came within 0.1R of the stop: {len(threatened)} "
+              f"({len(threatened) / max(len(won), 1):.0%})  -- a stop that is too tight shows up here")
+        print(f"  losers that were once up more than 1R:     {len(gave_back)} "
+              f"({len(gave_back) / max(len(lost), 1):.0%})  -- open profit handed back")
     return 0
 
 
@@ -698,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("ctrader-setup", help="store the cTrader Open API app credentials in .env")
     sub.add_parser("ctrader-auth", help="grant the app access to your cTrader demo account")
     sub.add_parser("menubar", help="account P&L in the Mac menu bar")
+    p_exc = sub.add_parser("excursions", help="MAE/MFE: how far trades ran against you and for you")
+    p_exc.add_argument("strategy", nargs="?", default="all", help="strategy code, or all")
     p_ctx = sub.add_parser("context", help="state for the AI skills (JSON)")
     p_ctx.add_argument("--json", action="store_true", help="(always JSON)")
     p_ctx.add_argument("--days", type=int, default=7, help="include trades closed in the last N days")
@@ -722,7 +773,7 @@ def main(argv: list[str] | None = None) -> int:
                 "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
                 "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
-                "menubar": cmd_menubar,
+                "menubar": cmd_menubar, "excursions": cmd_excursions,
                 "candidates": cmd_candidates, "technicals": cmd_technicals, "signal": cmd_signal, "notify": cmd_notify}
     try:
         return handlers[args.command](load_settings(), args)

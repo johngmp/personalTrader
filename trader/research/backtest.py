@@ -34,6 +34,12 @@ class TradeRecord:
     initial_risk: float | None    # $ lost if the first stop had been hit
     bars_held: int
     exit_reason: str
+    # How far the trade went against you, and in your favour, while it was open -- in R, so they are
+    # comparable across symbols. MAE on WINNERS says how much heat a winner has to survive: if winners
+    # routinely dip to -0.8R, a 1R stop is cutting them off. MFE on LOSERS says how much open profit was
+    # handed back. Neither is visible from the P&L alone.
+    mae_r: float | None = None    # worst unrealised loss while open (positive number)
+    mfe_r: float | None = None    # best unrealised gain while open
 
     @property
     def r_multiple(self) -> float | None:
@@ -60,6 +66,8 @@ class _Position:
     realized: float = 0.0       # profit already booked by partial sells
     initial_risk: float | None = None
     peak_qty: float = 0.0
+    lowest: float = float("inf")    # price extremes since entry, for MAE/MFE
+    highest: float = 0.0
 
 
 @dataclass
@@ -126,6 +134,8 @@ def run_backtest(
             if pos:
                 pos.holding.bars_held += 1
                 pos.holding.high_since_entry = max(pos.holding.high_since_entry, bar.close)
+                pos.lowest = min(pos.lowest, bar.low)
+                pos.highest = max(pos.highest, bar.high)
                 carry = costs[symbol].carry_bps_per_day / 10_000
                 if carry:
                     charge = pos.holding.qty * bar.close * carry
@@ -221,9 +231,16 @@ def _execute(book: _Book, symbol: str, order: _Order, ref_price: float, date: pd
     pos.holding.qty -= qty
     if pos.holding.qty <= 1e-12:
         h = pos.holding
+        risk = pos.initial_risk
+        mae_r = mfe_r = None
+        if risk:
+            low = min(pos.lowest, fill) if pos.lowest != float("inf") else fill
+            high = max(pos.highest, fill)
+            mae_r = pos.peak_qty * (h.entry_price - low) / risk
+            mfe_r = pos.peak_qty * (high - h.entry_price) / risk
         book.trades.append(TradeRecord(
             symbol=symbol, entry_date=h.entry_date, exit_date=date, entry_price=h.entry_price, exit_price=fill,
             qty=pos.peak_qty, pnl=pos.realized, initial_risk=pos.initial_risk, bars_held=h.bars_held,
-            exit_reason=order.reason or how,
+            exit_reason=order.reason or how, mae_r=mae_r, mfe_r=mfe_r,
         ))
         del book.positions[symbol]
