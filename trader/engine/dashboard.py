@@ -323,13 +323,13 @@ def render(d: dict) -> str:
 <header><div class="brand">PT</div><div><h1>Dashboard</h1><div class="subtle">{d['now'].astimezone():%A, %d %B %Y · %H:%M}</div></div>
 <div class="spacer"></div>
 <div class="account"><div><b>Paper trading</b> <span class="pill {'bad' if d['kill_switch'] else 'ok'}">{'Halted' if d['kill_switch'] else 'Active'}</span>
-<span class="pill closed">Auto</span></div><div class="subtle">Last engine run {html.escape(last_run)} UTC · orders today {d['orders_today']}/{d['max_orders']}</div></div></header>
+<span class="pill closed">Auto</span></div><div class="subtle">Last engine run {html.escape(last_run)} UTC · orders today {d['orders_today']}/{d['max_orders']}</div></div>
+<button id="claude-toggle" aria-expanded="false" aria-controls="claude-panel" title="Ask Claude (⌘J)">Ask Claude</button></header>
 <nav class="tabs" role="tablist">
 <button class="tab active" data-tab="overview" role="tab">Overview</button>
 <button class="tab" data-tab="trades" role="tab">Trading history</button>
 <button class="tab" data-tab="orders" role="tab">Orders &amp; warnings</button>
-<button class="tab" data-tab="evidence" role="tab">Evidence</button>
-<button class="tab" data-tab="ask" role="tab">Ask Claude</button></nav>
+<button class="tab" data-tab="evidence" role="tab">Evidence</button></nav>
 <main>
 <section data-panel="overview">
 <div class="grid top">
@@ -384,22 +384,23 @@ T-bills". A strategy that fails here has not earned real money, whatever its rec
 <p class="subtle">Orders the strategies wanted to place and the gate refused. Nothing here reached a broker.</p>
 <div class="card scroll"><table><tr><th>Time (UTC)</th><th>Sleeve</th><th>Side</th><th>Symbol</th>
 <th>Size</th><th>Why it was blocked</th></tr>{blocked_rows}</table></div></section>
-<section data-panel="ask" hidden>
-<h2>Ask about this account</h2>
-<p class="subtle">Runs on your Claude subscription. It can read the project and run read-only
-<code>trader</code> commands. It cannot write files, place orders, move the kill switch or read your
-credentials &mdash; those are refused before the command runs, not by asking it nicely.
-It will not tell you what to buy.</p>
-<div class="card"><div id="chat-log" class="chatlog"></div>
+</main>
+<aside id="claude-panel" hidden aria-label="Ask Claude">
+<div class="ap-head"><b>Claude</b><span class="spacer"></span>
+<button id="claude-clear" title="Start a new conversation">New</button>
+<button id="claude-close" title="Hide (⌘J)">&times;</button></div>
+<div id="chat-log" class="chatlog"></div>
+<div class="ap-foot">
 <div class="chips">
 <button class="chip">How is S1 doing against the benchmark?</button>
 <button class="chip">Why did my last trade lose money?</button>
 <button class="chip">Has the engine missed any runs today?</button>
 <button class="chip">Which strategies pass Gate 1, and why does S4 fail?</button></div>
-<form id="chat-form"><input id="chat-input" class="search" autocomplete="off"
- placeholder="Ask about your strategies, trades or the engine&hellip;" aria-label="Ask Claude">
-<button type="submit" id="chat-send">Ask</button></form></div></section>
-</main><div class="tip" id="tip" hidden></div>
+<form id="chat-form"><input id="chat-input" autocomplete="off"
+ placeholder="Ask about your account&hellip;" aria-label="Ask Claude">
+<button type="submit" id="chat-send">Ask</button></form>
+<p class="ap-note">Reads your data and runs read-only <code>trader</code> commands.
+Cannot place orders, change files or read credentials. Will not tell you what to buy.</p></div></aside><div class="tip" id="tip" hidden></div>
 <script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script>
 <script>{CHAT_JS}</script></body></html>"""
 
@@ -418,19 +419,38 @@ def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine])
 
 
 CSS = """
-.chatlog{max-height:52vh;overflow-y:auto;display:flex;flex-direction:column;gap:.5rem;margin-bottom:.75rem}
-.msg{padding:.55rem .8rem;border-radius:10px;white-space:pre-wrap;line-height:1.5;max-width:90%}
+/* Claude lives in a persistent right-hand panel, not a tab: it is for asking about what you are
+   looking at, which only works if it is beside the thing you are looking at. */
+#claude-panel{position:fixed;top:0;right:0;width:400px;height:100vh;z-index:40;display:flex;
+  flex-direction:column;background:#111110;border-left:1px solid var(--line);box-shadow:-18px 0 40px #0008}
+#claude-panel[hidden]{display:none}
+body.claude-open main,body.claude-open header,body.claude-open nav.tabs{margin-right:400px}
+.ap-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.ap-head button{background:none;border:0;color:#898781;font-size:1rem;cursor:pointer;padding:2px 8px;border-radius:6px}
+.ap-head button:hover{background:#232321;color:#e8e6e1}
+.ap-foot{padding:10px 14px 14px;border-top:1px solid var(--line)}
+.ap-note{font-size:.72rem;color:#6e6c67;line-height:1.45;margin:.6rem 0 0}
+#claude-toggle{background:#232321;border:1px solid #3a3a37;color:#c9c7c1;border-radius:999px;
+  padding:.35rem .9rem;font-size:.85rem;cursor:pointer;white-space:nowrap}
+#claude-toggle:hover{border-color:#c98500;color:#e8e6e1}
+body.claude-open #claude-toggle{background:#c98500;color:#1a1a18;border-color:#c98500}
+@media (max-width:1100px){#claude-panel{width:100%}body.claude-open main,body.claude-open header,
+  body.claude-open nav.tabs{margin-right:0}}
+.chatlog{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:.5rem;padding:14px}
+.msg{padding:.5rem .75rem;border-radius:10px;white-space:pre-wrap;line-height:1.5;max-width:94%;font-size:.88rem}
 .msg.you{align-self:flex-end;background:#2a2a28;color:#e8e6e1}
 .msg.claude{align-self:flex-start;background:#1d1d1b;border:1px solid #333;color:#e8e6e1}
 .msg.tool{align-self:flex-start;font-size:.8rem;color:#898781;font-family:ui-monospace,monospace;padding:.2rem .5rem}
 .msg.err{align-self:flex-start;background:#3a1f1f;color:#f0a0a0;font-size:.85rem}
-.chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.6rem}
-.chip{background:#232321;border:1px solid #3a3a37;color:#c9c7c1;border-radius:999px;padding:.3rem .7rem;
-      font-size:.82rem;cursor:pointer}
+.chips{display:flex;flex-wrap:wrap;gap:.35rem;margin-bottom:.5rem}
+.chip{background:#232321;border:1px solid #3a3a37;color:#c9c7c1;border-radius:999px;padding:.25rem .6rem;
+      font-size:.75rem;cursor:pointer;text-align:left}
 .chip:hover{border-color:#5a5a55}
 #chat-form{display:flex;gap:.5rem}
-#chat-form .search{flex:1;margin:0}
-#chat-send{background:#c98500;color:#1a1a18;border:0;border-radius:var(--radius,8px);padding:.5rem 1.1rem;
+#chat-input{flex:1;margin:0;background:#1b1b19;border:1px solid #3a3a37;color:#e8e6e1;
+  border-radius:var(--radius,8px);padding:.5rem .7rem;font:inherit;font-size:.88rem}
+#chat-input:focus{outline:none;border-color:#c98500}
+#chat-send{background:#c98500;color:#1a1a18;border:0;border-radius:var(--radius,8px);padding:.5rem .9rem;
            font-weight:500;cursor:pointer}
 #chat-send:disabled{opacity:.5;cursor:default}
 :root { --page:#0b0b0a; --surface:#141413; --surface2:#1b1b19; --line:#2c2c2a; --ink:#fff; --ink2:#c3c2b7;
@@ -506,8 +526,34 @@ CHAT_JS = r"""
   }, Math.max(secs, 15) * 1000);
 })();
 (function () {
+  var panel = document.getElementById('claude-panel'), toggle = document.getElementById('claude-toggle');
+  if (!panel || !toggle) return;
+  function setOpen(open) {
+    panel.hidden = !open;
+    document.body.classList.toggle('claude-open', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    try { localStorage.setItem('claudePanel', open ? '1' : '0'); } catch (e) {}
+    if (open) { var i = document.getElementById('chat-input'); if (i) i.focus(); }
+  }
+  toggle.addEventListener('click', function () { setOpen(panel.hidden); });
+  var close = document.getElementById('claude-close');
+  if (close) close.addEventListener('click', function () { setOpen(false); });
+  var fresh = document.getElementById('claude-clear');
+  if (fresh) fresh.addEventListener('click', function () {
+    document.getElementById('chat-log').innerHTML = ''; window.__ptSession = null;
+    document.getElementById('chat-input').focus();
+  });
+  document.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') { e.preventDefault(); setOpen(panel.hidden); }
+    if (e.key === 'Escape' && !panel.hidden) setOpen(false);
+  });
+  var saved = '0'; try { saved = localStorage.getItem('claudePanel') || '0'; } catch (e) {}
+  setOpen(saved === '1');
+})();
+(function () {
   var form = document.getElementById('chat-form'), input = document.getElementById('chat-input'),
-      log = document.getElementById('chat-log'), send = document.getElementById('chat-send'), session = null;
+      log = document.getElementById('chat-log'), send = document.getElementById('chat-send');
+  window.__ptSession = window.__ptSession || null;
   if (!form) return;
   function add(cls, text) {
     var el = document.createElement('div'); el.className = 'msg ' + cls; el.textContent = text;
@@ -522,7 +568,7 @@ CHAT_JS = r"""
     input.value = ''; send.disabled = true; window.__ptBusy = true; add('you', q);
     var reply = null, thinking = add('tool', 'Thinking\u2026');
     fetch('/ask', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                   body: JSON.stringify({question: q, session_id: session})})
+                   body: JSON.stringify({question: q, session_id: window.__ptSession})})
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
@@ -541,7 +587,7 @@ CHAT_JS = r"""
                 log.scrollTop = log.scrollHeight;
               } else if (ev.kind === 'done') {
                 if (thinking) { thinking.remove(); thinking = null; }
-                session = (ev.payload && ev.payload.session_id) || session; reply = null; send.disabled = false; window.__ptBusy = false;
+                window.__ptSession = (ev.payload && ev.payload.session_id) || window.__ptSession; reply = null; send.disabled = false; window.__ptBusy = false;
               } else if (ev.kind === 'error') {
                 if (thinking) { thinking.remove(); thinking = null; }
                 add('err', ev.payload); send.disabled = false; window.__ptBusy = false;
