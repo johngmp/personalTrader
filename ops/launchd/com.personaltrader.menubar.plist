@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: ops/install-menubar.sh fills in __ROOT__ and __UV__. Reads the journal; places no orders. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.personaltrader.menubar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV__</string><string>run</string><string>--project</string><string>__ROOT__</string>
+    <string>trader</string><string>menubar</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__ROOT__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__ROOT__/data/logs/menubar.log</string>
+  <key>StandardErrorPath</key>
+  <string>__ROOT__/data/logs/menubar.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+</dict>
+</plist>

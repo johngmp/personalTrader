@@ -16,6 +16,7 @@
   telegram-setup  finds your chat ID for the bot in .env and sends a test message
   ctrader-setup   stores the cTrader Open API app credentials in .env (prompted, not echoed)
   ctrader-auth    approve the app against your cTrader DEMO account and store its tokens
+  menubar         account P&L in the Mac menu bar (read-only, plus halt/resume)
 
 For the AI skills (Phase 4):
   context --json          accounts, sleeves, positions, recent trades, signals, learnings version
@@ -330,6 +331,13 @@ def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
 
     serve(settings, port=args.port)
     return 0
+
+
+def cmd_menubar(_settings: Settings, _args: argparse.Namespace) -> int:
+    """Live P&L in the menu bar. Reads the journal; never places an order."""
+    from trader.menubar import run
+
+    return run()
 
 
 def cmd_ctrader_setup(settings: Settings, _: argparse.Namespace) -> int:
@@ -689,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("telegram-setup", help="connect the Telegram bot in .env and send a test message")
     sub.add_parser("ctrader-setup", help="store the cTrader Open API app credentials in .env")
     sub.add_parser("ctrader-auth", help="grant the app access to your cTrader demo account")
+    sub.add_parser("menubar", help="account P&L in the Mac menu bar")
     p_ctx = sub.add_parser("context", help="state for the AI skills (JSON)")
     p_ctx.add_argument("--json", action="store_true", help="(always JSON)")
     p_ctx.add_argument("--days", type=int, default=7, help="include trades closed in the last N days")
@@ -713,6 +722,7 @@ def main(argv: list[str] | None = None) -> int:
                 "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
                 "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
+                "menubar": cmd_menubar,
                 "candidates": cmd_candidates, "technicals": cmd_technicals, "signal": cmd_signal, "notify": cmd_notify}
     try:
         return handlers[args.command](load_settings(), args)
