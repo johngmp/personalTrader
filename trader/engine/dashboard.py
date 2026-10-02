@@ -16,6 +16,8 @@ import pandas as pd
 
 from trader.config import Settings
 from trader.journal.db import Journal, trading_day_start
+from trader.engine.explain import GLOSSARY, headline
+from trader.models import AssetClass, format_price
 from trader.money import format_aud, stored_rate
 from trader.journal.vault import Trip, round_trips
 
@@ -161,6 +163,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "states": {(s["sleeve_id"], s["symbol"]): s for s in journal.position_states()},
         "orders": journal.recent_order_rows(25),
         "rate": stored_rate(journal),
+        "fx": fx_snapshot(settings, journal, engines),
         "research": latest_research(settings),
         "blocked": blocked_orders(journal),
         "warnings": [e for e in journal.recent_events(60) if e["level"] in ("warning", "error", "critical")][:12],
@@ -171,6 +174,44 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
                        if settings.sleeves.get(sid) is not None and is_shadow(settings.sleeves[sid].broker)},
         },
     }
+
+
+def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> dict:
+    """Forex: current rates, what the FX sleeve holds, and its Gate 1 verdict.
+
+    The verdict is shown next to the rates deliberately. An FX panel that lists prices and positions
+    without saying the strategy failed its own test reads as an invitation.
+    """
+    fx_sleeves = [s for s in settings.sleeves.values()
+                  if s.enabled and any(settings.asset_class(x) == AssetClass.FOREX for x in s.symbols)]
+    if not fx_sleeves:
+        return {}
+    engine = next((e for e in engines if e.broker.name == fx_sleeves[0].broker), None)
+    symbols, rows = sorted({x for s in fx_sleeves for x in s.symbols}), []
+    held = {}
+    for sleeve in fx_sleeves:
+        held.update(journal.sleeve_holdings(sleeve.id))
+    for symbol in symbols:
+        quote = None
+        if engine is not None:
+            try:
+                quote = engine.broker.get_quote(symbol, AssetClass.FOREX)
+            except Exception:
+                quote = None
+        state = journal.position_state(fx_sleeves[0].id, symbol)
+        rows.append({"symbol": symbol, "price": quote.price if quote else None,
+                     "ts": quote.ts if quote else None, "qty": held.get(symbol, 0.0),
+                     "stop": (state or {})["stop"] if state else None})
+    verdict = next((r for r in latest_research(settings) if r.get("strategy") in {s.strategy or s.id for s in fx_sleeves}), None)
+    clock = None
+    try:
+        from trader.brokers.oanda import fx_clock
+
+        clock = fx_clock(datetime.now(timezone.utc))
+    except Exception:
+        clock = None
+    return {"rows": rows, "sleeves": [s.id for s in fx_sleeves], "verdict": verdict,
+            "is_open": getattr(clock, "is_open", None)}
 
 
 def latest_research(settings: Settings) -> list[dict]:
@@ -227,8 +268,19 @@ def _research_card(r: dict, sleeves: list[dict]) -> str:
 </div>"""
 
 
+def _explain(label: str) -> str:
+    """A `title` attribute carrying what the term means and what a good value looks like."""
+    for term, (meaning, good) in GLOSSARY.items():
+        if label.startswith(term):
+            return html.escape(f"{meaning}\n\n{good}".strip())
+    return ""
+
+
 def _tile(label: str, value: str, sub: str = "", tone: str = "") -> str:
-    return (f'<div class="tile"><div class="label">{html.escape(label)}</div>'
+    tip = _explain(label)
+    cls = "label help" if tip else "label"
+    attr = f' title="{tip}"' if tip else ""
+    return (f'<div class="tile"><div class="{cls}"{attr}>{html.escape(label)}</div>'
             f'<div class="value {tone}">{value}</div><div class="subtle">{sub}</div></div>')
 
 
@@ -299,6 +351,31 @@ def render(d: dict) -> str:
     aud_line = (f'<div class="subtle">{aud_total} at {1 / d["rate"].aud_per_usd:.4f} AUD/USD '
                 f'({format_aud(d["total_pnl"], d["rate"], signed=True)} since the start)</div>'
                 if aud_total else "")
+    head_lines = "".join(f'<li class="hl-{tone}">{html.escape(text)}</li>' for tone, text in headline(d))
+    fx = d.get("fx") or {}
+    if fx.get("rows"):
+        v = fx.get("verdict") or {}
+        shut = "" if fx.get("is_open") else '<span class="pill closed">market shut</span>'
+        fx_rows = "".join(
+            f"<tr><td>{html.escape(r['symbol'])}</td>"
+            f"<td class='num'>{format_price(r['price'], AssetClass.FOREX) if r['price'] else '–'}</td>"
+            f"<td class='num'>{(format(r['qty'], 'g') if r['qty'] else '–')}</td>"
+            f"<td class='num'>{format_price(r['stop'], AssetClass.FOREX) if r.get('stop') else '–'}</td></tr>"
+            for r in fx["rows"])
+        verdict_note = ("" if not v else
+            f'<p class="subtle">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
+            f'{html.escape(str(v.get("verdict")))}</b> — out-of-sample Sharpe '
+            f'{v.get("oos_sharpe")} against cash. '
+            + ("" if v.get("verdict") == "PASS" else
+               "A negative number means these rules lost to leaving the money in T-bills, so this sleeve "
+               "sends nothing to any broker and its signals are not advice to act on.") + "</p>")
+        fx_card = f"""<h2>Forex {shut}</h2>
+<p class="subtle">{html.escape(", ".join(fx["sleeves"]))} trades these on live prices with
+<b>no orders sent anywhere</b>. Rates come from a free delayed feed, so they lag a few minutes.</p>
+<div class="card scroll"><table><tr><th>Pair</th><th>Rate</th><th>Held</th><th>Stop</th></tr>
+{fx_rows}</table></div>{verdict_note}"""
+    else:
+        fx_card = ""
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
     total_base = d["start_equity"] or 1
     chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"],
@@ -332,6 +409,7 @@ def render(d: dict) -> str:
 <button class="tab" data-tab="evidence" role="tab">Evidence</button></nav>
 <main>
 <section data-panel="overview">
+<ul class="headline">{head_lines}</ul>
 <div class="grid top">
 <div class="card chartcard"><div class="row"><div><div class="label">Account balance · all paper accounts</div>
 <div class="hero">{_money(d['total'])}</div>
@@ -365,6 +443,7 @@ def render(d: dict) -> str:
 <div class="legend">{legend_sleeves}</div>
 <div class="chart" id="sleeves-chart" aria-label="Sleeve values over time"></div></div>
 {shadow_card}
+{fx_card}
 <h2>Open positions</h2><div class="card scroll"><table>{trade_head}{open_rows or "<tr><td colspan=13 class='subtle'>No open positions.</td></tr>"}</table></div>
 </section>
 <section data-panel="trades" hidden><h2>Trading history</h2>
@@ -419,6 +498,13 @@ def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine])
 
 
 CSS = """
+ul.headline{list-style:none;margin:14px 0 22px;padding:0;display:flex;flex-direction:column;gap:.45rem}
+ul.headline li{padding:.55rem .9rem;border-radius:8px;border-left:3px solid #3a3a37;background:#161614;
+  font-size:.95rem;line-height:1.5;color:#d6d4cf}
+ul.headline li.hl-good{border-left-color:#199e70}
+ul.headline li.hl-warn{border-left-color:#c98500}
+ul.headline li.hl-bad{border-left-color:#d95926;background:#241614}
+.label.help{border-bottom:1px dotted #5a5a55;cursor:help;display:inline-block}
 /* Claude lives in a persistent right-hand panel, not a tab: it is for asking about what you are
    looking at, which only works if it is beside the thing you are looking at. */
 #claude-panel{position:fixed;top:0;right:0;width:400px;height:100vh;z-index:40;display:flex;
