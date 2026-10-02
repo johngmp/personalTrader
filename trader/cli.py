@@ -17,6 +17,7 @@
   ctrader-setup   stores the cTrader Open API app credentials in .env (prompted, not echoed)
   ctrader-auth    approve the app against your cTrader DEMO account and store its tokens
   menubar         account P&L in the Mac menu bar (read-only, plus halt/resume)
+  app             the dashboard in a native Mac window (same page, own Dock icon)
   excursions S1   MAE/MFE per trade: is the stop in the right place?
 
 For the AI skills (Phase 4):
@@ -387,6 +388,13 @@ def cmd_excursions(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_app(settings: Settings, _args: argparse.Namespace) -> int:
+    """The dashboard in a real Mac window. Starts the server first if nothing is listening."""
+    from trader.app import run
+
+    return run(settings.root)
+
+
 def cmd_menubar(_settings: Settings, _args: argparse.Namespace) -> int:
     """Live P&L in the menu bar. Reads the journal; never places an order."""
     from trader.menubar import run
@@ -752,6 +760,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("ctrader-setup", help="store the cTrader Open API app credentials in .env")
     sub.add_parser("ctrader-auth", help="grant the app access to your cTrader demo account")
     sub.add_parser("menubar", help="account P&L in the Mac menu bar")
+    sub.add_parser("app", help="the dashboard in a native Mac window")
     p_exc = sub.add_parser("excursions", help="MAE/MFE: how far trades ran against you and for you")
     p_exc.add_argument("strategy", nargs="?", default="all", help="strategy code, or all")
     p_ctx = sub.add_parser("context", help="state for the AI skills (JSON)")
@@ -778,7 +787,7 @@ def main(argv: list[str] | None = None) -> int:
                 "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
                 "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
-                "menubar": cmd_menubar, "excursions": cmd_excursions,
+                "menubar": cmd_menubar, "excursions": cmd_excursions, "app": cmd_app,
                 "candidates": cmd_candidates, "technicals": cmd_technicals, "signal": cmd_signal, "notify": cmd_notify}
     try:
         return handlers[args.command](load_settings(), args)
