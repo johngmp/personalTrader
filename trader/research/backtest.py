@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -95,7 +96,17 @@ def run_backtest(
     costs: dict[str, CostModel],
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
+    vol_target: float | None = None,
+    vol_window: int = 60,
 ) -> BacktestResult:
+    """`vol_target` (e.g. 0.12 for 12% a year) scales every target weight down when the book's own
+    recent volatility is above it. None = off, which is the default, so no existing result changes.
+
+    It only ever scales DOWN: the risk gate forbids leverage, so levering up in calm markets is not an
+    option here, and the documented benefit comes mostly from cutting exposure in volatile periods
+    anyway. Note that position size already comes from ATR, so per-position volatility is handled --
+    this is the portfolio-level question that ATR sizing does not answer.
+    """
     strategy.setup({s: bars[s] for s in strategy.symbols})
     ohlc = {s: dict(zip(bars[s].index, bars[s][["open", "high", "low", "close"]].itertuples(index=False)))
             for s in strategy.symbols}
@@ -149,7 +160,13 @@ def run_backtest(
 
         # 4) Strategy decides at the close; orders fill tomorrow.
         if equity > 0:
-            _plan_orders(strategy, date, today, book, values, equity, limits, pending)
+            scale = 1.0
+            if vol_target and len(equity_curve) > vol_window:
+                window = pd.Series(equity_curve[-(vol_window + 1):]).pct_change().dropna()
+                realised = float(window.std()) * math.sqrt(252)
+                if realised > 0:
+                    scale = min(1.0, vol_target / realised)
+            _plan_orders(strategy, date, today, book, values, equity, limits, pending, scale)
 
     index = pd.DatetimeIndex(calendar)
     symbol_pnl = {s: book.symbol_cash[s] + (book.positions[s].holding.qty * last_close[s] if s in book.positions else 0.0)
@@ -163,7 +180,7 @@ def run_backtest(
 
 
 def _plan_orders(strategy: Strategy, date: pd.Timestamp, today: dict, book: _Book, values: dict[str, float],
-                 equity: float, limits: SleeveLimits, pending: dict[str, _Order]) -> None:
+                 equity: float, limits: SleeveLimits, pending: dict[str, _Order], scale: float = 1.0) -> None:
     """Turn today's targets into orders using the same weight planning as live trading."""
     holdings = {s: p.holding for s, p in book.positions.items()}
     targets = {s: t for s, t in strategy.on_bar(date, holdings).items() if s in today}
@@ -174,6 +191,7 @@ def _plan_orders(strategy: Strategy, date: pd.Timestamp, today: dict, book: _Boo
     prices = {s: today[s].close for s in targets}
     current = {s: v / equity for s, v in values.items()}
     for symbol, weight in plan_weights(targets, current, prices, limits).items():
+        weight *= scale                      # volatility targeting; 1.0 when off
         pos = book.positions.get(symbol)
         price = prices[symbol]
         if weight <= 0:

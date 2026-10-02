@@ -185,3 +185,39 @@ def test_the_regime_filter_only_blocks_entries_never_forces_an_exit():
     source = inspect.getsource(TrendFollowing.on_bar)
     before_exit = source.split("elif not in_trend")[0]
     assert "trending_cleanly" in before_exit and "trending_cleanly" not in source.split("elif not in_trend")[1]
+
+
+# --- portfolio volatility targeting (default off; see PLAN.md "tested and rejected") ---------------
+
+def _vol_target_run(vol_target):
+    """S1's rules on real history, with and without portfolio vol targeting."""
+    from trader.config import load_settings
+    from trader.data.history import load_many
+    from trader.research.backtest import run_backtest
+    from trader.research.evaluate import strategy_setup, symbol_costs
+
+    settings = load_settings()
+    cls, symbols, capital, limits = strategy_setup("S1", settings)
+    bars = load_many(symbols)
+    return run_backtest(cls(params=dict(settings.sleeves["S1"].params), symbols=symbols), bars,
+                        capital, limits, symbol_costs(symbols, settings), vol_target=vol_target)
+
+
+def test_vol_targeting_off_by_default_changes_nothing():
+    """It defaults to None, so adding it must leave every existing result untouched."""
+    a, b = _vol_target_run(None), _vol_target_run(None)
+    assert float(a.equity.iloc[-1]) == pytest.approx(float(b.equity.iloc[-1]))
+
+
+def test_a_target_below_realised_volatility_cuts_exposure():
+    """S1 runs at ~7.5% a year, so only a target under that has anything to do."""
+    base = _vol_target_run(None)
+    tight = _vol_target_run(0.04)
+    assert tight.exposure.mean() < base.exposure.mean()
+
+
+def test_a_target_above_realised_volatility_does_nothing():
+    """It only ever scales down: the risk gate forbids leverage, so there is no levering up."""
+    base = _vol_target_run(None)
+    loose = _vol_target_run(0.50)
+    assert float(loose.equity.iloc[-1]) == pytest.approx(float(base.equity.iloc[-1]), rel=1e-9)

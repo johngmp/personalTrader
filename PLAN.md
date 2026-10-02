@@ -386,12 +386,13 @@ personalTrader/
 - [x] **MAE/MFE per trade** (2026-10-03): recorded in every backtest trade, `trader excursions`. Across 872 S1 and 4,160 S8 trades, **not one winner ever dipped past 1R** (worst heat 0.93R / 0.99R), so the stops are not cutting winners off. Winners reach a median 1.95R; only 6% of losers were ever up more than 1R
 - [x] **Deflated Sharpe in Gate 1** (2026-10-01): S1 100.0% and S8 99.9% after 72 distinct settings; **S4 fails at 30.4%** even though it now passes the benchmark check
 - [x] **Results in AUD** + `caffeinate` agent (2026-10-03)
-- [ ] Next candidates: volatility targeting; FX carry + trend; post-earnings drift; `vault/Knowledge/` research notes
+- [ ] Next candidates: FX carry + trend; post-earnings drift; `vault/Knowledge/` research notes
 
 #### Tested and rejected (do not re-try without a different design)
 | Idea | Date | Result |
 |---|---|---|
 | **Market-regime filter** (Kaufman efficiency ratio, entries only) | 2026-10-01 | **Rejected.** In-sample Sharpe fell at every setting, so Gate 1's in-sample selection turns it off for S1; S8 picked 0.25 and came out worse out-of-sample (0.778→0.768) and in walk-forward (0.671→0.638), while tripling the grid to 54 trials. At *fixed* parameters it halved drawdown (S1 −16.3%→−8.2%), but that was measured by peeking at out-of-sample and cannot be acted on. Code kept, default off. Worth one pre-registered retest against a **drawdown-aware objective**, since we select on Sharpe and Sharpe does not reward what it does |
+| **Portfolio volatility targeting** (scale weights down when the book's own vol exceeds a target) | 2026-10-03 | **Rejected on in-sample alone.** Nothing to manage: S1 already runs at **7.5%/yr** realised volatility and S8 at **9.9%**, so a normal 12% target binds on only 6.9% / 15.4% of days and changes Sharpe by ≤0.006. Forced to bind (an 8% target, below S8's 8.5% median) it makes S8 *worse*: 0.698 → 0.670, CAGR 6.38% → 5.74%. The existing machinery — ATR-derived position size, 1% risk per trade, exposure caps — has already done this job; exposure averages just 30% (S1) and 70% (S8). Vol targeting's documented benefit is for books running at 15-20%. `run_backtest(vol_target=…)` kept as research infrastructure, defaulted off and tested |
 | **Economic calendar blackout** (no entries N days before US payrolls) | 2026-10-03 | **Rejected on in-sample alone** — out-of-sample never touched. S8 got monotonically worse (0.698 → 0.690 → 0.672 → 0.659 at 1/2/3 days); S1 moved +0.011 Sharpe by blocking **2 trades out of 454**, which is noise. Structural reason: trend following holds for *weeks* and enters only a few hundred times in 22 years, so a narrow pre-event window almost never catches an entry — and where it did bite, the trades it removed were profitable |
 
 ### Phase 5: Tournament (≥ 90 days, mostly waiting)
