@@ -21,6 +21,7 @@ import pandas as pd
 
 from trader.config import PROJECT_ROOT, CostModel, Settings, SleeveLimits
 from trader.research.backtest import BacktestResult, run_backtest
+from trader.research.deflated import DSR_THRESHOLD, deflated_sharpe
 from trader.research.metrics import Metrics, buy_and_hold, compute_metrics, risk_free_returns
 from trader.strategies import REGISTRY
 from trader.strategies.base import Strategy
@@ -66,6 +67,7 @@ class Gate1Result:
     wf_metrics: Metrics | None
     bench_wf: Metrics | None
     robustness: float
+    deflated_sharpe: float
     neighbour_sharpes: list[float]
     oos_symbol_pnl: dict[str, float]
     full_trades: int
@@ -183,6 +185,18 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
             oos_symbol_pnl[tr.symbol] += tr.pnl
     full_trades = sum(1 for tr in res.trades if tr.exit_date >= eval_start)
 
+    # Deflated Sharpe: is the result better than the best-of-N that luck alone would have produced?
+    # N is every distinct setting ever tried for this strategy, not just this run's grid -- searching
+    # across sessions is still searching. Measured on the chosen strategy's full evaluated track record,
+    # in excess of cash, like every other Sharpe here.
+    ever = distinct_trials(code, grid, symbols)
+    chosen_equity = res.equity.loc[eval_start:end]
+    chosen_returns = chosen_equity.pct_change().dropna()
+    chosen_returns = chosen_returns - risk_free_returns(chosen_returns.index).reindex(chosen_returns.index).fillna(0.0)
+    years = max((chosen_equity.index[-1] - chosen_equity.index[0]).days / 365.25, 1e-9)
+    dsr = deflated_sharpe(chosen_returns, ever, [row["is_sharpe"] for row in grid_table],
+                          periods_per_year=len(chosen_returns) / years)
+
     dd_limit = max_drawdown_pct if max_drawdown_pct is not None else limits.max_drawdown_disable_pct
     checks = [
         GateCheck("Realistic backtest", True, "next-day fills, spread + slippage + fees on every trade, stops can gap"),
@@ -196,6 +210,9 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
                   f"walk-forward Sharpe {wf_m.sharpe:.2f} vs in-sample {is_m.sharpe:.2f}" if wf_m else "not enough history"),
         GateCheck("Not a lucky parameter choice", robustness >= 0.7,
                   f"neighbouring settings keep {robustness:.0%} of the Sharpe (need 70%)"),
+        GateCheck("Survives how hard we looked", dsr >= DSR_THRESHOLD,
+                  f"deflated Sharpe {dsr:.1%} confident after {ever} distinct settings tried "
+                  f"(need {DSR_THRESHOLD:.0%})"),
     ]
     if cls.per_symbol_check:
         traded = {s: v for s, v in oos_symbol_pnl.items() if v != 0}
@@ -205,9 +222,9 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
 
     return Gate1Result(
         strategy=code, symbols=symbols, benchmark=bench_label, capital=capital, eval_start=eval_start,
-        split_date=split, end=end, trials=len(grid), total_trials_ever=distinct_trials(code, grid, symbols), chosen_params=chosen,
+        split_date=split, end=end, trials=len(grid), total_trials_ever=ever, chosen_params=chosen,
         is_metrics=is_m, oos_metrics=oos_m, bench_is=bench_is, bench_oos=bench_oos, wf_metrics=wf_m,
-        bench_wf=bench_wf, robustness=robustness, neighbour_sharpes=neighbour_sharpes,
+        bench_wf=bench_wf, robustness=robustness, deflated_sharpe=dsr, neighbour_sharpes=neighbour_sharpes,
         oos_symbol_pnl=oos_symbol_pnl, full_trades=full_trades, checks=checks, grid_table=grid_table,
         equity=res.equity.loc[eval_start:], bench_equity=bench.loc[eval_start:], wf_equity=wf_equity,
     )
