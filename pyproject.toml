@@ -5,6 +5,7 @@ description = "Personal multi-market AI trading agent (paper trading first)"
 requires-python = ">=3.12"
 dependencies = [
     "alpaca-py>=0.40",
+    "claude-agent-sdk>=0.2.163",
     "httpx>=0.27",
     "matplotlib>=3.11.2",
     "numpy>=1.26",

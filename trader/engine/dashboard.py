@@ -318,7 +318,7 @@ def render(d: dict) -> str:
     last_run = (d["last_run"] or "never").replace("T", " ")[:16]
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="300">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="pt-refresh" content="300">
 <title>Trader dashboard</title><style>{CSS}</style></head><body>
 <header><div class="brand">PT</div><div><h1>Dashboard</h1><div class="subtle">{d['now'].astimezone():%A, %d %B %Y · %H:%M}</div></div>
 <div class="spacer"></div>
@@ -328,7 +328,8 @@ def render(d: dict) -> str:
 <button class="tab active" data-tab="overview" role="tab">Overview</button>
 <button class="tab" data-tab="trades" role="tab">Trading history</button>
 <button class="tab" data-tab="orders" role="tab">Orders &amp; warnings</button>
-<button class="tab" data-tab="evidence" role="tab">Evidence</button></nav>
+<button class="tab" data-tab="evidence" role="tab">Evidence</button>
+<button class="tab" data-tab="ask" role="tab">Ask Claude</button></nav>
 <main>
 <section data-panel="overview">
 <div class="grid top">
@@ -383,8 +384,24 @@ T-bills". A strategy that fails here has not earned real money, whatever its rec
 <p class="subtle">Orders the strategies wanted to place and the gate refused. Nothing here reached a broker.</p>
 <div class="card scroll"><table><tr><th>Time (UTC)</th><th>Sleeve</th><th>Side</th><th>Symbol</th>
 <th>Size</th><th>Why it was blocked</th></tr>{blocked_rows}</table></div></section>
+<section data-panel="ask" hidden>
+<h2>Ask about this account</h2>
+<p class="subtle">Runs on your Claude subscription. It can read the project and run read-only
+<code>trader</code> commands. It cannot write files, place orders, move the kill switch or read your
+credentials &mdash; those are refused before the command runs, not by asking it nicely.
+It will not tell you what to buy.</p>
+<div class="card"><div id="chat-log" class="chatlog"></div>
+<div class="chips">
+<button class="chip">How is S1 doing against the benchmark?</button>
+<button class="chip">Why did my last trade lose money?</button>
+<button class="chip">Has the engine missed any runs today?</button>
+<button class="chip">Which strategies pass Gate 1, and why does S4 fail?</button></div>
+<form id="chat-form"><input id="chat-input" class="search" autocomplete="off"
+ placeholder="Ask about your strategies, trades or the engine&hellip;" aria-label="Ask Claude">
+<button type="submit" id="chat-send">Ask</button></form></div></section>
 </main><div class="tip" id="tip" hidden></div>
-<script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script></body></html>"""
+<script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script>
+<script>{CHAT_JS}</script></body></html>"""
 
 
 def dashboard_html(settings: Settings, journal: Journal, engines: list[Engine], refresh_s: int = 300) -> str:
@@ -401,6 +418,21 @@ def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine])
 
 
 CSS = """
+.chatlog{max-height:52vh;overflow-y:auto;display:flex;flex-direction:column;gap:.5rem;margin-bottom:.75rem}
+.msg{padding:.55rem .8rem;border-radius:10px;white-space:pre-wrap;line-height:1.5;max-width:90%}
+.msg.you{align-self:flex-end;background:#2a2a28;color:#e8e6e1}
+.msg.claude{align-self:flex-start;background:#1d1d1b;border:1px solid #333;color:#e8e6e1}
+.msg.tool{align-self:flex-start;font-size:.8rem;color:#898781;font-family:ui-monospace,monospace;padding:.2rem .5rem}
+.msg.err{align-self:flex-start;background:#3a1f1f;color:#f0a0a0;font-size:.85rem}
+.chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.6rem}
+.chip{background:#232321;border:1px solid #3a3a37;color:#c9c7c1;border-radius:999px;padding:.3rem .7rem;
+      font-size:.82rem;cursor:pointer}
+.chip:hover{border-color:#5a5a55}
+#chat-form{display:flex;gap:.5rem}
+#chat-form .search{flex:1;margin:0}
+#chat-send{background:#c98500;color:#1a1a18;border:0;border-radius:var(--radius,8px);padding:.5rem 1.1rem;
+           font-weight:500;cursor:pointer}
+#chat-send:disabled{opacity:.5;cursor:default}
 :root { --page:#0b0b0a; --surface:#141413; --surface2:#1b1b19; --line:#2c2c2a; --ink:#fff; --ink2:#c3c2b7;
   --muted:#898781; --up:#2fbf71; --down:#e66767; --warn:#fab219; --accent:#c98500; }
 * { box-sizing:border-box; }
@@ -460,6 +492,68 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; } th:nth-child(n+6
   font-size:12px; z-index:10; box-shadow:0 8px 24px rgba(0,0,0,.4); }
 .tip i { display:inline-block; width:10px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
 p.bad { color:var(--down); }
+"""
+
+CHAT_JS = r"""
+(function () {
+  // The page used to reload itself with a meta refresh, which wiped the conversation mid-answer.
+  // Reload from here instead, and never while the Ask tab is open or an answer is arriving.
+  var secs = parseInt((document.querySelector('meta[name=pt-refresh]') || {}).content || '300', 10);
+  window.__ptBusy = false;
+  setInterval(function () {
+    var onAsk = document.querySelector('.tab[data-tab="ask"].active');
+    if (!onAsk && !window.__ptBusy) location.reload();
+  }, Math.max(secs, 15) * 1000);
+})();
+(function () {
+  var form = document.getElementById('chat-form'), input = document.getElementById('chat-input'),
+      log = document.getElementById('chat-log'), send = document.getElementById('chat-send'), session = null;
+  if (!form) return;
+  function add(cls, text) {
+    var el = document.createElement('div'); el.className = 'msg ' + cls; el.textContent = text;
+    log.appendChild(el); log.scrollTop = log.scrollHeight; return el;
+  }
+  document.querySelectorAll('.chip').forEach(function (c) {
+    c.addEventListener('click', function () { input.value = c.textContent; form.requestSubmit(); });
+  });
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var q = input.value.trim(); if (!q) return;
+    input.value = ''; send.disabled = true; window.__ptBusy = true; add('you', q);
+    var reply = null, thinking = add('tool', 'Thinking\u2026');
+    fetch('/ask', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                   body: JSON.stringify({question: q, session_id: session})})
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
+        (function pump() {
+          return reader.read().then(function (res) {
+            if (res.done) { send.disabled = false; return; }
+            buf += dec.decode(res.value, {stream: true});
+            var parts = buf.split('\n\n'); buf = parts.pop();
+            parts.forEach(function (chunk) {
+              if (chunk.indexOf('data: ') !== 0) return;
+              var ev; try { ev = JSON.parse(chunk.slice(6)); } catch (err) { return; }
+              if (ev.kind === 'tool') { if (thinking) { thinking.remove(); thinking = null; } add('tool', ev.payload); }
+              else if (ev.kind === 'text') {
+                if (thinking) { thinking.remove(); thinking = null; }
+                if (!reply) reply = add('claude', ''); reply.textContent += ev.payload;
+                log.scrollTop = log.scrollHeight;
+              } else if (ev.kind === 'done') {
+                if (thinking) { thinking.remove(); thinking = null; }
+                session = (ev.payload && ev.payload.session_id) || session; reply = null; send.disabled = false; window.__ptBusy = false;
+              } else if (ev.kind === 'error') {
+                if (thinking) { thinking.remove(); thinking = null; }
+                add('err', ev.payload); send.disabled = false; window.__ptBusy = false;
+              }
+            });
+            return pump();
+          });
+        })();
+      })
+      .catch(function (err) { if (thinking) thinking.remove(); add('err', String(err)); send.disabled = false; window.__ptBusy = false; });
+  });
+})();
 """
 
 JS = r"""
