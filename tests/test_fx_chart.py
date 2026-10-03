@@ -145,3 +145,19 @@ def test_the_two_panels_do_not_share_a_list_selector():
     source = inspect.getsource(dash)
     assert 'class="pairlist symlist"' not in source
     assert "list: '.pairlist'" in dash.FX_JS and "list: '.symlist'" in dash.FX_JS
+
+
+def test_intraday_candles_are_labelled_with_times_not_dates():
+    """Six x-axis labels all reading "2 Oct" say nothing about where you are in the session."""
+    assert "if (spanDays <= 1.5)" in dash.FX_JS
+    assert "getHours()" in dash.FX_JS and "padStart(2, '0')" in dash.FX_JS
+
+
+def test_short_windows_are_fetched_rather_than_embedded():
+    """Embedding intraday for every symbol would put the 18-second page build straight back."""
+    assert "range === '1D' || range === '5D'" in dash.FX_JS
+    assert "fetch('/intraday?symbol=" in dash.FX_JS
+
+
+def test_a_failed_intraday_fetch_says_so_instead_of_showing_an_empty_chart():
+    assert "Could not load" in dash.FX_JS and "if (j.error)" in dash.FX_JS

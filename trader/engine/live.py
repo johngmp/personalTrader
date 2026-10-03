@@ -242,10 +242,20 @@ class Engine:
             self.journal.record_sleeve_equity(sleeve.id, equity, adjusted, invested)
 
     def _record_fx_rate(self, report: RunReport) -> None:
-        """Store AUD per USD so the dashboard and menu bar never make a network call to render."""
+        """Store AUD per USD so the dashboard and menu bar never make a network call to render.
+
+        Swallows its own failures deliberately. Every other step reports through `report.problems`, which
+        also sends a Telegram warning -- the right severity for "could not place a protective stop" and
+        badly wrong for "could not fetch a display currency". The AUD column simply does not appear when
+        the rate is missing or stale, which is already handled, so a failure here costs nothing. Letting
+        it escalate would also make a quiet network blip look like a trading fault.
+        """
         from trader.money import fetch_rate, store_rate
 
-        store_rate(self.journal, fetch_rate(self.clock()))
+        try:
+            store_rate(self.journal, fetch_rate(self.clock()))
+        except Exception as exc:
+            self.journal.log(f"AUD rate unavailable: {type(exc).__name__}: {exc}", level="info")
 
     def _write_vault(self, report: RunReport) -> None:
         from trader.journal.vault import write_vault

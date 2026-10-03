@@ -80,6 +80,37 @@ def make_handler(settings: Settings, build_engine, refresh_s: int = 60):
             self.end_headers()
             self._stream_answer(question, resume)
 
+        def _intraday(self) -> None:
+            """Intraday candles for one symbol. Fetched on demand: pulling these for every symbol on
+            every page load would put the 18-second page build straight back."""
+            from urllib.parse import parse_qs, urlparse
+
+            from trader.data.intraday import IntradayError, candles
+
+            params = parse_qs(urlparse(self.path).query)
+            symbol = (params.get("symbol") or [""])[0]
+            window = (params.get("range") or ["1D"])[0]
+            known = set(settings.universe.symbols)
+            if symbol not in known:          # never let a query string choose what gets fetched
+                self.send_error(400, "Unknown symbol")
+                return
+            try:
+                body = json.dumps({"candles": candles(symbol, window)}).encode()
+                status = 200
+            except IntradayError as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                status = 200                  # a shut market is an answer, not a server fault
+            except Exception as exc:
+                log.exception("intraday failed")
+                body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
+                status = 500
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _stream_answer(self, question: str, resume: str | None) -> None:
             import anyio
 
@@ -108,7 +139,11 @@ def make_handler(settings: Settings, build_engine, refresh_s: int = 60):
                     pass
 
         def do_GET(self) -> None:  # noqa: N802 (http.server naming)
-            if self.path.split("?")[0] not in ("/", "/index.html"):
+            path = self.path.split("?")[0]
+            if path == "/intraday":
+                self._intraday()
+                return
+            if path not in ("/", "/index.html"):
                 self.send_error(404, "Only the dashboard is served here")
                 return
             from trader.engine.dashboard import dashboard_html

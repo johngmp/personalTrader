@@ -510,7 +510,8 @@ a few minutes.</p>
 <div class="card chartcard fxchart"><div class="row"><div>
 <div class="label" id="fx-title">&nbsp;</div><div class="subtle" id="fx-sub">&nbsp;</div></div>
 <div class="spacer"></div><div class="ranges" data-for="forex">
-<button data-r="1W">1W</button><button data-r="1M">1M</button><button data-r="3M" class="on">3M</button>
+<button data-r="1D">1D</button><button data-r="5D">5D</button><button data-r="1W">1W</button>
+<button data-r="1M">1M</button><button data-r="3M" class="on">3M</button>
 <button data-r="1Y">1Y</button><button data-r="All">All</button>
 </div></div>
 <div class="chart" id="fx-chart" aria-label="Exchange rate over time"></div></div>
@@ -602,7 +603,8 @@ low, which is what a stop is measured against.</p>
 <div class="card chartcard fxchart"><div class="row"><div>
 <div class="label" id="eq-title">&nbsp;</div><div class="subtle" id="eq-sub">&nbsp;</div></div>
 <div class="spacer"></div><div class="ranges" data-for="stocks">
-<button data-r="1W">1W</button><button data-r="1M">1M</button><button data-r="3M" class="on">3M</button>
+<button data-r="1D">1D</button><button data-r="5D">5D</button><button data-r="1W">1W</button>
+<button data-r="1M">1M</button><button data-r="3M" class="on">3M</button>
 <button data-r="1Y">1Y</button><button data-r="All">All</button>
 </div></div>
 <div class="chart" id="eq-chart" aria-label="Price over time"></div></div>
@@ -902,19 +904,72 @@ window.__ptCandlePanel = function (opts) {
                '" height="' + h.toFixed(1) + '" fill="' + (up ? UP : DOWN) + '" opacity="0.45"/>';
       });
     }
+    // Intraday candles need times: six labels all reading "2 Oct" tells you nothing about where you are
+    // in the session.
+    var spanDays = (Date.parse(candles[n - 1][0]) - Date.parse(candles[0][0])) / 864e5;
+    var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     var step = Math.max(1, Math.round(n / 6));
     for (var i = 0; i < n; i += step) {
-      var dt = new Date(candles[i][0]);
-      svg += '<text x="' + X(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' +
-             dt.getUTCDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getUTCMonth()] + '</text>';
+      var dt = new Date(candles[i][0]), lab;
+      if (spanDays <= 1.5) {
+        lab = String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+      } else if (spanDays <= 10) {
+        lab = dt.getDate() + ' ' + String(dt.getHours()).padStart(2, '0') + ':00';
+      } else {
+        lab = dt.getDate() + ' ' + MON[dt.getMonth()];
+      }
+      svg += '<text x="' + X(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + lab + '</text>';
     }
     chart.innerHTML = svg + '</svg>';
   }
 
+  var intraCache = {};
+  function showIntraday(pair, window) {
+    var key = pair + '|' + window;
+    title.textContent = pair;
+    if (intraCache[key]) return render(pair, intraCache[key], window);
+    sub.textContent = 'loading ' + window + '…';
+    chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">Fetching ' +
+                      window + ' candles…</p>';
+    fetch('/intraday?symbol=' + encodeURIComponent(pair) + '&range=' + window)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.error) {
+          sub.textContent = '';
+          chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">' + j.error + '</p>';
+          return;
+        }
+        intraCache[key] = j.candles;
+        if (current === pair && range === window) render(pair, j.candles, window);
+      })
+      .catch(function (e) {
+        chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">Could not load ' +
+                          window + ' candles: ' + e + '</p>';
+      });
+  }
+
+  function render(pair, pts, label) {
+    if (pts.length < 2) {
+      chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">Not enough data for ' +
+                        label + '.</p>';
+      sub.textContent = ''; return;
+    }
+    var pct = pts[0][4] ? (pts[pts.length - 1][4] / pts[0][4] - 1) * 100 : 0;
+    var hasVol = pts.some(function (c) { return c[5] > 0; });
+    sub.textContent = rate(pts[pts.length - 1][4]) + '  ·  ' + (pct >= 0 ? '+' : '') + pct.toFixed(2) +
+      '% over ' + label + (hasVol || !opts.noVolumeNote ? '' : '  ·  ' + opts.noVolumeNote);
+    draw(pts);
+  }
+
   function show(pair) {
+    if (range === '1D' || range === '5D') {
+      current = pair;
+      list.querySelectorAll('.pair,.sym').forEach(function (b) { b.classList.toggle('on', b.dataset.pair === pair); });
+      return showIntraday(pair, range);
+    }
     var all = series[pair];
     current = pair;
-    list.querySelectorAll('.pair').forEach(function (b) { b.classList.toggle('on', b.dataset.pair === pair); });
+    list.querySelectorAll('.pair,.sym').forEach(function (b) { b.classList.toggle('on', b.dataset.pair === pair); });
     title.textContent = pair;
     if (!all || all.length < 2) {
       chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">No price history for ' + pair + '.</p>';
@@ -924,11 +979,7 @@ window.__ptCandlePanel = function (opts) {
     var from = range === 'All' ? -Infinity : last - RANGE[range] * 864e5;
     var pts = all.filter(function (c) { return Date.parse(c[0]) >= from; });
     if (pts.length < 2) pts = all.slice(-2);
-    var pct = pts[0][4] ? (pts[pts.length - 1][4] / pts[0][4] - 1) * 100 : 0;
-    var hasVol = pts.some(function (c) { return c[5] > 0; });
-    sub.textContent = rate(pts[pts.length - 1][4]) + '  ·  ' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '% over ' + range +
-      (hasVol || !opts.noVolumeNote ? '' : '  ·  ' + opts.noVolumeNote);
-    draw(pts);
+    render(pair, pts, range);
   }
 
   list.addEventListener('click', function (e) {

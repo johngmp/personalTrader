@@ -82,3 +82,17 @@ def test_an_implausible_quote_is_refused(monkeypatch):
                             lambda self, s, a, _b=bad: Quote(symbol="AUD/USD", price=_b, ts=NOW))
         with pytest.raises(ValueError, match="plausible"):
             money.fetch_rate()
+
+
+def test_a_failed_rate_fetch_is_not_reported_as_a_trading_problem():
+    """`report.problems` sends a Telegram warning. "Could not fetch a display currency" does not
+    belong in the same channel as "could not place a protective stop"."""
+    import inspect
+
+    from trader.engine.live import Engine
+
+    source = inspect.getsource(Engine._record_fx_rate)
+    body = source.split('"""')[2]          # skip the docstring, which discusses report.problems
+    assert "try:" in body and "except Exception" in body
+    assert "report.problems" not in body, "a display currency must not escalate to a trading warning"
+    assert 'level="info"' in body, "it should still be logged, just not escalated"
