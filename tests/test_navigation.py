@@ -111,10 +111,21 @@ def test_every_nav_item_has_a_visible_word_not_just_an_icon(page):
 
 
 def test_the_watchlist_shows_every_traded_symbol_with_a_price(page):
+    """Every symbol an enabled sleeve can trade, and nothing else.
+
+    This used to assert a bare `>= 10` rows, which quietly tracked however many sleeves happened to be
+    switched on: disabling S8 took the watchlist to 8 and failed a test about the dashboard for a reason
+    that had nothing to do with it. The invariant worth holding is that the list matches the enabled
+    sleeves, so it now fails when a symbol is genuinely missing rather than when the count moves.
+    """
     import re
 
-    rows = re.findall(r'<div class="wrow">.*?</div>\s*(?=<div class="wrow"|</div>)', page, re.S)
-    assert len(rows) >= 10, "the watchlist should cover the traded universe"
+    from trader.config import load_settings
+
+    settings = load_settings()
+    expected = {sym for s in settings.sleeves.values() if s.enabled for sym in s.symbols}
+    shown = set(re.findall(r'<span class="wsym">([^<]+)</span>', page))
+    assert shown == expected, f"missing {sorted(expected - shown)}, unexpected {sorted(shown - expected)}"
     assert 'class="wpx"' in page
 
 

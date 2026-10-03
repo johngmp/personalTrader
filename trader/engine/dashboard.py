@@ -389,6 +389,28 @@ def _trip_row(t: Trip, price, state) -> str:
             f"<td class='why'>{html.escape(t.exit_reason or t.entry_reason or '')}</td></tr>")
 
 
+def _holding_row(t: Trip, price) -> str:
+    """One open position as a dense row: what it is on the left, what it is worth on the right.
+
+    Reuses the instrument-list row rather than inventing a third list style -- the same shape should
+    mean the same kind of thing everywhere on the page.
+    """
+    now = price(t.symbol)
+    pnl = t.pnl(now)
+    value = (now or 0) * t.buy_qty
+    base = t.buy_cost or 1
+    return (f'<div class="pair holding"><span class="p-l"><b>{html.escape(t.symbol)}</b>'
+            f'<span class="p-sub">{t.sleeve_id} · {t.buy_qty:g} @ {_money(t.entry_price)}</span></span>'
+            f'<span class="p-r"><span class="px">{_money(value)}</span>'
+            f'<span class="p-chg"><span class="{_tone(pnl)}">{_money(pnl, signed=True)}</span>'
+            f'<span class="subtle">{_pct(pnl / base)} since entry</span></span></span></div>')
+
+
+# A stock list reads better when the ticker has a word under it. We do not carry company names, and
+# inventing them would be worse than saying plainly what kind of thing each symbol is.
+ASSET_WORDS = {AssetClass.US_EQUITY: "US listed", AssetClass.CRYPTO: "Crypto", AssetClass.FOREX: "Spot FX"}
+
+
 def render(d: dict) -> str:
     k = d["kpis"]
     cash = sum(x["account"].cash for x in d["accounts"])
@@ -412,6 +434,15 @@ def render(d: dict) -> str:
 <div class="row gap subtle">{s['invested']:.0%} invested · {s['open']} open · {s['closed']} closed
 {'' if s['vs_b0'] is None else f"· <span class='{_tone(s['vs_b0'])}'>{_pct(s['vs_b0'])} vs B0</span>"}</div></div>"""
         for s in d["sleeves"])
+    sleeve_rows = "".join(
+        f'<div class="pair holding"><span class="p-l">'
+        f'<b><i class="sw" style="background:{SHADOW_COLOR if is_shadow(s.get("broker")) else SERIES_COLORS.get(s["id"], "#898781")}"></i>'
+        f'{s["id"]}</b><span class="p-sub">{html.escape(s["name"])}</span></span>'
+        f'<span class="p-r"><span class="px">{_money(s["equity"])}</span>'
+        f'<span class="p-chg"><span class="{_tone(s["return"])}">{_pct(s["return"])}</span>'
+        + (f'<span class="subtle">since start</span>' if s["vs_b0"] is None
+           else f'<span class="subtle">{_pct(s["vs_b0"])} vs B0</span>')
+        + "</span></span></div>" for s in d["sleeves"])
     open_rows = "".join(_trip_row(t, d["price"], d["states"].get((t.sleeve_id, t.symbol))) for t in d["trips"] if t.is_open)
     all_rows = "".join(_trip_row(t, d["price"], d["states"].get((t.sleeve_id, t.symbol))) for t in d["trips"])
     trade_head = ("<tr><th>Ticket</th><th>Sleeve</th><th>Symbol</th><th>Side</th><th>Open time (UTC)</th><th>Open price</th>"
@@ -453,13 +484,18 @@ def render(d: dict) -> str:
         + "</div>" for w in watch)
     sym_items = ""
     for i, w in enumerate([x for x in watch if x["asset_class"] != AssetClass.FOREX]):
-        change = (f'<span class="{"up" if w["change"] >= 0 else "down"}">{w["change"] * 100:+.2f}%</span>'
-                  f'<span class="subtle"> 1D</span>') if w["change"] is not None else ""
+        change = (f'<span class="p-chg"><span class="{"up" if w["change"] >= 0 else "down"}">'
+                  f'{w["change"] * 100:+.2f}%</span><span class="subtle">1D</span></span>'
+                  ) if w["change"] is not None else ""
         sym_items += (
             f'<button class="pair sym{" on" if i == 0 else ""}" data-pair="{html.escape(w["symbol"])}">'
-            f'<div class="row"><b>{html.escape(w["symbol"])}</b></div>'
-            f'<div class="row gap"><span class="px">{_money(w["price"])}</span>{change}</div></button>')
+            f'<span class="p-l"><b>{html.escape(w["symbol"])}</b>'
+            f'<span class="p-sub">{html.escape(ASSET_WORDS.get(w["asset_class"], ""))}</span></span>'
+            f'<span class="p-r"><span class="px">{_money(w["price"])}</span>{change}</span></button>')
     head_lines = "".join(f'<li class="hl-{tone}">{html.escape(text)}</li>' for tone, text in headline(d))
+    open_trips = [t for t in d["trips"] if t.is_open]
+    holdings_rows = "".join(_holding_row(t, d["price"]) for t in open_trips) or \
+        '<p class="subtle" style="padding:.5rem .55rem">Nothing is open. The strategies are in cash.</p>'
     fx = d.get("fx") or {}
     if fx.get("rows"):
         v = fx.get("verdict") or {}
@@ -484,15 +520,16 @@ def render(d: dict) -> str:
             if len(series) > 2:
                 first, last = series[-22][1], series[-1][1]     # ~one month of trading days
                 pct = (last / first - 1) * 100 if first else 0.0
-                change = (f'<span class="{"up" if pct >= 0 else "down"}">{pct:+.2f}%</span>'
-                          f'<span class="subtle"> 1M</span>')
+                change = (f'<span class="p-chg"><span class="{"up" if pct >= 0 else "down"}">'
+                          f'{pct:+.2f}%</span><span class="subtle">1M</span></span>')
             held = f'<span class="pill open">holding {r["qty"]:g}</span>' if r["qty"] else ""
+            note = ("stop " + format_price(r["stop"], AssetClass.FOREX)) if r.get("stop") else "no position"
             pair_items += (
                 f'<button class="pair{" on" if i == 0 else ""}" data-pair="{html.escape(r["symbol"])}">'
-                f'<div class="row"><b>{html.escape(r["symbol"])}</b><span class="spacer"></span>{held}</div>'
-                f'<div class="row gap"><span class="px">'
-                f'{format_price(r["price"], AssetClass.FOREX) if r["price"] else "–"}</span>{change}</div>'
-                f'<div class="subtle">{"stop " + format_price(r["stop"], AssetClass.FOREX) if r.get("stop") else "no position"}</div>'
+                f'<span class="p-l"><b>{html.escape(r["symbol"])}</b>'
+                f'<span class="p-sub">{html.escape(note)}</span></span>'
+                f'<span class="p-r"><span class="px">'
+                f'{format_price(r["price"], AssetClass.FOREX) if r["price"] else "–"}</span>{change}{held}</span>'
                 f'</button>')
         v = fx.get("verdict") or {}
         verdict_note = ("" if not v else
@@ -592,6 +629,13 @@ a few minutes.</p>
 <dl><div><dt>Equity</dt><dd>{_money(d['total'])}</dd></div><div><dt>Cash</dt><dd>{_money(cash)}</dd></div>
 <div><dt>Account size</dt><dd>{_money(d['start_equity'])}</dd></div><div><dt>Accounts</dt><dd>{len(d['accounts'])}</dd></div></dl>
 {f"<p class='bad'>Kill switch: {html.escape(d['kill_reason'])}</p>" if d['kill_switch'] else ''}</div></div>
+<div class="grid holdings-row">
+<div class="card"><div class="row"><div class="label">Open positions</div><div class="spacer"></div>
+<span class="subtle">{len(open_trips)} held · valued at the latest price</span></div>
+<div class="holdlist">{holdings_rows}</div></div>
+<div class="card"><div class="row"><div class="label">Strategies</div><div class="spacer"></div>
+<span class="subtle">each starts at $10,000</span></div>
+<div class="holdlist">{sleeve_rows}</div></div></div>
 <h2>Trading objectives</h2><div class="tiles">{tiles}</div>
 </section>
 <section data-panel="stocks" hidden>
@@ -674,155 +718,339 @@ def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine])
 
 
 CSS = """
-.fxlayout{display:grid;grid-template-columns:230px 1fr;gap:16px;align-items:start}
-.pairlist,.symlist{display:flex;flex-direction:column;gap:6px;max-height:460px;overflow-y:auto}
-.pair,.sym{text-align:left;background:#161614;border:1px solid var(--line);border-radius:10px;padding:.6rem .7rem;
-  cursor:pointer;color:#d6d4cf;display:flex;flex-direction:column;gap:.15rem}
-.pair:hover{border-color:#5a5a55}
-.pair.on{border-color:#c98500;background:#1d1b16}
-.pair .px{font-size:1.05rem;font-weight:500}
-.pair .subtle{font-size:.72rem}
-.fxchart .chart{height:380px}
-@media (max-width:900px){.fxlayout{grid-template-columns:1fr}.pairlist{max-height:none}}
-.rail{position:fixed;left:0;top:0;bottom:0;width:224px;background:#111110;border-right:1px solid var(--line);
-  display:flex;flex-direction:column;gap:2px;padding:10px 10px 12px;z-index:50;overflow-y:auto}
-.rail-top{display:flex;align-items:center;gap:9px;padding:2px 2px 10px}
-.rail-top button{background:none;border:0;color:#6e6c67;cursor:pointer;padding:3px;border-radius:6px;display:flex}
-.rail-top button:hover{background:#232321;color:#e8e6e1}
-.rail-name{font-size:.82rem;color:#c9c7c1;font-weight:500;white-space:nowrap}
-.rail-group{font-size:.66rem;letter-spacing:.09em;text-transform:uppercase;color:#5f5d58;
-  padding:12px 8px 5px;white-space:nowrap}
-.watchlist{display:flex;flex-direction:column;gap:1px;overflow-y:auto}
-.wrow{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:.3rem .5rem;border-radius:7px;font-size:.76rem}
-.wrow:hover{background:#1b1b19}
-.wsym{color:#c9c7c1}
-.wpx{color:#e8e6e1;text-align:right;font-variant-numeric:tabular-nums}
-.wrow .up,.wrow .down,.wrow .subtle{grid-column:2;text-align:right;font-size:.7rem}
-.dot-warn{width:6px;height:6px;border-radius:50%;background:#c98500;margin-left:auto}
-.rail-brand{width:30px;height:30px;border-radius:8px;background:#c98500;color:#1a1a18;font-weight:600;
-  display:flex;align-items:center;justify-content:center;font-size:.76rem;flex:0 0 auto}
-.rail-btn{width:100%;border:0;border-radius:8px;background:none;color:#a7a59f;cursor:pointer;
-  display:flex;align-items:center;gap:10px;padding:.45rem .5rem;font:inherit;font-size:.84rem;text-align:left}
-.rail-btn svg{flex:0 0 auto}
+/* ===================================================================================================
+   Personal Trader — interface styles.
+
+   Four rules, taken from how trading and fintech interfaces are actually built, and each one is a
+   decision rather than a preference:
+
+   1. NUMERALS ARE THE TYPOGRAPHY THAT MATTERS. Every figure is tabular, so digits occupy a fixed width
+      and a column of prices stays aligned as it updates. Proportional figures make a live price jitter
+      sideways on every tick, which reads as instability in the data rather than in the font.
+   2. COLOUR MEANS STATE, NOTHING ELSE. Green and red are reserved for profit and loss. They are never
+      used for decoration, so when something is green it always means the same thing. Measured, green
+      against red is only 1.52:1 in contrast, so colour alone cannot carry the meaning for the ~8% of men
+      with red-green colour deficiency: every figure also carries a + or - sign, and that sign is the
+      real signal. Colour is a second channel on top of it, never the only one.
+   3. ELEVATION COMES FROM SURFACE, NOT SHADOW. On a dark background a shadow is nearly invisible, so
+      depth is built from flat steps of lightness. There are no gradients in any area that shows data:
+      a gradient behind a number changes the contrast of that number across its own width.
+   4. SHOW THE EXCEPTION. Space goes to what needs attention. Everything that is simply fine stays quiet.
+
+   Contrast was checked rather than eyeballed: against both the page and the card surface, every text
+   token clears WCAG AA, and most clear AAA.
+   =================================================================================================== */
+
+:root{
+  /* Surfaces, as explicit elevation steps. Neutral and near-black: a warm background fights red, and
+     red has to stay unambiguous. */
+  --page:#0a0a0b; --s1:#101012; --s2:#16161a; --s3:#1d1d22; --s4:#26262d;
+  --line:#23232a; --line2:#2f2f38;
+  /* Text */
+  --ink:#f2f2f4; --ink2:#b6b6c0; --muted:#8a8a96;
+  /* State. Only these three carry meaning. */
+  --up:#30d158; --down:#ff5a4e; --warn:#ffd60a;
+  --up-bg:#0e2a18; --up-line:#1d5133; --down-bg:#2d1210; --down-line:#5e2420;
+  /* Brand. Deliberately not green or red, so it can never be mistaken for a result. */
+  --accent:#f0a830; --accent-ink:#17170f; --accent-bg:#2a1f0a; --accent-line:#4a360e;
+  /* Type scale */
+  --t-xs:11px; --t-sm:12px; --t-md:13px; --t-base:14px; --t-lg:16px; --t-xl:20px; --t-2xl:28px; --t-hero:40px;
+  --radius:10px; --radius-lg:14px; --radius-sm:7px;
+  --rail:236px; --rail-min:62px; --panel:400px;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--page); color:var(--ink); min-height:100vh;
+  font:var(--t-base)/1.5 var(--sans);
+  /* Tabular figures everywhere. See rule 1. */
+  font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1,"cv05" 1;
+  -webkit-font-smoothing:antialiased; padding-left:var(--rail);
+}
+::selection{background:var(--accent);color:var(--accent-ink)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--s4);border-radius:6px;border:3px solid var(--page)}
+::-webkit-scrollbar-thumb:hover{background:#34343d}
+::-webkit-scrollbar-track{background:transparent}
+
+/* --- type ---------------------------------------------------------------------------------------- */
+h1{font-size:var(--t-xl);margin:0;font-weight:600;letter-spacing:-.01em}
+h2{font-size:var(--t-md);font-weight:600;margin:30px 0 12px;color:var(--ink);
+   letter-spacing:.04em;text-transform:uppercase}
+h2 .pill{text-transform:none;letter-spacing:0}
+p{margin:.5rem 0}
+code{font-family:var(--mono);font-size:.92em;background:var(--s2);padding:.1em .35em;border-radius:4px;color:var(--ink2)}
+.subtle{color:var(--muted);font-size:var(--t-sm);line-height:1.55}
+.label{color:var(--muted);font-size:var(--t-xs);margin-bottom:5px;letter-spacing:.05em;text-transform:uppercase;font-weight:500}
+.spacer{flex:1}
+.mono{font-family:var(--mono);color:var(--ink2)}
+.sym{font-weight:600;letter-spacing:-.01em}
+/* The sign is the signal; colour is the second channel. See rule 2. */
+.up{color:var(--up)} .down{color:var(--down)} p.bad{color:var(--down)}
+.hero{font-size:var(--t-hero);font-weight:600;letter-spacing:-.025em;line-height:1.08;margin:4px 0 6px}
+.big{font-size:var(--t-2xl);font-weight:600;letter-spacing:-.02em;margin:6px 0 2px;line-height:1.15}
+
+/* --- header -------------------------------------------------------------------------------------- */
+header{display:flex;align-items:center;gap:16px;padding:16px 24px;border-bottom:1px solid var(--line);
+  flex-wrap:wrap;background:var(--page);position:sticky;top:0;z-index:30}
+.brand{width:34px;height:34px;border-radius:var(--radius);background:var(--s2);border:1px solid var(--line);
+  display:grid;place-items:center;font-weight:700;color:var(--accent);font-size:var(--t-sm);flex:0 0 auto}
+.account{text-align:right;line-height:1.4}
+.account b{font-weight:600}
+.tabs{display:flex;gap:22px;padding:0 24px;border-bottom:1px solid var(--line)}
+.tab{background:none;border:0;color:var(--muted);padding:14px 0;cursor:pointer;font:inherit;
+  border-bottom:2px solid transparent}
+.tab.active{color:var(--ink);border-bottom-color:var(--accent)}
+main{padding:4px 24px 56px;max-width:1500px;margin:0 auto}
+
+/* --- the left rail ------------------------------------------------------------------------------- */
+.rail{position:fixed;left:0;top:0;bottom:0;width:var(--rail);background:var(--s1);
+  border-right:1px solid var(--line);display:flex;flex-direction:column;gap:1px;
+  padding:12px 10px;z-index:50;overflow-y:auto;overscroll-behavior:contain}
+.rail-top{display:flex;align-items:center;gap:10px;padding:2px 4px 14px}
+.rail-top button{background:none;border:0;color:var(--muted);cursor:pointer;padding:4px;
+  border-radius:var(--radius-sm);display:flex}
+.rail-top button:hover{background:var(--s3);color:var(--ink)}
+.rail-brand{width:28px;height:28px;border-radius:8px;background:var(--accent);color:var(--accent-ink);
+  font-weight:700;display:flex;align-items:center;justify-content:center;font-size:var(--t-xs);flex:0 0 auto}
+.rail-name{font-size:var(--t-md);color:var(--ink);font-weight:600;white-space:nowrap;letter-spacing:-.01em}
+.rail-group{font-size:10px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);
+  padding:16px 8px 6px;white-space:nowrap;font-weight:600}
+.rail-btn{width:100%;border:0;border-radius:var(--radius-sm);background:none;color:var(--ink2);cursor:pointer;
+  display:flex;align-items:center;gap:11px;padding:.5rem;font:inherit;font-size:var(--t-md);text-align:left;
+  position:relative}
+.rail-btn svg{flex:0 0 auto;opacity:.75}
 .rail-btn span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rail-btn .count{margin-left:auto;font-style:normal;font-size:.7rem;color:#5f5d58;
-  background:#1d1d1b;border-radius:999px;padding:.05rem .4rem}
-.rail-btn:hover{background:#232321;color:#e8e6e1}
-.rail-btn.active{background:#232321;color:#c98500}
-body{padding-left:224px}
-/* Collapsed: icons only, same rail, no second layout to keep in step. */
-body.rail-min .rail{width:62px;align-items:center;padding-left:0;padding-right:0}
+.rail-btn .count{margin-left:auto;font-style:normal;font-size:var(--t-xs);color:var(--muted);
+  background:var(--s3);border-radius:999px;padding:.1rem .45rem;font-variant-numeric:tabular-nums}
+.rail-btn:hover{background:var(--s2);color:var(--ink)}
+.rail-btn:hover svg{opacity:1}
+.rail-btn.active{background:var(--s3);color:var(--ink);font-weight:500}
+.rail-btn.active svg{opacity:1;color:var(--accent)}
+/* A bar, not just a colour: the active row stays identifiable without relying on hue. */
+.rail-btn.active::before{content:"";position:absolute;left:-10px;top:6px;bottom:6px;width:3px;
+  background:var(--accent);border-radius:0 3px 3px 0}
+.dot-warn{width:6px;height:6px;border-radius:50%;background:var(--warn);margin-left:auto;flex:0 0 auto}
+.watchlist{display:flex;flex-direction:column;gap:0;overflow-y:auto}
+.wrow{display:grid;grid-template-columns:1fr auto;gap:0 10px;padding:.32rem .5rem;
+  border-radius:var(--radius-sm);font-size:var(--t-sm);align-items:baseline}
+.wrow:hover{background:var(--s2)}
+.wsym{color:var(--ink2);font-weight:500}
+.wpx{color:var(--ink);text-align:right;font-variant-numeric:tabular-nums;font-size:var(--t-sm)}
+.wrow .up,.wrow .down,.wrow .subtle{grid-column:2;text-align:right;font-size:var(--t-xs)}
+/* Collapsed: the same rail with a modifier, never a second layout to keep in step. */
+body.rail-min .rail{width:var(--rail-min);align-items:center;padding-left:0;padding-right:0}
 body.rail-min .rail-btn{width:40px;height:40px;justify-content:center;padding:0;gap:0}
 body.rail-min .rail-btn span,body.rail-min .rail-btn .count,body.rail-min .rail-name,
 body.rail-min .rail-group,body.rail-min .watchlist{display:none}
+body.rail-min .rail-btn.active::before{left:0}
 body.rail-min{padding-left:62px}
-#searchbar{position:fixed;left:62px;right:0;top:0;z-index:45;padding:10px 28px;background:#141412;
-  border-bottom:1px solid var(--line);display:none}
+
+/* --- search -------------------------------------------------------------------------------------- */
+#searchbar{position:fixed;left:var(--rail-min);right:0;top:0;z-index:45;padding:10px 24px;
+  background:var(--s1);border-bottom:1px solid var(--line);display:none}
 #searchbar.on{display:block}
-#searchbar input{width:100%;max-width:560px;background:#1b1b19;border:1px solid #3a3a37;color:#e8e6e1;
-  border-radius:8px;padding:.55rem .8rem;font:inherit}
-#searchbar input:focus{outline:none;border-color:#c98500}
+#searchbar input{width:100%;max-width:560px;background:var(--s2);border:1px solid var(--line2);
+  color:var(--ink);border-radius:var(--radius-sm);padding:.55rem .8rem;font:inherit}
+#searchbar input:focus{outline:none;border-color:var(--accent)}
 tr.hide{display:none}
-ul.headline{list-style:none;margin:14px 0 22px;padding:0;display:flex;flex-direction:column;gap:.45rem}
-ul.headline li{padding:.55rem .9rem;border-radius:8px;border-left:3px solid #3a3a37;background:#161614;
-  font-size:.95rem;line-height:1.5;color:#d6d4cf}
-ul.headline li.hl-good{border-left-color:#199e70}
-ul.headline li.hl-warn{border-left-color:#c98500}
-ul.headline li.hl-bad{border-left-color:#d95926;background:#241614}
-.label.help{border-bottom:1px dotted #5a5a55;cursor:help;display:inline-block}
-/* Claude lives in a persistent right-hand panel, not a tab: it is for asking about what you are
-   looking at, which only works if it is beside the thing you are looking at. */
-#claude-panel{position:fixed;top:0;right:0;width:400px;height:100vh;z-index:40;display:flex;
-  flex-direction:column;background:#111110;border-left:1px solid var(--line);box-shadow:-18px 0 40px #0008}
+
+/* --- the headline: the exception-first summary ---------------------------------------------------- */
+ul.headline{list-style:none;margin:18px 0 24px;padding:0;display:flex;flex-direction:column;gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:var(--radius-lg);overflow:hidden}
+ul.headline li{padding:.7rem 1rem .7rem 2.1rem;background:var(--s1);font-size:var(--t-md);
+  line-height:1.5;color:var(--ink2);position:relative}
+/* A glyph as well as a colour, so the status survives a greyscale screenshot or colourblind vision. */
+ul.headline li::before{position:absolute;left:.95rem;top:.7rem;font-weight:700;font-size:var(--t-md)}
+ul.headline li.hl-good{color:var(--ink)} ul.headline li.hl-good::before{content:"✓";color:var(--up)}
+ul.headline li.hl-warn{color:var(--ink)} ul.headline li.hl-warn::before{content:"!";color:var(--warn)}
+ul.headline li.hl-bad{color:var(--ink);background:var(--down-bg)}
+ul.headline li.hl-bad::before{content:"×";color:var(--down)}
+ul.headline li.hl-plain::before{content:"·";color:var(--muted)}
+.label.help{border-bottom:1px dotted var(--line2);cursor:help;display:inline-block}
+
+/* --- cards and grids ----------------------------------------------------------------------------- */
+.card{background:var(--s1);border:1px solid var(--line);border-radius:var(--radius-lg);padding:18px}
+.grid{display:grid;gap:14px}
+.grid.top{grid-template-columns:minmax(0,2fr) minmax(290px,1fr);margin-top:18px}
+.grid.sleeves{grid-template-columns:repeat(auto-fit,minmax(265px,1fr));margin-bottom:14px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.row.gap{margin-top:6px;gap:14px}
+.breakdown{display:flex;gap:16px;flex-wrap:wrap;color:var(--ink2);font-size:var(--t-sm);margin-top:10px}
+.sw{display:inline-block;width:14px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.legend{display:flex;gap:18px;color:var(--ink2);font-size:var(--t-sm);margin-top:10px;flex-wrap:wrap}
+.legend i{display:inline-block;width:14px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+
+/* --- range switch -------------------------------------------------------------------------------- */
+.ranges{display:flex;gap:2px;background:var(--page);border:1px solid var(--line);
+  border-radius:var(--radius-sm);padding:3px}
+.ranges button{background:none;border:0;color:var(--muted);font:inherit;font-size:var(--t-sm);
+  padding:4px 9px;border-radius:5px;cursor:pointer}
+.ranges button:hover{color:var(--ink)}
+.ranges button.on{background:var(--s3);color:var(--ink);font-weight:500}
+
+/* --- charts -------------------------------------------------------------------------------------- */
+.chart{position:relative;height:270px;margin-top:14px}
+.chart svg{width:100%;height:100%;display:block;overflow:visible}
+.chart text{fill:var(--muted);font-size:var(--t-xs);font-variant-numeric:tabular-nums}
+.chart .end{fill:var(--ink);font-weight:600;font-size:var(--t-sm)}
+.fxchart .chart{height:400px}
+
+/* --- the side card: limits and meters ------------------------------------------------------------ */
+.side .split{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0;padding:14px 0;
+  border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.meter{margin:14px 0}
+.track{height:5px;border-radius:3px;background:var(--s3);overflow:hidden}
+.fill{height:100%;background:var(--up);border-radius:3px;transition:width .3s ease}
+.fill.warn{background:var(--warn)} .fill.bad{background:var(--down)}
+dl{display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;margin:18px 0 0}
+dt{color:var(--muted);font-size:var(--t-xs);letter-spacing:.04em;text-transform:uppercase}
+dd{margin:3px 0 0;font-weight:600;font-size:var(--t-lg)}
+
+/* --- tiles --------------------------------------------------------------------------------------- */
+/* Four across, two rows. auto-fit fitted seven and left the eighth stranded on a row of its own,
+   and it also squeezed the labels until "Average winning trade" wrapped to two lines. */
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:var(--line);
+  border:1px solid var(--line);border-radius:var(--radius-lg);overflow:hidden;gap:1px}
+@media (max-width:1200px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:560px){.tiles{grid-template-columns:1fr}}
+.tile{padding:14px 16px;background:var(--s1)}
+.tile .value{font-size:var(--t-xl);font-weight:600;margin:3px 0;letter-spacing:-.02em}
+
+/* --- sleeve cards -------------------------------------------------------------------------------- */
+.sleeve .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.sleeve b{font-size:var(--t-base)}
+
+/* --- pills --------------------------------------------------------------------------------------- */
+.pill{display:inline-block;font-size:var(--t-xs);padding:2px 8px;border-radius:999px;
+  border:1px solid var(--line2);color:var(--ink2);font-weight:500;white-space:nowrap}
+.pill.ok{color:var(--up);border-color:var(--up-line);background:var(--up-bg)}
+.pill.warn{color:var(--warn);border-color:#5a4410;background:#2a2109}
+.pill.bad{color:var(--down);border-color:var(--down-line);background:var(--down-bg)}
+.pill.buy{color:var(--up);background:var(--up-bg);border-color:var(--up-line)}
+.pill.sell{color:var(--down);background:var(--down-bg);border-color:var(--down-line)}
+.pill.open{color:var(--accent);border-color:var(--accent-line);background:var(--accent-bg)}
+.pill.closed{color:var(--muted)}
+
+/* --- tables -------------------------------------------------------------------------------------- */
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:var(--t-md);white-space:nowrap}
+th{text-align:left;color:var(--muted);font-weight:500;font-size:var(--t-xs);padding:9px 10px;
+  border-bottom:1px solid var(--line);letter-spacing:.05em;text-transform:uppercase;
+  position:sticky;top:0;background:var(--s1);z-index:1}
+td{padding:9px 10px;border-bottom:1px solid var(--line)}
+tbody tr:last-child td,table tr:last-child td{border-bottom:0}
+table tr:hover td{background:var(--s2)}
+/* Money is right-aligned so decimal points line up down the column and magnitudes compare at a glance. */
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+th:nth-child(n+6){text-align:left}
+.why{color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis}
+.search{width:100%;max-width:330px;background:var(--s2);border:1px solid var(--line2);color:var(--ink);
+  border-radius:var(--radius-sm);padding:8px 11px;font:inherit;margin-bottom:12px}
+.search:focus{outline:none;border-color:var(--accent)}
+.warnings{margin:0;padding-left:18px;color:var(--ink2)}
+.warnings li{margin:7px 0}
+
+/* --- the instrument list beside a chart -----------------------------------------------------------
+   Flat rows inside one bordered container, rather than a stack of individual cards. A card per symbol
+   spends ~76px of height on borders and padding to show two numbers, which fits four symbols in the
+   column; these rows fit about fourteen. Density is the point of a list like this -- you are meant to
+   scan a market, and a market you have to scroll is a market you do not check. */
+.fxlayout{display:grid;grid-template-columns:260px 1fr;gap:14px;align-items:start}
+.pairlist,.symlist{display:flex;flex-direction:column;gap:1px;max-height:560px;overflow-y:auto;
+  background:var(--s1);border:1px solid var(--line);border-radius:var(--radius-lg);padding:5px}
+.pair,.sym{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;
+  text-align:left;background:none;border:0;border-radius:var(--radius-sm);padding:.45rem .55rem;
+  cursor:pointer;color:var(--ink2);font:inherit;position:relative}
+.pair:hover,.sym:hover{background:var(--s2)}
+.pair.on,.sym.on{background:var(--s3)}
+/* A bar marks the selected row. Background alone is too quiet at this density. */
+.pair.on::before,.sym.on::before{content:"";position:absolute;left:-5px;top:4px;bottom:4px;width:2px;
+  background:var(--accent);border-radius:0 2px 2px 0}
+.p-l{display:flex;flex-direction:column;min-width:0}
+.p-r{display:flex;flex-direction:column;align-items:flex-end;gap:1px}
+.pair b,.sym b{color:var(--ink);font-size:var(--t-md);font-weight:600;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.p-sub{font-size:var(--t-xs);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pair .px,.sym .px{font-size:var(--t-md);font-weight:600;color:var(--ink);letter-spacing:-.01em}
+.p-r .up,.p-r .down,.p-r .subtle{font-size:var(--t-xs)}
+.p-chg{display:flex;align-items:baseline;gap:5px}
+/* The two landing-page panels: what you hold, and how each strategy is doing. Every reference design
+   puts these on the front page, and this dashboard had them a tab away in a 13-column table. */
+.grid.holdings-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);margin-top:14px}
+.holdlist{display:flex;flex-direction:column;gap:1px;margin-top:10px;max-height:300px;overflow-y:auto}
+.pair.holding{cursor:default}
+.pair.holding:hover{background:var(--s2)}
+.pair.holding b{display:flex;align-items:center;gap:7px}
+.pair.holding .sw{margin:0;width:8px;height:8px;border-radius:50%}
+@media (max-width:900px){.grid.holdings-row{grid-template-columns:1fr}}
+.p-r .pill{font-size:10px;padding:1px 6px;margin-top:1px}
+@media (max-width:900px){.fxlayout{grid-template-columns:1fr}.pairlist,.symlist{max-height:none}}
+
+/* The chart's own header: the instrument named like a headline, its numbers under it. A 12px
+   all-caps label was right for "ACCOUNT BALANCE" and wrong for "EUR/USD", which is the subject of
+   the whole panel. */
+#fx-title,#eq-title{font-size:var(--t-xl);color:var(--ink);text-transform:none;letter-spacing:-.02em;
+  font-weight:600;margin-bottom:1px}
+#fx-sub,#eq-sub{font-size:var(--t-md)}
+
+/* --- Claude lives beside the data, not on its own page -------------------------------------------- */
+#claude-panel{position:fixed;top:0;right:0;width:var(--panel);height:100vh;z-index:40;display:flex;
+  flex-direction:column;background:var(--s1);border-left:1px solid var(--line)}
 #claude-panel[hidden]{display:none}
-body.claude-open main,body.claude-open header,body.claude-open nav.tabs{margin-right:400px}
-.ap-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--line)}
-.ap-head button{background:none;border:0;color:#898781;font-size:1rem;cursor:pointer;padding:2px 8px;border-radius:6px}
-.ap-head button:hover{background:#232321;color:#e8e6e1}
-.ap-foot{padding:10px 14px 14px;border-top:1px solid var(--line)}
-.ap-note{font-size:.72rem;color:#6e6c67;line-height:1.45;margin:.6rem 0 0}
-#claude-toggle{background:#232321;border:1px solid #3a3a37;color:#c9c7c1;border-radius:999px;
-  padding:.35rem .9rem;font-size:.85rem;cursor:pointer;white-space:nowrap}
-#claude-toggle:hover{border-color:#c98500;color:#e8e6e1}
-body.claude-open #claude-toggle{background:#c98500;color:#1a1a18;border-color:#c98500}
-@media (max-width:1100px){#claude-panel{width:100%}body.claude-open main,body.claude-open header,
-  body.claude-open nav.tabs{margin-right:0}}
-.chatlog{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:.5rem;padding:14px}
-.msg{padding:.5rem .75rem;border-radius:10px;white-space:pre-wrap;line-height:1.5;max-width:94%;font-size:.88rem}
-.msg.you{align-self:flex-end;background:#2a2a28;color:#e8e6e1}
-.msg.claude{align-self:flex-start;background:#1d1d1b;border:1px solid #333;color:#e8e6e1}
-.msg.tool{align-self:flex-start;font-size:.8rem;color:#898781;font-family:ui-monospace,monospace;padding:.2rem .5rem}
-.msg.err{align-self:flex-start;background:#3a1f1f;color:#f0a0a0;font-size:.85rem}
-.chips{display:flex;flex-wrap:wrap;gap:.35rem;margin-bottom:.5rem}
-.chip{background:#232321;border:1px solid #3a3a37;color:#c9c7c1;border-radius:999px;padding:.25rem .6rem;
-      font-size:.75rem;cursor:pointer;text-align:left}
-.chip:hover{border-color:#5a5a55}
+body.claude-open main,body.claude-open header,body.claude-open nav.tabs{margin-right:var(--panel)}
+.ap-head{display:flex;align-items:center;gap:8px;padding:15px 16px;border-bottom:1px solid var(--line)}
+.ap-head button{background:none;border:0;color:var(--muted);font-size:var(--t-md);cursor:pointer;
+  padding:3px 9px;border-radius:var(--radius-sm)}
+.ap-head button:hover{background:var(--s3);color:var(--ink)}
+.ap-foot{padding:12px 14px 14px;border-top:1px solid var(--line)}
+.ap-note{font-size:var(--t-xs);color:var(--muted);line-height:1.5;margin:.65rem 0 0}
+#claude-toggle{background:var(--s2);border:1px solid var(--line2);color:var(--ink2);border-radius:999px;
+  padding:.38rem .95rem;font:inherit;font-size:var(--t-md);cursor:pointer;white-space:nowrap}
+#claude-toggle:hover{border-color:var(--accent);color:var(--ink)}
+body.claude-open #claude-toggle{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);
+  font-weight:500}
+.chatlog{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:.55rem;padding:14px}
+.msg{padding:.55rem .8rem;border-radius:var(--radius);white-space:pre-wrap;line-height:1.55;
+  max-width:94%;font-size:var(--t-md)}
+.msg.you{align-self:flex-end;background:var(--s3);color:var(--ink)}
+.msg.claude{align-self:flex-start;background:var(--s2);border:1px solid var(--line);color:var(--ink)}
+.msg.tool{align-self:flex-start;font-size:var(--t-xs);color:var(--muted);font-family:var(--mono);
+  padding:.2rem .5rem}
+.msg.err{align-self:flex-start;background:var(--down-bg);border:1px solid var(--down-line);
+  color:var(--down);font-size:var(--t-md)}
+.chips{display:flex;flex-wrap:wrap;gap:.35rem;margin-bottom:.55rem}
+.chip{background:var(--s2);border:1px solid var(--line);color:var(--ink2);border-radius:999px;
+  padding:.28rem .65rem;font:inherit;font-size:var(--t-xs);cursor:pointer;text-align:left}
+.chip:hover{border-color:var(--line2);color:var(--ink);background:var(--s3)}
 #chat-form{display:flex;gap:.5rem}
-#chat-input{flex:1;margin:0;background:#1b1b19;border:1px solid #3a3a37;color:#e8e6e1;
-  border-radius:var(--radius,8px);padding:.5rem .7rem;font:inherit;font-size:.88rem}
-#chat-input:focus{outline:none;border-color:#c98500}
-#chat-send{background:#c98500;color:#1a1a18;border:0;border-radius:var(--radius,8px);padding:.5rem .9rem;
-           font-weight:500;cursor:pointer}
-#chat-send:disabled{opacity:.5;cursor:default}
-:root { --page:#0b0b0a; --surface:#141413; --surface2:#1b1b19; --line:#2c2c2a; --ink:#fff; --ink2:#c3c2b7;
-  --muted:#898781; --up:#2fbf71; --down:#e66767; --warn:#fab219; --accent:#c98500; }
-* { box-sizing:border-box; }
-body { margin:0; background:radial-gradient(1200px 500px at 70% -10%, #1d1a12 0%, var(--page) 60%); color:var(--ink);
-  font:14px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif; min-height:100vh; }
-header { display:flex; align-items:center; gap:16px; padding:20px 28px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
-.brand { width:36px; height:36px; border-radius:10px; background:var(--surface2); border:1px solid var(--line);
-  display:grid; place-items:center; font-weight:700; color:var(--accent); }
-h1 { font-size:22px; margin:0; font-weight:650; } h2 { font-size:15px; font-weight:600; margin:28px 0 10px; }
-.spacer { flex:1; } .subtle { color:var(--muted); font-size:12px; } .label { color:var(--ink2); font-size:12px; margin-bottom:4px; }
-.account { text-align:right; } .account b { font-weight:600; }
-.tabs { display:flex; gap:22px; padding:0 28px; border-bottom:1px solid var(--line); }
-.tab { background:none; border:0; color:var(--muted); padding:14px 0; cursor:pointer; font:inherit; border-bottom:2px solid transparent; }
-.tab.active { color:var(--ink); border-bottom-color:var(--accent); }
-main { padding:8px 28px 48px; max-width:1400px; margin:0 auto; }
-.card { background:linear-gradient(180deg,var(--surface2),var(--surface)); border:1px solid var(--line); border-radius:14px; padding:18px; }
-.grid { display:grid; gap:14px; } .grid.top { grid-template-columns:minmax(0,2fr) minmax(280px,1fr); margin-top:18px; }
-.grid.sleeves { grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); margin-bottom:14px; }
-@media (max-width:900px) { .grid.top { grid-template-columns:1fr; } header, main, .tabs { padding-left:16px; padding-right:16px; } }
-.row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; } .row.gap { margin-top:6px; gap:14px; }
-.hero { font-size:44px; font-weight:650; letter-spacing:-.02em; line-height:1.1; margin:2px 0 4px; }
-.big { font-size:26px; font-weight:650; margin:6px 0 2px; }
-.up { color:var(--up); } .down { color:var(--down); }
-.ranges { display:flex; gap:4px; background:var(--page); border:1px solid var(--line); border-radius:9px; padding:3px; }
-.ranges button { background:none; border:0; color:var(--muted); font:inherit; font-size:12px; padding:4px 9px; border-radius:6px; cursor:pointer; }
-.ranges button.on { background:var(--surface2); color:var(--ink); }
-.chart { position:relative; height:260px; margin-top:12px; } .chart svg { width:100%; height:100%; display:block; overflow:visible; }
-.chart text { fill:var(--muted); font-size:11px; } .chart .end { fill:var(--ink2); font-weight:600; font-size:12px; }
-.side .split { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:16px 0; padding:12px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-.meter { margin:12px 0; } .track { height:6px; border-radius:4px; background:#2a2a1f; overflow:hidden; }
-.fill { height:100%; background:var(--up); border-radius:4px; } .fill.warn { background:var(--warn); } .fill.bad { background:var(--down); }
-dl { display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; margin:16px 0 0; }
-dt { color:var(--muted); font-size:12px; } dd { margin:2px 0 0; font-weight:600; }
-.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
-.tile { padding:14px 16px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); }
-.tile .value { font-size:22px; font-weight:650; margin:2px 0; }
-.sleeve .dot { width:10px; height:10px; border-radius:50%; } .sleeve b { font-size:15px; }
-.pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px; border:1px solid var(--line); color:var(--ink2); }
-.pill.ok { color:var(--up); border-color:#1f4d33; background:#11261b; } .pill.warn { color:var(--warn); border-color:#5a4410; }
-.pill.bad { color:var(--down); border-color:#5a2525; background:#2a1414; }
-.pill.buy { color:var(--up); background:#11261b; border-color:#1f4d33; } .pill.sell { color:var(--down); background:#2a1414; border-color:#5a2525; }
-.pill.open { color:var(--accent); border-color:#4d3a10; } .pill.closed { color:var(--muted); }
-.breakdown { display:flex; gap:16px; flex-wrap:wrap; color:var(--ink2); font-size:12px; margin-top:8px; }
-.sw { display:inline-block; width:14px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
-.legend { display:flex; gap:18px; color:var(--ink2); font-size:12px; margin-top:10px; }
-.legend i { display:inline-block; width:14px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
-.scroll { overflow-x:auto; } table { width:100%; border-collapse:collapse; font-size:13px; white-space:nowrap; }
-th { text-align:left; color:var(--muted); font-weight:500; font-size:12px; padding:8px 10px; border-bottom:1px solid var(--line); }
-td { padding:10px; border-bottom:1px solid #222220; } tr:last-child td { border-bottom:0; }
-td.num { text-align:right; font-variant-numeric:tabular-nums; } th:nth-child(n+6) { text-align:left; }
-.mono { font-family:ui-monospace,Menlo,monospace; color:var(--ink2); } .sym { font-weight:600; }
-.why { color:var(--muted); max-width:260px; overflow:hidden; text-overflow:ellipsis; }
-.search { width:100%; max-width:320px; background:var(--page); border:1px solid var(--line); color:var(--ink); border-radius:8px;
-  padding:8px 10px; font:inherit; margin-bottom:10px; }
-.warnings { margin:0; padding-left:18px; } .warnings li { margin:6px 0; }
-.tip { position:fixed; pointer-events:none; background:#1f1f1d; border:1px solid var(--line); border-radius:10px; padding:8px 10px;
-  font-size:12px; z-index:10; box-shadow:0 8px 24px rgba(0,0,0,.4); }
-.tip i { display:inline-block; width:10px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
-p.bad { color:var(--down); }
+#chat-input{flex:1;margin:0;background:var(--s2);border:1px solid var(--line2);color:var(--ink);
+  border-radius:var(--radius-sm);padding:.55rem .75rem;font:inherit;font-size:var(--t-md)}
+#chat-input:focus{outline:none;border-color:var(--accent)}
+#chat-send{background:var(--accent);color:var(--accent-ink);border:0;border-radius:var(--radius-sm);
+  padding:.55rem .95rem;font:inherit;font-weight:600;cursor:pointer}
+#chat-send:disabled{opacity:.45;cursor:default}
+
+/* --- tooltip ------------------------------------------------------------------------------------- */
+.tip{position:fixed;pointer-events:none;background:var(--s3);border:1px solid var(--line2);
+  border-radius:var(--radius);padding:9px 11px;font-size:var(--t-sm);z-index:60;max-width:300px;
+  white-space:normal;line-height:1.5;box-shadow:0 10px 30px rgba(0,0,0,.6)}
+.tip i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+
+/* --- narrow screens ------------------------------------------------------------------------------ */
+@media (max-width:1100px){
+  #claude-panel{width:100%}
+  body.claude-open main,body.claude-open header,body.claude-open nav.tabs{margin-right:0}
+}
+@media (max-width:900px){
+  .grid.top{grid-template-columns:1fr}
+  header,main,.tabs{padding-left:16px;padding-right:16px}
+  .hero{font-size:32px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 """
 
 FX_JS = r"""
@@ -833,7 +1061,7 @@ window.__ptCandlePanel = function (opts) {
   var series = data[opts.key] || {};
   var title = document.getElementById(opts.title), sub = document.getElementById(opts.sub);
   var range = '3M', current = null;
-  var UP = '#199e70', DOWN = '#d95926';
+  var UP = tok('--up', '#30d158'), DOWN = tok('--down', '#ff5a4e');
   var RANGE = { '1W': 7, '1M': 30, '3M': 91, '1Y': 365 };
 
   function rate(v) {
@@ -853,8 +1081,19 @@ window.__ptCandlePanel = function (opts) {
     var span = hi - lo || Math.abs(hi) || 1, step = Math.pow(10, Math.floor(Math.log10(span / n))), err = span / n / step;
     step *= err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1;
     var t = [], v = Math.floor(lo / step) * step;
-    for (; v <= hi + step * 0.5; v += step) t.push(v);
+    // Clamped to the drawn range on purpose. The first tick rounds DOWN below `lo` and the loop used to
+    // run past `hi`, so the outermost gridlines landed outside the plot -- and because .chart svg is
+    // overflow:visible they escaped the box rather than being clipped. Measured on the FX panel: a
+    // 400px chart was drawing labels at y=-24 (which landed on top of the chart's own subtitle) and
+    // y=460. Dropping the out-of-range ticks fixes both, and a gridline you cannot place against the
+    // axis was never worth drawing anyway.
+    for (; v <= hi + step * 0.5; v += step) { if (v >= lo && v <= hi) t.push(v); }
     return t;
+  }
+  // Chart colours come from the stylesheet so the canvas and the rest of the page cannot drift apart.
+  function tok(name, fallback) {
+    var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return (v && v.trim()) || fallback;
   }
 
   function draw(candles) {
@@ -877,13 +1116,13 @@ window.__ptCandlePanel = function (opts) {
 
     var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img">';
     nice(lo, hi, 4).forEach(function (v) {
-      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="#2c2c2a"/>' +
+      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="' + tok('--line', '#23232a') + '"/>' +
              '<text x="' + (L - 8) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + rate(v) + '</text>';
     });
     if (thin) {
       var d = '';
       candles.forEach(function (c, i) { d += (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(c[4]).toFixed(1); });
-      svg += '<path d="' + d + '" fill="none" stroke="#c98500" stroke-width="1.6" stroke-linejoin="round"/>';
+      svg += '<path d="' + d + '" fill="none" stroke="' + tok('--accent', '#f0a830') + '" stroke-width="1.6" stroke-linejoin="round"/>';
     } else {
       candles.forEach(function (c, i) {
         var up = c[4] >= c[1], col = up ? UP : DOWN, x = X(i);
@@ -908,7 +1147,10 @@ window.__ptCandlePanel = function (opts) {
     // in the session.
     var spanDays = (Date.parse(candles[n - 1][0]) - Date.parse(candles[0][0])) / 864e5;
     var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    var step = Math.max(1, Math.round(n / 6));
+    // Label count from the available WIDTH, not a fixed six. At 1512px six dates fit; in a narrower
+    // pane or with the Claude panel open they collide into "21 Jul5 Aug20 Aug". 64px is the widest
+    // label this axis draws ("20 Aug", "12:00") plus breathing room.
+    var step = Math.max(1, Math.ceil(n / Math.max(2, Math.floor((W - L - R) / 64))));
     for (var i = 0; i < n; i += step) {
       var dt = new Date(candles[i][0]), lab;
       if (spanDays <= 1.5) {
@@ -1163,8 +1405,19 @@ JS = r"""
     var span = hi - lo || Math.abs(hi) || 1, step = Math.pow(10, Math.floor(Math.log10(span / n))), err = span / n / step;
     step *= err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1;
     var t = [], v = Math.floor(lo / step) * step;
-    for (; v <= hi + step * 0.5; v += step) t.push(v);
+    // Clamped to the drawn range on purpose. The first tick rounds DOWN below `lo` and the loop used to
+    // run past `hi`, so the outermost gridlines landed outside the plot -- and because .chart svg is
+    // overflow:visible they escaped the box rather than being clipped. Measured on the FX panel: a
+    // 400px chart was drawing labels at y=-24 (which landed on top of the chart's own subtitle) and
+    // y=460. Dropping the out-of-range ticks fixes both, and a gridline you cannot place against the
+    // axis was never worth drawing anyway.
+    for (; v <= hi + step * 0.5; v += step) { if (v >= lo && v <= hi) t.push(v); }
     return t;
+  }
+  // Chart colours come from the stylesheet so the canvas and the rest of the page cannot drift apart.
+  function tok(name, fallback) {
+    var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return (v && v.trim()) || fallback;
   }
   function draw(el, series, range, area, fmt) {
     fmt = fmt || money;
@@ -1189,7 +1442,7 @@ JS = r"""
     var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img">';
     nice(y0, y1, 4).forEach(function (v) {
       if (v < y0 || v > y1) return;
-      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="#2c2c2a"/>' +
+      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="' + tok('--line', '#23232a') + '"/>' +
         '<text x="' + (L - 8) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + fmt(v, true) + '</text>';
     });
     var days = (x1 - x0) / 864e5, ticks = 5;

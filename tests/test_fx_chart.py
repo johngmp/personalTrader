@@ -129,12 +129,39 @@ def test_clicking_a_pair_switches_the_chart():
 
 
 def test_the_percentage_in_the_list_says_what_period_it_covers():
-    """A bare "-3.39%" is unreadable: over a day, a month, a year? Checked on the real page."""
-    import inspect
+    """A bare "-3.39%" is unreadable: over a day, a month, a year?
 
-    source = inspect.getsource(dash)
-    assert '<span class="subtle"> 1M</span>' in source
-    assert "series[-22][1]" in source, "the label must match the window actually measured"
+    Asserted against the RENDERED page rather than the source. It used to match the exact markup
+    `<span class="subtle"> 1M</span>`, leading space and all, so spacing the label with a flex gap
+    instead of a literal space broke a test about whether the period is stated at all.
+    """
+    import re
+
+    from pathlib import Path
+
+    from trader.config import load_settings
+    from trader.engine.brokers_setup import configured_brokers
+    from trader.engine.live import Engine
+    from trader.journal.db import Journal
+
+    settings = load_settings()
+    journal = Journal(Path("data/journal.db"))
+    engines = [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings, journal)]
+    try:
+        page = dash.dashboard_html(settings, journal, engines)
+    finally:
+        journal.close()
+
+    # Every percentage in an instrument row carries a period beside it.
+    rows = re.findall(r'<span class="p-chg">(.*?)</span>\s*</span>', page, re.S)
+    assert rows, "no instrument rows rendered"
+    for row in rows:
+        # U+2212 MINUS SIGN, not a hyphen: the money and percent formatters use the typographic one.
+        assert re.search("[-+−]\\d", row), f"row has no signed figure: {row}"
+        assert re.search(r"\b(1D|1M|vs B0|since entry|since start)\b", row), \
+            f"a percentage with no period or baseline: {row}"
+    import inspect
+    assert "series[-22][1]" in inspect.getsource(dash), "the label must match the window actually measured"
 
 
 def test_the_two_panels_do_not_share_a_list_selector():

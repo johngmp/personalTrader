@@ -117,7 +117,8 @@ def headline(d: dict, now: datetime | None = None) -> list[tuple[str, str]]:
     # 3. Is any of it meaningful yet? Usually the most important sentence on the page.
     closed = (d.get("kpis") or {}).get("closed", 0)
     if closed < 30:
-        out.append(("plain", f"Only {closed} trades have finished. Judging a strategy needs months and "
+        trades = "trade has" if closed == 1 else "trades have"
+        out.append(("plain", f"Only {closed} {trades} finished. Judging a strategy needs months and "
                              "dozens of trades, so none of the numbers above mean anything yet."))
 
     # 4. Anything actually wrong.
