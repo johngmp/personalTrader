@@ -419,6 +419,57 @@ deflated-Sharpe trials penalty) — not as "daily but faster".
 | **Post-earnings announcement drift** (buy after a positive EPS surprise) | 2026-10-03 | **Rejected.** Event study, 891 announcements across our 10 individual stocks, 2002-2026, measured as excess over each stock's own average return for the same horizon. Beats of >5% produced **−0.15% / −0.28% / −0.58% / −0.06%** at +1/+5/+20/+60 days: no drift at all. The only real signal was a **−4.13% drift over 60 days after a MISS** — which the no-shorting rule makes untradeable. The test is asymmetric and that is why the rejection holds: the sample is 2026's mega-caps chosen by hindsight, and Yahoo's stored EPS estimates are as-recorded-now rather than consensus-at-the-time, so **both biases favoured finding drift and it still was not there**. Consistent with PEAD having decayed in heavily-analysed large caps |
 | **Portfolio volatility targeting** (scale weights down when the book's own vol exceeds a target) | 2026-10-03 | **Rejected on in-sample alone.** Nothing to manage: S1 already runs at **7.5%/yr** realised volatility and S8 at **9.9%**, so a normal 12% target binds on only 6.9% / 15.4% of days and changes Sharpe by ≤0.006. Forced to bind (an 8% target, below S8's 8.5% median) it makes S8 *worse*: 0.698 → 0.670, CAGR 6.38% → 5.74%. The existing machinery — ATR-derived position size, 1% risk per trade, exposure caps — has already done this job; exposure averages just 30% (S1) and 70% (S8). Vol targeting's documented benefit is for books running at 15-20%. `run_backtest(vol_target=…)` kept as research infrastructure, defaulted off and tested |
 | **Economic calendar blackout** (no entries N days before US payrolls) | 2026-10-03 | **Rejected on in-sample alone** — out-of-sample never touched. S8 got monotonically worse (0.698 → 0.690 → 0.672 → 0.659 at 1/2/3 days); S1 moved +0.011 Sharpe by blocking **2 trades out of 454**, which is noise. Structural reason: trend following holds for *weeks* and enters only a few hundred times in 22 years, so a narrow pre-event window almost never catches an entry — and where it did bite, the trades it removed were profitable |
+| **Jev / TypeSafe AI as the decision model** | 2026-10-03 | **Rejected, revisit only if S5 proves itself.** Jev returns typed answers (`Choice`/`Score`/`Noul`) with probabilities in 70–500ms at $0.042/M input tokens, and cannot produce a type error or hallucinate a value. The shape genuinely fits S5's approve/veto — a boolean with a confidence the gate could threshold on, better than parsing a free-text verdict. It was rejected because **speed of decision is not this system's bottleneck**: S1's decision is a moving-average comparison that takes microseconds, so Jev would make the loop ~1000x slower, not faster. There is no AI in the live decision path at all. S5 and S6 have never run, so there is no evidence AI adds anything here, and the forex rules it would judge (S9) have a NEGATIVE out-of-sample Sharpe — deciding faster would lose faster. It also adds a paid API dependency that this project was explicitly built to avoid, and cannot hold the dashboard's conversation. Independent review of Jev for trading says the same: it "should not be the sole authority for market calculations or order execution." **Revisit when:** S5 is switched on, runs 90 days against S1 as its A/B control, and the veto demonstrably adds something |
+
+
+#### Desktop layout, second pass (2026-10-03)
+Worked from real designs rather than memory — Dribbble shots by Shakuro, U1CORE (Zeex), Ronas IT and the
+EchoFi concept. Three things those share that this dashboard did not:
+
+* **Instrument lists are flat dense rows inside one container, not a card each.** A card per symbol spends
+  ~76px of height on border and padding to show two numbers, which fitted four symbols in the column; the
+  rows fit about fourteen. You are meant to scan a market, and a market you have to scroll is one you do
+  not check.
+* **The chart names its instrument like a headline.** A 12px all-caps label is right for "Account balance"
+  and wrong for "EUR/USD", which is the subject of the whole panel.
+* **Holdings and per-strategy performance belong on the landing page.** Every reference puts them there;
+  this dashboard had open positions a tab away inside a 13-column table.
+
+Also balanced the objectives tiles to a fixed 4x2 — `auto-fit` fitted seven and stranded the eighth on a
+row of its own.
+
+One rule fell out of it. Writing a test that every percentage states its baseline caught three that did
+not: holdings (`+1.10%` — since when?), the benchmark sleeve's own return, and anything measured `vs B0`.
+All now say `since entry`, `since start` or `vs B0`. A percentage with no baseline is decoration.
+
+#### Interface rules (2026-10-03 redesign)
+Researched against how trading and fintech interfaces are actually built, then applied as four rules that
+`tests/test_design_system.py` pins. Each is a decision, not a preference:
+
+1. **Numerals are the typography that matters.** Every figure is tabular (`font-variant-numeric` on `body`,
+   inherited). Proportional digits make a live price jitter sideways on each tick, which reads as the data
+   being unstable rather than the font.
+2. **Colour means state, nothing else.** Green and red are reserved for profit and loss and never used for
+   decoration. Measured, the green and the red are only **1.52:1** against each other, so colour cannot carry
+   the meaning for the ~8% of men with red-green deficiency — every figure carries a `+`/`−` sign and every
+   headline line carries a glyph (`✓ ! × ·`). The sign is the signal; colour is a second channel on top.
+   The brand amber is deliberately neither state colour, so chrome can never be mistaken for a result.
+3. **Elevation from surface, not shadow.** Dark backgrounds swallow shadows, so depth is flat steps of
+   lightness (`--page` → `--s1` → `--s4`). No gradients anywhere data is shown: a gradient behind a number
+   changes that number's contrast across its own width. The card gradient was removed for this reason.
+4. **Show the exception.** Space goes to what needs attention; what is fine stays quiet.
+
+Contrast was computed rather than eyeballed: against both page and card, every text token clears WCAG AA
+and most clear AAA.
+
+Two real bugs surfaced during the redesign and were fixed. `nice()` rounded its first gridline tick *down*
+below the low and ran past the high, and `.chart svg` is `overflow:visible`, so the outermost labels escaped
+the plot — on a 400px FX chart they drew at **y=−24** (landing on the chart's own subtitle, which looked
+like a text-overlap bug) and **y=460**. Both chart renderers clamp now. Separately the x-axis drew a fixed
+six date labels regardless of width, which collided into `21 Jul5 Aug20 Aug` in a narrow pane; the count now
+comes from the available width.
+| **London opening-range breakout, intraday FX** (S-IRB) | 2026-10-03 | **Rejected on real tick data.** 212 trading days of Dukascopy EUR/USD 5-minute bars with the spread actually quoted (median 0.30 pips). At the defaults: 161 trades, 32.9% win rate, **gross −$64 BEFORE any spread**, spread then −$611, net **−6.75%** over ten months. The cost floor was not the binding problem after all — there is no gross edge for the cost to eat. Selected cleanly (best of 18 settings on the first 60%, measured once on the rest) it returned **−13.67% in four months, ≈−36%/yr**, gross −$1,116; 8 of the 18 were profitable in-sample, which is noise around zero, and taking the best of them was actively harmful. A deliberate methodology note: an earlier check that chose three settings using the WHOLE period and only then split it showed them "holding" at +$31 — the identical data inverts its answer depending on whether selection saw the test set. Also measured: `min_range_pips` never binds (median opening range 12.9 pips; 0 of 212 sessions below 3) |
+
 
 ### Phase 5: Tournament (≥ 90 days, mostly waiting)
 - [ ] Weekly scoreboard in Telegram + dashboard
@@ -426,6 +477,33 @@ deflated-Sharpe trials penalty) — not as "daily but faster".
 - [ ] Monthly check-in: retire losers, research replacements (new rule sleeves pass Gate 1 first)
 - [ ] Optional: ASX via IBKR paper
 - **Exit:** a Gate 2 report per sleeve saying which, if any, are candidates for live money.
+
+#### S8 widened 19 → 40 markets (2026-10-03)
+Done to compress **time**, not to chase return. Trade count scales with breadth, and breadth is what sets how
+fast a sleeve can be judged: measured over 31 years of history, 19 markets complete **7.0** trades a month and
+40 complete **15.1**, so the 50 trades Gate 2 asks for arrive in **3.3 months instead of 7.2**. For contrast S1,
+on 4 markets, completed **zero** round trips in its first 15 days live — it bought at inception and held. This is
+the honest lever. The dishonest one is trading more often per market, and the intraday research already measured
+where that ends: 5 trades a day costs 4.6%/yr in spread against S1 earning 4.4%/yr in total.
+
+Gate 1 re-ran on the 40-market basket and **PASSED** all eight checks (out-of-sample Sharpe 0.85 vs buy-and-hold
+0.62, worst drop −19.0%, 4261 trades, neighbours keep 95% of the Sharpe, deflated Sharpe 99.3% after 90 distinct
+trials, profitable out-of-sample on 29 of 40 symbols). Note the 19-market basket's much-quoted **0.98 was a
+one-off from its first run and never reproduced** — its three most recent runs scored 0.78 / 0.77 / 0.79, so 0.85
+is an improvement on the real baseline, not a decline from 0.98.
+
+The old shadow run was archived as sleeve **S8S** rather than carried over: its 10 positions were never actually
+bought, so reconciling them against the paper account would have flagged every symbol and refused to trade it,
+and a sleeve whose history is half shadow and half paper reports a meaningless return. No fills were invented.
+
+**S8 ships DISABLED, blocked on one number.** A 40-market cold start needs **80 orders** (an entry and a
+protective stop each); `risk.yaml` caps the whole account at `max_orders_per_day: 60`, shared with B0 and S1,
+and **shadow orders count too** — they get a `broker_order_id`. Measured, not guessed: with the cap lifted a cold
+start placed exactly 80; at 60 the entries fill and then the stops are refused, leaving open positions
+unprotected for the rest of the day. That is the one failure this system exists to prevent. Raising
+`max_orders_per_day` to ~150 covers a cold start plus stop maintenance and still catches a runaway loop (which
+would be thousands). `risk.yaml` is the user's file to change, so it has not been touched.
+`test_s8_at_the_shipped_order_budget_starves_its_stops` pins the defect.
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.

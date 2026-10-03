@@ -12,6 +12,25 @@ first. Long only, because the risk gate forbids shorting.
 Why this shape rather than something cleverer: the London open is when overnight order flow meets the
 deepest liquidity of the day, which is a reason for a breakout to mean something rather than a pattern
 found by searching. It is still a hypothesis, and it still has to clear Gate 1.
+
+TESTED 2026-10-03 ON REAL TICK DATA, AND IT FAILED. 212 trading days of Dukascopy EUR/USD 5-minute bars
+carrying the spread actually quoted. At the defaults: 161 trades, 32.9% win rate, average -0.025R, and
+GROSS P&L of -$64 before a single pip of spread was charged. Spread then took $611, for -6.75% over ten
+months. The problem is not the cost; there is no edge for the cost to eat.
+
+Chosen cleanly -- best of 18 settings on the first 60% of the data, then measured ONCE on the rest -- it
+returned -13.67% in four months, about -36% annualised, with gross -$1,116. Eight of those 18 settings
+were profitable in-sample, which is what noise scattered around zero looks like, and picking the best of
+them was actively harmful.
+
+One honest caveat about the experiment before it: an earlier check that split the data AFTER using the
+whole period to pick three settings showed them "holding" out-of-sample at +$31. The only difference was
+whether the selection had seen the test set. Keep the order right or the answer inverts.
+
+Also measured: `min_range_pips` at its default never binds. The opening range has a median width of 12.9
+pips and not one of 212 sessions came in under 3, so that filter has never once rejected a session.
+
+Kept as research infrastructure and as a worked example of the cost floor, NOT as a candidate to trade.
 """
 
 from __future__ import annotations
