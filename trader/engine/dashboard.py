@@ -194,6 +194,33 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
     }
 
 
+FX_CHART_DAYS = 400
+
+
+def fx_series(symbols: list[str], live: dict[str, float] | None = None) -> dict[str, list]:
+    """Daily closes per pair, with today's live quote appended as the final point.
+
+    Read from the same cached CSVs the backtests use, so drawing a chart costs no network call -- only
+    the live quote does, and the page already fetches that. Daily bars, not ticks: this strategy decides
+    once a day, and a minute chart would imply a precision the system does not act on.
+    """
+    from trader.data.history import load_history
+
+    out: dict[str, list] = {}
+    for symbol in symbols:
+        try:
+            closes = load_history(symbol)["close"].tail(FX_CHART_DAYS)
+        except Exception:
+            continue
+        points = [[ts.isoformat(), round(float(v), 6)] for ts, v in closes.items()]
+        now_price = (live or {}).get(symbol)
+        if now_price and points:
+            points.append([datetime.now(timezone.utc).isoformat(timespec="minutes"), round(now_price, 6)])
+        if points:
+            out[symbol] = points
+    return out
+
+
 def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> dict:
     """Forex: current rates, what the FX sleeve holds, and its Gate 1 verdict.
 
@@ -228,8 +255,9 @@ def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> 
         clock = fx_clock(datetime.now(timezone.utc))
     except Exception:
         clock = None
+    live = {r["symbol"]: r["price"] for r in rows if r["price"]}
     return {"rows": rows, "sleeves": [s.id for s in fx_sleeves], "verdict": verdict,
-            "is_open": getattr(clock, "is_open", None)}
+            "is_open": getattr(clock, "is_open", None), "series": fx_series(symbols, live)}
 
 
 def latest_research(settings: Settings) -> list[dict]:
@@ -387,18 +415,50 @@ def render(d: dict) -> str:
             + ("" if v.get("verdict") == "PASS" else
                "A negative number means these rules lost to leaving the money in T-bills, so this sleeve "
                "sends nothing to any broker and its signals are not advice to act on.") + "</p>")
+        pair_items = ""
+        for i, r in enumerate(fx["rows"]):
+            series = (fx.get("series") or {}).get(r["symbol"]) or []
+            change = ""
+            if len(series) > 2:
+                first, last = series[-22][1], series[-1][1]     # ~one month of trading days
+                pct = (last / first - 1) * 100 if first else 0.0
+                change = (f'<span class="{"up" if pct >= 0 else "down"}">{pct:+.2f}%</span>'
+                          f'<span class="subtle"> 1M</span>')
+            held = f'<span class="pill open">holding {r["qty"]:g}</span>' if r["qty"] else ""
+            pair_items += (
+                f'<button class="pair{" on" if i == 0 else ""}" data-pair="{html.escape(r["symbol"])}">'
+                f'<div class="row"><b>{html.escape(r["symbol"])}</b><span class="spacer"></span>{held}</div>'
+                f'<div class="row gap"><span class="px">'
+                f'{format_price(r["price"], AssetClass.FOREX) if r["price"] else "–"}</span>{change}</div>'
+                f'<div class="subtle">{"stop " + format_price(r["stop"], AssetClass.FOREX) if r.get("stop") else "no position"}</div>'
+                f'</button>')
+        v = fx.get("verdict") or {}
+        verdict_note = ("" if not v else
+            f'<p class="subtle">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
+            f'{html.escape(str(v.get("verdict")))}</b> — out-of-sample Sharpe {v.get("oos_sharpe")} against cash. '
+            + ("" if v.get("verdict") == "PASS" else
+               "A negative number means these rules lost to leaving the money in T-bills, so this sleeve "
+               "sends nothing to any broker and its signals are not advice to act on.") + "</p>")
         fx_card = f"""<h2>Forex {shut}</h2>
 <p class="subtle">{html.escape(", ".join(fx["sleeves"]))} trades these on live prices with
-<b>no orders sent anywhere</b>. Rates come from a free delayed feed, so they lag a few minutes.</p>
-<div class="card scroll"><table><tr><th>Pair</th><th>Rate</th><th>Held</th><th>Stop</th></tr>
-{fx_rows}</table></div>{verdict_note}"""
+<b>no orders sent anywhere</b>. Daily closes with the latest quote on the end; the feed is free and lags
+a few minutes.</p>
+<div class="fxlayout">
+<div class="pairlist">{pair_items}</div>
+<div class="card chartcard fxchart"><div class="row"><div>
+<div class="label" id="fx-title">&nbsp;</div><div class="subtle" id="fx-sub">&nbsp;</div></div>
+<div class="spacer"></div><div class="ranges" data-for="fx">
+<button data-r="1M">1M</button><button data-r="3M">3M</button><button data-r="All" class="on">All</button>
+</div></div>
+<div class="chart" id="fx-chart" aria-label="Exchange rate over time"></div></div>
+</div>{verdict_note}"""
     else:
         fx_card = ""
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
     total_base = d["start_equity"] or 1
     chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"],
                              "shadow": d["charts"]["shadow"], "colors": {**SERIES_COLORS, "shadow": SHADOW_COLOR},
-                             "labels": BROKER_LABELS})
+                             "labels": BROKER_LABELS, "fx": (d.get("fx") or {}).get("series", {})})
     shadow_ids = sorted(d["charts"]["shadow"])
     shadow_card = "" if not shadow_ids else f"""<div class="card chartcard"><div class="row"><div>
 <div class="label">Shadow tests · live prices, no orders sent</div>
@@ -512,7 +572,7 @@ T-bills". A strategy that fails here has not earned real money, whatever its rec
 <p class="ap-note">Reads your data and runs read-only <code>trader</code> commands.
 Cannot place orders, change files or read credentials. Will not tell you what to buy.</p></div></aside><div class="tip" id="tip" hidden></div>
 <script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script>
-<script>{SEARCH_JS}</script><script>{CHAT_JS}</script></body></html>"""
+<script>{FX_JS}</script><script>{SEARCH_JS}</script><script>{CHAT_JS}</script></body></html>"""
 
 
 def dashboard_html(settings: Settings, journal: Journal, engines: list[Engine], refresh_s: int = 300) -> str:
@@ -529,6 +589,16 @@ def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine])
 
 
 CSS = """
+.fxlayout{display:grid;grid-template-columns:230px 1fr;gap:16px;align-items:start}
+.pairlist{display:flex;flex-direction:column;gap:6px;max-height:460px;overflow-y:auto}
+.pair{text-align:left;background:#161614;border:1px solid var(--line);border-radius:10px;padding:.6rem .7rem;
+  cursor:pointer;color:#d6d4cf;display:flex;flex-direction:column;gap:.15rem}
+.pair:hover{border-color:#5a5a55}
+.pair.on{border-color:#c98500;background:#1d1b16}
+.pair .px{font-size:1.05rem;font-weight:500}
+.pair .subtle{font-size:.72rem}
+.fxchart .chart{height:380px}
+@media (max-width:900px){.fxlayout{grid-template-columns:1fr}.pairlist{max-height:none}}
 .rail{position:fixed;left:0;top:0;bottom:0;width:62px;background:#111110;border-right:1px solid var(--line);
   display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0;z-index:50}
 .rail-brand{width:34px;height:34px;border-radius:9px;background:#c98500;color:#1a1a18;font-weight:600;
@@ -648,6 +718,47 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; } th:nth-child(n+6
   font-size:12px; z-index:10; box-shadow:0 8px 24px rgba(0,0,0,.4); }
 .tip i { display:inline-block; width:10px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
 p.bad { color:var(--down); }
+"""
+
+FX_JS = r"""
+(function () {
+  var data = JSON.parse(document.getElementById('chart-data').textContent);
+  var chart = document.getElementById('fx-chart'), list = document.querySelector('.pairlist');
+  if (!chart || !list) return;
+  var title = document.getElementById('fx-title'), sub = document.getElementById('fx-sub');
+  var range = 'All', current = null;
+  function rate(v) {
+    // A rate is not a dollar amount, and gold needs 2 places where the majors need 5. The `axis`
+    // argument is ignored on purpose: rounding a gridline to a whole number makes every one read "1".
+    var dp = v >= 1000 ? 2 : v >= 100 ? 3 : 5;
+    return v.toLocaleString(undefined, {minimumFractionDigits: dp, maximumFractionDigits: dp});
+  }
+  function show(pair) {
+    var pts = (data.fx || {})[pair];
+    current = pair;
+    list.querySelectorAll('.pair').forEach(function (b) { b.classList.toggle('on', b.dataset.pair === pair); });
+    title.textContent = pair;
+    if (!pts || pts.length < 2) { chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">No price history for ' + pair + '.</p>'; sub.textContent = ''; return; }
+    var first = pts[0][1], last = pts[pts.length - 1][1], pct = first ? (last / first - 1) * 100 : 0;
+    sub.textContent = rate(last) + '  ·  ' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '% over the shown period';
+    window.__ptDraw(chart, [{name: pair, color: '#c98500', pts: pts}], range, true, rate);
+  }
+  list.addEventListener('click', function (e) {
+    var b = e.target.closest('.pair'); if (b) show(b.dataset.pair);
+  });
+  var ranges = document.querySelector('.ranges[data-for="fx"]');
+  if (ranges) ranges.addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    ranges.querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x === b); });
+    range = b.dataset.r; if (current) show(current);
+  });
+  var firstBtn = list.querySelector('.pair');
+  // Drawn when the section is first opened: a hidden element has no width to scale into.
+  var railBtn = document.querySelector('.rail-btn[data-tab="forex"]');
+  if (railBtn) railBtn.addEventListener('click', function () {
+    setTimeout(function () { show(current || (firstBtn && firstBtn.dataset.pair)); }, 60);
+  });
+})();
 """
 
 SEARCH_JS = r"""
@@ -770,13 +881,17 @@ JS = r"""
 (function () {
   var data = JSON.parse(document.getElementById('chart-data').textContent);
   var tip = document.getElementById('tip');
+  window.__ptDraw = function () { return draw.apply(null, arguments); };
   var RANGE = { '1D': 1, '1W': 7, '1M': 30, '3M': 91 };
   function cutoff(r, last) {
     if (r === 'All') return -Infinity;
     if (r === 'YTD') return Date.UTC(new Date(last).getUTCFullYear(), 0, 1);
     return last - RANGE[r] * 864e5;
   }
-  function money(v) { return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function money(v, axis) {
+    if (axis) return '$' + Math.round(v).toLocaleString();
+    return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
   function nice(lo, hi, n) {
     var span = hi - lo || Math.abs(hi) || 1, step = Math.pow(10, Math.floor(Math.log10(span / n))), err = span / n / step;
     step *= err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1;
@@ -784,7 +899,8 @@ JS = r"""
     for (; v <= hi + step * 0.5; v += step) t.push(v);
     return t;
   }
-  function draw(el, series, range, area) {
+  function draw(el, series, range, area, fmt) {
+    fmt = fmt || money;
     var W = el.clientWidth || 800, H = el.clientHeight || 260, L = 70, R = area ? 12 : 120, T = 10, B = 24;
     var last = -Infinity;
     series.forEach(function (s) { if (s.pts.length) last = Math.max(last, Date.parse(s.pts[s.pts.length - 1][0])); });
@@ -807,7 +923,7 @@ JS = r"""
     nice(y0, y1, 4).forEach(function (v) {
       if (v < y0 || v > y1) return;
       svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="#2c2c2a"/>' +
-        '<text x="' + (L - 8) + '" y="' + (Y(v) + 4) + '" text-anchor="end">$' + Math.round(v).toLocaleString() + '</text>';
+        '<text x="' + (L - 8) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + fmt(v, true) + '</text>';
     });
     var days = (x1 - x0) / 864e5, ticks = 5;
     for (var i = 0; i <= ticks; i++) {
@@ -832,7 +948,7 @@ JS = r"""
       var prev = -1e9;
       ends.forEach(function (e) {
         var y = Math.max(e.y, prev + 15); prev = y;
-        svg += '<text class="end" x="' + (W - R + 8) + '" y="' + (y + 4) + '">' + e.s.name + ' ' + money(e.v) + '</text>';
+        svg += '<text class="end" x="' + (W - R + 8) + '" y="' + (y + 4) + '">' + e.s.name + ' ' + fmt(e.v) + '</text>';
       });
     }
     svg += '<line class="x" y1="' + T + '" y2="' + (H - B) + '" stroke="#898781" stroke-dasharray="3 3" style="display:none"/>';
@@ -848,7 +964,7 @@ JS = r"""
         s.pts.forEach(function (p) { if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p; });
         shownT = shownT || best[0];
         dots[j].setAttribute('cx', X(best[0])); dots[j].setAttribute('cy', Y(best[1])); dots[j].style.display = '';
-        html += '<div><i style="background:' + s.color + '"></i>' + s.name + ': <b>' + money(best[1]) + '</b></div>';
+        html += '<div><i style="background:' + s.color + '"></i>' + s.name + ': <b>' + fmt(best[1]) + '</b></div>';
       });
       cross.setAttribute('x1', X(shownT)); cross.setAttribute('x2', X(shownT)); cross.style.display = '';
       tip.innerHTML = '<div class="subtle">' + new Date(shownT).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) + '</div>' + html;
