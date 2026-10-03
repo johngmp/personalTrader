@@ -181,6 +181,11 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "sleeves": sleeves, "trips": sorted(trips, key=lambda t: t.entry_ts, reverse=True), "price": price,
         "states": {(s["sleeve_id"], s["symbol"]): s for s in journal.position_states()},
         "watchlist": watchlist(settings, price),
+        "equities": fx_series(sorted({x for sl in settings.sleeves.values() if sl.enabled
+                                      for x in sl.symbols
+                                      if settings.asset_class(x) != AssetClass.FOREX}),
+                              {w["symbol"]: w["price"] for w in watchlist_rows}
+                              if (watchlist_rows := watchlist(settings, price)) else {}),
         "orders": journal.recent_order_rows(25),
         "rate": stored_rate(journal),
         "fx": fx_snapshot(settings, journal, engines),
@@ -446,6 +451,14 @@ def render(d: dict) -> str:
         + (f'<span class="{"up" if w["change"] >= 0 else "down"}">{w["change"] * 100:+.2f}%</span>'
            if w["change"] is not None else '<span class="subtle">–</span>')
         + "</div>" for w in watch)
+    sym_items = ""
+    for i, w in enumerate([x for x in watch if x["asset_class"] != AssetClass.FOREX]):
+        change = (f'<span class="{"up" if w["change"] >= 0 else "down"}">{w["change"] * 100:+.2f}%</span>'
+                  f'<span class="subtle"> 1D</span>') if w["change"] is not None else ""
+        sym_items += (
+            f'<button class="pair sym{" on" if i == 0 else ""}" data-pair="{html.escape(w["symbol"])}">'
+            f'<div class="row"><b>{html.escape(w["symbol"])}</b></div>'
+            f'<div class="row gap"><span class="px">{_money(w["price"])}</span>{change}</div></button>')
     head_lines = "".join(f'<li class="hl-{tone}">{html.escape(text)}</li>' for tone, text in headline(d))
     fx = d.get("fx") or {}
     if fx.get("rows"):
@@ -496,7 +509,7 @@ a few minutes.</p>
 <div class="pairlist">{pair_items}</div>
 <div class="card chartcard fxchart"><div class="row"><div>
 <div class="label" id="fx-title">&nbsp;</div><div class="subtle" id="fx-sub">&nbsp;</div></div>
-<div class="spacer"></div><div class="ranges" data-for="fx">
+<div class="spacer"></div><div class="ranges" data-for="forex">
 <button data-r="1W">1W</button><button data-r="1M">1M</button><button data-r="3M" class="on">3M</button>
 <button data-r="1Y">1Y</button><button data-r="All">All</button>
 </div></div>
@@ -508,7 +521,8 @@ a few minutes.</p>
     total_base = d["start_equity"] or 1
     chart_data = json.dumps({"account": d["charts"]["account"], "sleeves": d["charts"]["sleeves"],
                              "shadow": d["charts"]["shadow"], "colors": {**SERIES_COLORS, "shadow": SHADOW_COLOR},
-                             "labels": BROKER_LABELS, "fx": (d.get("fx") or {}).get("series", {})})
+                             "labels": BROKER_LABELS, "fx": (d.get("fx") or {}).get("series", {}),
+                             "equities": d.get("equities", {})})
     shadow_ids = sorted(d["charts"]["shadow"])
     shadow_card = "" if not shadow_ids else f"""<div class="card chartcard"><div class="row"><div>
 <div class="label">Shadow tests · live prices, no orders sent</div>
@@ -580,6 +594,19 @@ a few minutes.</p>
 <h2>Trading objectives</h2><div class="tiles">{tiles}</div>
 </section>
 <section data-panel="stocks" hidden>
+<h2>Price charts</h2>
+<p class="subtle">Everything the enabled strategies trade. Daily candles: the wick is the day's high and
+low, which is what a stop is measured against.</p>
+<div class="fxlayout">
+<div class="symlist">{sym_items}</div>
+<div class="card chartcard fxchart"><div class="row"><div>
+<div class="label" id="eq-title">&nbsp;</div><div class="subtle" id="eq-sub">&nbsp;</div></div>
+<div class="spacer"></div><div class="ranges" data-for="stocks">
+<button data-r="1W">1W</button><button data-r="1M">1M</button><button data-r="3M" class="on">3M</button>
+<button data-r="1Y">1Y</button><button data-r="All">All</button>
+</div></div>
+<div class="chart" id="eq-chart" aria-label="Price over time"></div></div>
+</div>
 <h2>Strategies</h2><div class="grid sleeves">{sleeve_cards}</div>
 <div class="card chartcard"><div class="row"><div><div class="label">Strategy vs buy-and-hold</div>
 <div class="subtle">Value of each $10,000 strategy</div></div><div class="spacer"></div>
@@ -646,8 +673,8 @@ def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine])
 
 CSS = """
 .fxlayout{display:grid;grid-template-columns:230px 1fr;gap:16px;align-items:start}
-.pairlist{display:flex;flex-direction:column;gap:6px;max-height:460px;overflow-y:auto}
-.pair{text-align:left;background:#161614;border:1px solid var(--line);border-radius:10px;padding:.6rem .7rem;
+.pairlist,.symlist{display:flex;flex-direction:column;gap:6px;max-height:460px;overflow-y:auto}
+.pair,.sym{text-align:left;background:#161614;border:1px solid var(--line);border-radius:10px;padding:.6rem .7rem;
   cursor:pointer;color:#d6d4cf;display:flex;flex-direction:column;gap:.15rem}
 .pair:hover{border-color:#5a5a55}
 .pair.on{border-color:#c98500;background:#1d1b16}
@@ -797,17 +824,20 @@ p.bad { color:var(--down); }
 """
 
 FX_JS = r"""
-(function () {
+window.__ptCandlePanel = function (opts) {
   var data = JSON.parse(document.getElementById('chart-data').textContent);
-  var chart = document.getElementById('fx-chart'), list = document.querySelector('.pairlist');
+  var chart = document.getElementById(opts.chart), list = document.querySelector(opts.list);
   if (!chart || !list) return;
-  var title = document.getElementById('fx-title'), sub = document.getElementById('fx-sub');
+  var series = data[opts.key] || {};
+  var title = document.getElementById(opts.title), sub = document.getElementById(opts.sub);
   var range = '3M', current = null;
   var UP = '#199e70', DOWN = '#d95926';
   var RANGE = { '1W': 7, '1M': 30, '3M': 91, '1Y': 365 };
 
   function rate(v) {
-    // A rate is not a dollar amount, and gold needs 2 places where the majors need 5.
+    // Money is always cents: $769.710 is three decimals of false precision on a stock. FX rates pick
+    // their places by magnitude instead -- gold quotes to 2, the majors to 5.
+    if (opts.money) return '$' + v.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
     var dp = v >= 1000 ? 2 : v >= 100 ? 3 : 5;
     return v.toLocaleString(undefined, {minimumFractionDigits: dp, maximumFractionDigits: dp});
   }
@@ -882,7 +912,7 @@ FX_JS = r"""
   }
 
   function show(pair) {
-    var all = (data.fx || {})[pair];
+    var all = series[pair];
     current = pair;
     list.querySelectorAll('.pair').forEach(function (b) { b.classList.toggle('on', b.dataset.pair === pair); });
     title.textContent = pair;
@@ -897,14 +927,14 @@ FX_JS = r"""
     var pct = pts[0][4] ? (pts[pts.length - 1][4] / pts[0][4] - 1) * 100 : 0;
     var hasVol = pts.some(function (c) { return c[5] > 0; });
     sub.textContent = rate(pts[pts.length - 1][4]) + '  ·  ' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '% over ' + range +
-      (hasVol ? '' : '  ·  spot FX has no exchange volume to report');
+      (hasVol || !opts.noVolumeNote ? '' : '  ·  ' + opts.noVolumeNote);
     draw(pts);
   }
 
   list.addEventListener('click', function (e) {
     var b = e.target.closest('.pair'); if (b) show(b.dataset.pair);
   });
-  var ranges = document.querySelector('.ranges[data-for="fx"]');
+  var ranges = document.querySelector('.ranges[data-for="' + opts.tab + '"]');
   if (ranges) ranges.addEventListener('click', function (e) {
     var b = e.target.closest('button'); if (!b) return;
     ranges.querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x === b); });
@@ -917,13 +947,19 @@ FX_JS = r"""
       if (chart.offsetParent !== null) show(current || (firstBtn && firstBtn.dataset.pair));
     }, 60);
   }
-  var railBtn = document.querySelector('.rail-btn[data-tab="forex"]');
+  var railBtn = document.querySelector('.rail-btn[data-tab="' + opts.tab + '"]');
   if (railBtn) railBtn.addEventListener('click', drawWhenVisible);
   drawWhenVisible();
   var redraw; window.addEventListener('resize', function () {
     clearTimeout(redraw); redraw = setTimeout(function () { if (chart.offsetParent !== null && current) show(current); }, 150);
   });
-})();
+};
+
+__ptCandlePanel({chart: 'fx-chart', list: '.pairlist', key: 'fx', title: 'fx-title', sub: 'fx-sub',
+                tab: 'forex', money: false,
+                noVolumeNote: 'spot FX has no exchange volume to report'});
+__ptCandlePanel({chart: 'eq-chart', list: '.symlist', key: 'equities', title: 'eq-title', sub: 'eq-sub',
+                tab: 'stocks', money: true});
 """
 
 RAIL_JS = r"""

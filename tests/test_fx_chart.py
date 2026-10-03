@@ -102,7 +102,26 @@ def test_the_wick_spans_the_high_and_the_low():
 
 def test_the_chart_is_drawn_only_once_the_section_is_visible():
     """A hidden element has no width, so drawing into it produces a chart one pixel wide."""
-    assert 'rail-btn[data-tab="forex"]' in dash.FX_JS and "setTimeout" in dash.FX_JS
+    assert "chart.offsetParent !== null" in dash.FX_JS and "setTimeout" in dash.FX_JS
+    assert ".rail-btn[data-tab=\"' + opts.tab + '\"]" in dash.FX_JS
+
+
+def test_one_renderer_serves_both_the_forex_and_the_stocks_panel():
+    """Two copies of a chart renderer drift apart; the second one gets the bug fix a month late."""
+    assert dash.FX_JS.count("window.__ptCandlePanel = function") == 1
+    assert dash.FX_JS.count("__ptCandlePanel({") == 2
+    for panel in ("'fx-chart'", "'eq-chart'"):
+        assert panel in dash.FX_JS
+
+
+def test_stock_prices_get_a_currency_symbol_and_rates_do_not():
+    assert "money: true" in dash.FX_JS and "money: false" in dash.FX_JS
+    assert "if (opts.money) return '$'" in dash.FX_JS
+
+
+def test_money_is_always_cents_never_three_decimals():
+    """$769.710 is false precision on a stock; the magnitude rule is right for rates only."""
+    assert "minimumFractionDigits: 2, maximumFractionDigits: 2" in dash.FX_JS
 
 
 def test_clicking_a_pair_switches_the_chart():
@@ -116,3 +135,13 @@ def test_the_percentage_in_the_list_says_what_period_it_covers():
     source = inspect.getsource(dash)
     assert '<span class="subtle"> 1M</span>' in source
     assert "series[-22][1]" in source, "the label must match the window actually measured"
+
+
+def test_the_two_panels_do_not_share_a_list_selector():
+    """They did: `.pairlist` matched whichever panel came first in the DOM, so Forex bound to the
+    stocks list and then looked up equity symbols in the FX data, drawing "No price history"."""
+    import inspect
+
+    source = inspect.getsource(dash)
+    assert 'class="pairlist symlist"' not in source
+    assert "list: '.pairlist'" in dash.FX_JS and "list: '.symlist'" in dash.FX_JS
