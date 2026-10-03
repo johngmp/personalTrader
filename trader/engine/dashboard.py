@@ -225,26 +225,37 @@ def watchlist(settings: Settings, price) -> list[dict]:
 
 
 def fx_series(symbols: list[str], live: dict[str, float] | None = None) -> dict[str, list]:
-    """Daily closes per pair, with today's live quote appended as the final point.
+    """Daily candles per symbol: [iso, open, high, low, close, volume].
 
-    Read from the same cached CSVs the backtests use, so drawing a chart costs no network call -- only
-    the live quote does, and the page already fetches that. Daily bars, not ticks: this strategy decides
-    once a day, and a minute chart would imply a precision the system does not act on.
+    Read from the same cached CSVs the backtests use, so drawing costs no network call -- only the live
+    quote does, and the page already fetches that. Daily bars, not ticks: this strategy decides once a
+    day, and a minute chart would imply a precision it never acts on.
+
+    The high and low are the point. A stop is hit on the day's LOW, and every loss this system has taken
+    came from a stop, so a line of closes hides exactly the thing that decided the trade.
+
+    Volume is 0 for spot FX majors -- it is traded over the counter with no central exchange, so there is
+    no such figure to report. Gold (a futures contract), stocks and crypto do have it.
     """
     from trader.data.history import load_history
 
     out: dict[str, list] = {}
     for symbol in symbols:
         try:
-            closes = load_history(symbol)["close"].tail(FX_CHART_DAYS)
+            frame = load_history(symbol).tail(FX_CHART_DAYS)
         except Exception:
             continue
-        points = [[ts.isoformat(), round(float(v), 6)] for ts, v in closes.items()]
+        candles = [[ts.isoformat(), round(float(r.open), 6), round(float(r.high), 6),
+                    round(float(r.low), 6), round(float(r.close), 6), float(r.volume or 0)]
+                   for ts, r in zip(frame.index, frame.itertuples())]
         now_price = (live or {}).get(symbol)
-        if now_price and points:
-            points.append([datetime.now(timezone.utc).isoformat(timespec="minutes"), round(now_price, 6)])
-        if points:
-            out[symbol] = points
+        if now_price and candles:
+            # Today, still forming: open at yesterday's close, high/low stretched to include it.
+            prev = candles[-1][4]
+            candles.append([datetime.now(timezone.utc).isoformat(timespec="minutes"), prev,
+                            max(prev, now_price), min(prev, now_price), round(now_price, 6), 0.0])
+        if candles:
+            out[symbol] = candles
     return out
 
 
@@ -486,7 +497,8 @@ a few minutes.</p>
 <div class="card chartcard fxchart"><div class="row"><div>
 <div class="label" id="fx-title">&nbsp;</div><div class="subtle" id="fx-sub">&nbsp;</div></div>
 <div class="spacer"></div><div class="ranges" data-for="fx">
-<button data-r="1M">1M</button><button data-r="3M">3M</button><button data-r="All" class="on">All</button>
+<button data-r="1W">1W</button><button data-r="1M">1M</button><button data-r="3M" class="on">3M</button>
+<button data-r="1Y">1Y</button><button data-r="All">All</button>
 </div></div>
 <div class="chart" id="fx-chart" aria-label="Exchange rate over time"></div></div>
 </div>{verdict_note}"""
@@ -790,23 +802,105 @@ FX_JS = r"""
   var chart = document.getElementById('fx-chart'), list = document.querySelector('.pairlist');
   if (!chart || !list) return;
   var title = document.getElementById('fx-title'), sub = document.getElementById('fx-sub');
-  var range = 'All', current = null;
+  var range = '3M', current = null;
+  var UP = '#199e70', DOWN = '#d95926';
+  var RANGE = { '1W': 7, '1M': 30, '3M': 91, '1Y': 365 };
+
   function rate(v) {
-    // A rate is not a dollar amount, and gold needs 2 places where the majors need 5. The `axis`
-    // argument is ignored on purpose: rounding a gridline to a whole number makes every one read "1".
+    // A rate is not a dollar amount, and gold needs 2 places where the majors need 5.
     var dp = v >= 1000 ? 2 : v >= 100 ? 3 : 5;
     return v.toLocaleString(undefined, {minimumFractionDigits: dp, maximumFractionDigits: dp});
   }
+  function compact(v) {
+    if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(0) + 'k';
+    return String(Math.round(v));
+  }
+  function nice(lo, hi, n) {
+    var span = hi - lo || Math.abs(hi) || 1, step = Math.pow(10, Math.floor(Math.log10(span / n))), err = span / n / step;
+    step *= err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1;
+    var t = [], v = Math.floor(lo / step) * step;
+    for (; v <= hi + step * 0.5; v += step) t.push(v);
+    return t;
+  }
+
+  function draw(candles) {
+    var W = chart.clientWidth || 800, H = chart.clientHeight || 380;
+    var L = 72, R = 14, T = 12, B = 26;
+    var hasVol = candles.some(function (c) { return c[5] > 0; });
+    var volH = hasVol ? Math.round((H - T - B) * 0.22) : 0;
+    var priceH = H - T - B - volH - (hasVol ? 8 : 0);
+
+    var lo = Infinity, hi = -Infinity, vmax = 0;
+    candles.forEach(function (c) { lo = Math.min(lo, c[3]); hi = Math.max(hi, c[2]); vmax = Math.max(vmax, c[5]); });
+    var pad = (hi - lo) * 0.06 || hi * 0.01 || 1;
+    lo -= pad; hi += pad;
+    var Y = function (v) { return T + priceH - (v - lo) / (hi - lo) * priceH; };
+    var n = candles.length, slot = (W - L - R) / n;
+    var X = function (i) { return L + slot * (i + 0.5); };
+    // Below ~2px a candle body is thinner than its own outline, so draw a line instead.
+    var thin = slot < 2.2;
+    var bw = Math.max(1, Math.min(slot * 0.68, 14));
+
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img">';
+    nice(lo, hi, 4).forEach(function (v) {
+      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="#2c2c2a"/>' +
+             '<text x="' + (L - 8) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + rate(v) + '</text>';
+    });
+    if (thin) {
+      var d = '';
+      candles.forEach(function (c, i) { d += (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(c[4]).toFixed(1); });
+      svg += '<path d="' + d + '" fill="none" stroke="#c98500" stroke-width="1.6" stroke-linejoin="round"/>';
+    } else {
+      candles.forEach(function (c, i) {
+        var up = c[4] >= c[1], col = up ? UP : DOWN, x = X(i);
+        svg += '<line x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="' + Y(c[2]).toFixed(1) +
+               '" y2="' + Y(c[3]).toFixed(1) + '" stroke="' + col + '" stroke-width="1"/>';
+        var yo = Y(c[1]), yc = Y(c[4]), top = Math.min(yo, yc), h = Math.max(Math.abs(yc - yo), 1);
+        svg += '<rect x="' + (x - bw / 2).toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + bw.toFixed(1) +
+               '" height="' + h.toFixed(1) + '" fill="' + col + '"/>';
+      });
+    }
+    if (hasVol) {
+      var vTop = T + priceH + 8, VY = function (v) { return vTop + volH - (v / vmax) * volH; };
+      svg += '<text x="' + (L - 8) + '" y="' + (vTop + 10) + '" text-anchor="end">' + compact(vmax) + '</text>';
+      candles.forEach(function (c, i) {
+        if (!c[5]) return;
+        var up = c[4] >= c[1], x = X(i), h = Math.max(vTop + volH - VY(c[5]), 0.5);
+        svg += '<rect x="' + (x - bw / 2).toFixed(1) + '" y="' + VY(c[5]).toFixed(1) + '" width="' + bw.toFixed(1) +
+               '" height="' + h.toFixed(1) + '" fill="' + (up ? UP : DOWN) + '" opacity="0.45"/>';
+      });
+    }
+    var step = Math.max(1, Math.round(n / 6));
+    for (var i = 0; i < n; i += step) {
+      var dt = new Date(candles[i][0]);
+      svg += '<text x="' + X(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' +
+             dt.getUTCDate() + ' ' + ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getUTCMonth()] + '</text>';
+    }
+    chart.innerHTML = svg + '</svg>';
+  }
+
   function show(pair) {
-    var pts = (data.fx || {})[pair];
+    var all = (data.fx || {})[pair];
     current = pair;
     list.querySelectorAll('.pair').forEach(function (b) { b.classList.toggle('on', b.dataset.pair === pair); });
     title.textContent = pair;
-    if (!pts || pts.length < 2) { chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">No price history for ' + pair + '.</p>'; sub.textContent = ''; return; }
-    var first = pts[0][1], last = pts[pts.length - 1][1], pct = first ? (last / first - 1) * 100 : 0;
-    sub.textContent = rate(last) + '  ·  ' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '% over the shown period';
-    window.__ptDraw(chart, [{name: pair, color: '#c98500', pts: pts}], range, true, rate);
+    if (!all || all.length < 2) {
+      chart.innerHTML = '<p class="subtle" style="padding-top:150px;text-align:center">No price history for ' + pair + '.</p>';
+      sub.textContent = ''; return;
+    }
+    var last = Date.parse(all[all.length - 1][0]);
+    var from = range === 'All' ? -Infinity : last - RANGE[range] * 864e5;
+    var pts = all.filter(function (c) { return Date.parse(c[0]) >= from; });
+    if (pts.length < 2) pts = all.slice(-2);
+    var pct = pts[0][4] ? (pts[pts.length - 1][4] / pts[0][4] - 1) * 100 : 0;
+    var hasVol = pts.some(function (c) { return c[5] > 0; });
+    sub.textContent = rate(pts[pts.length - 1][4]) + '  ·  ' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '% over ' + range +
+      (hasVol ? '' : '  ·  spot FX has no exchange volume to report');
+    draw(pts);
   }
+
   list.addEventListener('click', function (e) {
     var b = e.target.closest('.pair'); if (b) show(b.dataset.pair);
   });
@@ -825,8 +919,6 @@ FX_JS = r"""
   }
   var railBtn = document.querySelector('.rail-btn[data-tab="forex"]');
   if (railBtn) railBtn.addEventListener('click', drawWhenVisible);
-  // ...and on load, because the open tab is restored from last visit: without this, arriving straight
-  // on Forex showed an empty box.
   drawWhenVisible();
   var redraw; window.addEventListener('resize', function () {
     clearTimeout(redraw); redraw = setTimeout(function () { if (chart.offsetParent !== null && current) show(current); }, 150);
