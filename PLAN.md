@@ -388,6 +388,30 @@ personalTrader/
 - [x] **Results in AUD** + `caffeinate` agent (2026-10-03)
 - [ ] Next candidates: FX carry + trend (note: would attach to S4/S9, which already fail Gate 1); `vault/Knowledge/` research notes
 
+#### Intraday forex: the data exists, the cost floor is the problem (researched 2026-10-03)
+Dukascopy publishes its full tick feed free over plain HTTP — no account, no API key — **with real bid
+and ask**, which is exactly what Yahoo cannot give and what makes intraday untestable on free data.
+Verified directly: EUR/USD, GBP/USD, AUD/USD and XAU/USD all return ~4,000–21,000 ticks per hour. The
+feed throttles (503s and timeouts on aggressive access); at 4 concurrent requests with retries a full day
+downloads in ~35s, so **~2.5 hours per symbol-year, ~51 hours for 5 years × 4 symbols**.
+
+Before spending that, the cost floor was measured from one real day (87,964 EUR/USD ticks, 24 Sep 2026):
+
+| UTC hour | median spread | round trip |
+|---|---|---|
+| 09:00 / 15:00 / 18:00 | 0.20 pips | 0.35 bps |
+| 00:00 / 06:00 / 12:00 | 0.30 pips | 0.53 bps |
+| **21:00 (rollover)** | **2.10 pips** | **3.68 bps** |
+
+At the median spread, trading **5 times a day costs 4.6% a year in spread alone**. S1 — the strategy that
+passes Gate 1 — returns about **4.4% a year in total**. So a modest-frequency intraday strategy must find
+more edge than our best working strategy produces, purely to break even. The 21:00 rollover is 10× the
+median, and it is exactly when an unattended system would happily trade.
+
+**Conclusion:** the data is no longer the blocker; the cost floor is. Worth revisiting only with a
+specific hypothesis about where intraday edge comes from, tested through the same Gate 1 (including the
+deflated-Sharpe trials penalty) — not as "daily but faster".
+
 #### Tested and rejected (do not re-try without a different design)
 | Idea | Date | Result |
 |---|---|---|
