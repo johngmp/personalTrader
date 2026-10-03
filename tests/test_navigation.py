@@ -95,3 +95,51 @@ def test_clearing_the_search_restores_every_row():
 def test_slash_opens_search_but_not_while_typing():
     """Otherwise a "/" in a question to Claude would hijack the page."""
     assert "INPUT|TEXTAREA" in dash.SEARCH_JS
+
+
+# --- the sidebar: labels, counts and the watchlist ---------------------------------------------------
+
+def test_the_sidebar_is_grouped_rather_than_a_row_of_anonymous_icons(page):
+    """Seven unlabelled icons is a memory test. Groups and words are not."""
+    for group in ("Main", "Activity", "Research", "Watchlist"):
+        assert f'class="rail-group">{group}' in page
+
+
+def test_every_nav_item_has_a_visible_word_not_just_an_icon(page):
+    for label in ("Overview", "Stocks &amp; crypto", "Forex", "History", "Orders", "Evidence"):
+        assert f"<span>{label}</span>" in page
+
+
+def test_the_watchlist_shows_every_traded_symbol_with_a_price(page):
+    import re
+
+    rows = re.findall(r'<div class="wrow">.*?</div>\s*(?=<div class="wrow"|</div>)', page, re.S)
+    assert len(rows) >= 10, "the watchlist should cover the traded universe"
+    assert 'class="wpx"' in page
+
+
+def test_collapsing_hides_labels_without_a_second_layout(page):
+    """One rail with a modifier class; two layouts would drift apart."""
+    assert "body.rail-min .rail-btn span" in page and "display:none" in page
+    assert "body.rail-min{padding-left:62px}" in page
+
+
+def test_the_collapsed_state_is_remembered(page):
+    from trader.engine import dashboard as d
+
+    assert "localStorage.setItem('railMin'" in d.RAIL_JS
+
+
+def test_a_warning_shows_a_marker_on_the_orders_item(page):
+    from trader.engine import dashboard as d
+    import inspect
+
+    assert 'dot-warn' in inspect.getsource(d)
+
+
+def test_the_forex_chart_draws_on_load_not_only_on_click():
+    """The open tab is restored from last visit, so arriving straight on Forex must not show a blank box."""
+    from trader.engine import dashboard as d
+
+    assert "drawWhenVisible();" in d.FX_JS
+    assert "chart.offsetParent !== null" in d.FX_JS, "must not draw into a hidden, zero-width element"

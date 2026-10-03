@@ -45,6 +45,7 @@ ICON_FX = _svg('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/>'
 ICON_LIST = _svg('<path d="M8 6h12"/><path d="M8 12h12"/><path d="M8 18h12"/>'
                  '<circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>')
 ICON_BELL = _svg('<path d="M18 16V11a6 6 0 10-12 0v5l-1.5 2.5h15L18 16z"/><path d="M10 20.5a2.2 2.2 0 004 0"/>')
+ICON_PANEL = _svg('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>')
 ICON_FLASK = _svg('<path d="M9 3v6.2L4.4 17A2 2 0 006.1 20h11.8a2 2 0 001.7-3L15 9.2V3"/>'
                   '<path d="M8 3h8"/><path d="M7.4 14h9.2"/>')
 
@@ -179,6 +180,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
                  "trading_days": len(fill_days), "open": len(open_trips)},
         "sleeves": sleeves, "trips": sorted(trips, key=lambda t: t.entry_ts, reverse=True), "price": price,
         "states": {(s["sleeve_id"], s["symbol"]): s for s in journal.position_states()},
+        "watchlist": watchlist(settings, price),
         "orders": journal.recent_order_rows(25),
         "rate": stored_rate(journal),
         "fx": fx_snapshot(settings, journal, engines),
@@ -195,6 +197,31 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
 
 
 FX_CHART_DAYS = 400
+
+
+def watchlist(settings: Settings, price) -> list[dict]:
+    """Every traded symbol with its live price and the day's move, for the sidebar.
+
+    The day's change comes from the cached daily history rather than a second quote: the previous close
+    is already on disk, and asking a broker twice for the same symbol is how the page got slow before.
+    """
+    from trader.data.history import load_history
+
+    rows = []
+    for symbol in sorted({x for s in settings.sleeves.values() if s.enabled for x in s.symbols}):
+        now_price = price(symbol)
+        if now_price is None:
+            continue
+        change = None
+        try:
+            closes = load_history(symbol)["close"]
+            if len(closes) >= 2:
+                change = now_price / float(closes.iloc[-2]) - 1
+        except Exception:
+            change = None
+        rows.append({"symbol": symbol, "price": now_price, "change": change,
+                     "asset_class": settings.asset_class(symbol)})
+    return rows
 
 
 def fx_series(symbols: list[str], live: dict[str, float] | None = None) -> dict[str, list]:
@@ -397,6 +424,17 @@ def render(d: dict) -> str:
     aud_line = (f'<div class="subtle">{aud_total} at {1 / d["rate"].aud_per_usd:.4f} AUD/USD '
                 f'({format_aud(d["total_pnl"], d["rate"], signed=True)} since the start)</div>'
                 if aud_total else "")
+    watch = d.get("watchlist") or []
+    n_fx = sum(1 for w in watch if w["asset_class"] == AssetClass.FOREX)
+    n_equity = len(watch) - n_fx
+    n_trades = len([t for t in d["trips"] if not t.is_open])
+    warn_dot = '<i class="dot-warn"></i>' if d["warnings"] else ""
+    watch_items = "".join(
+        f'<div class="wrow"><span class="wsym">{html.escape(w["symbol"])}</span>'
+        f'<span class="wpx">{format_price(w["price"], w["asset_class"])}</span>'
+        + (f'<span class="{"up" if w["change"] >= 0 else "down"}">{w["change"] * 100:+.2f}%</span>'
+           if w["change"] is not None else '<span class="subtle">–</span>')
+        + "</div>" for w in watch)
     head_lines = "".join(f'<li class="hl-{tone}">{html.escape(text)}</li>' for tone, text in headline(d))
     fx = d.get("fx") or {}
     if fx.get("rows"):
@@ -484,15 +522,21 @@ a few minutes.</p>
 <span class="pill closed">Auto</span></div><div class="subtle">Last engine run {html.escape(last_run)} UTC · orders today {d['orders_today']}/{d['max_orders']}</div></div>
 <button id="claude-toggle" aria-expanded="false" aria-controls="claude-panel" title="Ask Claude (⌘J)">Ask Claude</button></header>
 <nav class="rail" role="tablist" aria-label="Sections">
-<div class="rail-brand">PT</div>
-<button class="rail-btn" id="rail-search" title="Search (/)" aria-label="Search">{ICON_SEARCH}</button>
-<div class="rail-sep"></div>
-<button class="rail-btn tab active" data-tab="overview" role="tab" title="Overview" aria-label="Overview">{ICON_HOME}</button>
-<button class="rail-btn tab" data-tab="stocks" role="tab" title="Stocks &amp; crypto" aria-label="Stocks and crypto">{ICON_CHART}</button>
-<button class="rail-btn tab" data-tab="forex" role="tab" title="Forex" aria-label="Forex">{ICON_FX}</button>
-<button class="rail-btn tab" data-tab="trades" role="tab" title="Trading history" aria-label="Trading history">{ICON_LIST}</button>
-<button class="rail-btn tab" data-tab="orders" role="tab" title="Orders &amp; warnings" aria-label="Orders and warnings">{ICON_BELL}</button>
-<button class="rail-btn tab" data-tab="evidence" role="tab" title="Evidence: does each strategy work?" aria-label="Evidence">{ICON_FLASK}</button>
+<div class="rail-top"><div class="rail-brand">PT</div><span class="rail-name">Personal Trader</span>
+<span class="spacer"></span>
+<button id="rail-collapse" title="Collapse sidebar" aria-label="Collapse sidebar">{ICON_PANEL}</button></div>
+<button class="rail-btn" id="rail-search" title="Search (/)" aria-label="Search">{ICON_SEARCH}<span>Search</span></button>
+<div class="rail-group">Main</div>
+<button class="rail-btn tab active" data-tab="overview" role="tab" title="Overview" aria-label="Overview">{ICON_HOME}<span>Overview</span></button>
+<button class="rail-btn tab" data-tab="stocks" role="tab" title="Stocks &amp; crypto" aria-label="Stocks and crypto">{ICON_CHART}<span>Stocks &amp; crypto</span><i class="count">{n_equity}</i></button>
+<button class="rail-btn tab" data-tab="forex" role="tab" title="Forex" aria-label="Forex">{ICON_FX}<span>Forex</span><i class="count">{n_fx}</i></button>
+<div class="rail-group">Activity</div>
+<button class="rail-btn tab" data-tab="trades" role="tab" title="Trading history" aria-label="Trading history">{ICON_LIST}<span>History</span><i class="count">{n_trades}</i></button>
+<button class="rail-btn tab" data-tab="orders" role="tab" title="Orders &amp; warnings" aria-label="Orders and warnings">{ICON_BELL}<span>Orders</span>{warn_dot}</button>
+<div class="rail-group">Research</div>
+<button class="rail-btn tab" data-tab="evidence" role="tab" title="Does each strategy work?" aria-label="Evidence">{ICON_FLASK}<span>Evidence</span></button>
+<div class="rail-group">Watchlist</div>
+<div class="watchlist">{watch_items}</div>
 </nav>
 <main>
 <section data-panel="overview">
@@ -572,7 +616,7 @@ T-bills". A strategy that fails here has not earned real money, whatever its rec
 <p class="ap-note">Reads your data and runs read-only <code>trader</code> commands.
 Cannot place orders, change files or read credentials. Will not tell you what to buy.</p></div></aside><div class="tip" id="tip" hidden></div>
 <script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script>
-<script>{FX_JS}</script><script>{SEARCH_JS}</script><script>{CHAT_JS}</script></body></html>"""
+<script>{RAIL_JS}</script><script>{FX_JS}</script><script>{SEARCH_JS}</script><script>{CHAT_JS}</script></body></html>"""
 
 
 def dashboard_html(settings: Settings, journal: Journal, engines: list[Engine], refresh_s: int = 300) -> str:
@@ -599,18 +643,38 @@ CSS = """
 .pair .subtle{font-size:.72rem}
 .fxchart .chart{height:380px}
 @media (max-width:900px){.fxlayout{grid-template-columns:1fr}.pairlist{max-height:none}}
-.rail{position:fixed;left:0;top:0;bottom:0;width:62px;background:#111110;border-right:1px solid var(--line);
-  display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0;z-index:50}
-.rail-brand{width:34px;height:34px;border-radius:9px;background:#c98500;color:#1a1a18;font-weight:600;
-  display:flex;align-items:center;justify-content:center;font-size:.82rem;margin-bottom:6px}
-.rail-sep{width:26px;height:1px;background:var(--line);margin:4px 0}
-.rail-btn{width:40px;height:40px;border:0;border-radius:10px;background:none;color:#78766f;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;position:relative}
+.rail{position:fixed;left:0;top:0;bottom:0;width:224px;background:#111110;border-right:1px solid var(--line);
+  display:flex;flex-direction:column;gap:2px;padding:10px 10px 12px;z-index:50;overflow-y:auto}
+.rail-top{display:flex;align-items:center;gap:9px;padding:2px 2px 10px}
+.rail-top button{background:none;border:0;color:#6e6c67;cursor:pointer;padding:3px;border-radius:6px;display:flex}
+.rail-top button:hover{background:#232321;color:#e8e6e1}
+.rail-name{font-size:.82rem;color:#c9c7c1;font-weight:500;white-space:nowrap}
+.rail-group{font-size:.66rem;letter-spacing:.09em;text-transform:uppercase;color:#5f5d58;
+  padding:12px 8px 5px;white-space:nowrap}
+.watchlist{display:flex;flex-direction:column;gap:1px;overflow-y:auto}
+.wrow{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:.3rem .5rem;border-radius:7px;font-size:.76rem}
+.wrow:hover{background:#1b1b19}
+.wsym{color:#c9c7c1}
+.wpx{color:#e8e6e1;text-align:right;font-variant-numeric:tabular-nums}
+.wrow .up,.wrow .down,.wrow .subtle{grid-column:2;text-align:right;font-size:.7rem}
+.dot-warn{width:6px;height:6px;border-radius:50%;background:#c98500;margin-left:auto}
+.rail-brand{width:30px;height:30px;border-radius:8px;background:#c98500;color:#1a1a18;font-weight:600;
+  display:flex;align-items:center;justify-content:center;font-size:.76rem;flex:0 0 auto}
+.rail-btn{width:100%;border:0;border-radius:8px;background:none;color:#a7a59f;cursor:pointer;
+  display:flex;align-items:center;gap:10px;padding:.45rem .5rem;font:inherit;font-size:.84rem;text-align:left}
+.rail-btn svg{flex:0 0 auto}
+.rail-btn span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail-btn .count{margin-left:auto;font-style:normal;font-size:.7rem;color:#5f5d58;
+  background:#1d1d1b;border-radius:999px;padding:.05rem .4rem}
 .rail-btn:hover{background:#232321;color:#e8e6e1}
 .rail-btn.active{background:#232321;color:#c98500}
-.rail-btn.active::before{content:"";position:absolute;left:-12px;top:9px;bottom:9px;width:3px;
-  border-radius:0 3px 3px 0;background:#c98500}
-body{padding-left:62px}
+body{padding-left:224px}
+/* Collapsed: icons only, same rail, no second layout to keep in step. */
+body.rail-min .rail{width:62px;align-items:center;padding-left:0;padding-right:0}
+body.rail-min .rail-btn{width:40px;height:40px;justify-content:center;padding:0;gap:0}
+body.rail-min .rail-btn span,body.rail-min .rail-btn .count,body.rail-min .rail-name,
+body.rail-min .rail-group,body.rail-min .watchlist{display:none}
+body.rail-min{padding-left:62px}
 #searchbar{position:fixed;left:62px;right:0;top:0;z-index:45;padding:10px 28px;background:#141412;
   border-bottom:1px solid var(--line);display:none}
 #searchbar.on{display:block}
@@ -753,11 +817,35 @@ FX_JS = r"""
     range = b.dataset.r; if (current) show(current);
   });
   var firstBtn = list.querySelector('.pair');
-  // Drawn when the section is first opened: a hidden element has no width to scale into.
+  function drawWhenVisible() {
+    // A hidden element has no width, so drawing into it makes a chart one pixel wide.
+    setTimeout(function () {
+      if (chart.offsetParent !== null) show(current || (firstBtn && firstBtn.dataset.pair));
+    }, 60);
+  }
   var railBtn = document.querySelector('.rail-btn[data-tab="forex"]');
-  if (railBtn) railBtn.addEventListener('click', function () {
-    setTimeout(function () { show(current || (firstBtn && firstBtn.dataset.pair)); }, 60);
+  if (railBtn) railBtn.addEventListener('click', drawWhenVisible);
+  // ...and on load, because the open tab is restored from last visit: without this, arriving straight
+  // on Forex showed an empty box.
+  drawWhenVisible();
+  var redraw; window.addEventListener('resize', function () {
+    clearTimeout(redraw); redraw = setTimeout(function () { if (chart.offsetParent !== null && current) show(current); }, 150);
   });
+})();
+"""
+
+RAIL_JS = r"""
+(function () {
+  var btn = document.getElementById('rail-collapse');
+  if (!btn) return;
+  function set(min) {
+    document.body.classList.toggle('rail-min', min);
+    btn.title = min ? 'Expand sidebar' : 'Collapse sidebar';
+    try { localStorage.setItem('railMin', min ? '1' : '0'); } catch (e) {}
+  }
+  btn.addEventListener('click', function () { set(!document.body.classList.contains('rail-min')); });
+  var saved = '0'; try { saved = localStorage.getItem('railMin') || '0'; } catch (e) {}
+  set(saved === '1');
 })();
 """
 
