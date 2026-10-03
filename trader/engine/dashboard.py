@@ -31,6 +31,24 @@ BROKER_LABELS = {"alpaca": "Alpaca (stocks & crypto)", "oanda": "OANDA (forex)",
                  "shadow_fx": "Shadow FX (no orders)"}
 
 
+# Inline so the page stays a single self-contained file with no icon font to fetch.
+def _svg(body: str) -> str:
+    return (f'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" '
+            f'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">{body}</svg>')
+
+
+ICON_SEARCH = _svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>')
+ICON_HOME = _svg('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/>')
+ICON_CHART = _svg('<path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 16l3.5-4.5 3 2.5L20 7"/>')
+ICON_FX = _svg('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/>'
+               '<path d="M12 3.5c2.4 2.3 3.6 5.2 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.2-3.6-8.5S9.6 5.8 12 3.5z"/>')
+ICON_LIST = _svg('<path d="M8 6h12"/><path d="M8 12h12"/><path d="M8 18h12"/>'
+                 '<circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>')
+ICON_BELL = _svg('<path d="M18 16V11a6 6 0 10-12 0v5l-1.5 2.5h15L18 16z"/><path d="M10 20.5a2.2 2.2 0 004 0"/>')
+ICON_FLASK = _svg('<path d="M9 3v6.2L4.4 17A2 2 0 006.1 20h11.8a2 2 0 001.7-3L15 9.2V3"/>'
+                  '<path d="M8 3h8"/><path d="M7.4 14h9.2"/>')
+
+
 def is_shadow(broker: str | None) -> bool:
     """Every shadow broker, whatever prices it uses: `shadow` (Alpaca) and `shadow_fx` (Yahoo)."""
     return bool(broker) and broker.startswith("shadow")
@@ -397,16 +415,25 @@ def render(d: dict) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="pt-refresh" content="300">
 <title>Trader dashboard</title><style>{CSS}</style></head><body>
+<div id="searchbar"><input id="searchbox" type="search" autocomplete="off"
+ placeholder="Search trades, orders, symbols or reasons&hellip;  (Esc to close)"
+ aria-label="Search the tables on this page"></div>
 <header><div class="brand">PT</div><div><h1>Dashboard</h1><div class="subtle">{d['now'].astimezone():%A, %d %B %Y · %H:%M}</div></div>
 <div class="spacer"></div>
 <div class="account"><div><b>Paper trading</b> <span class="pill {'bad' if d['kill_switch'] else 'ok'}">{'Halted' if d['kill_switch'] else 'Active'}</span>
 <span class="pill closed">Auto</span></div><div class="subtle">Last engine run {html.escape(last_run)} UTC · orders today {d['orders_today']}/{d['max_orders']}</div></div>
 <button id="claude-toggle" aria-expanded="false" aria-controls="claude-panel" title="Ask Claude (⌘J)">Ask Claude</button></header>
-<nav class="tabs" role="tablist">
-<button class="tab active" data-tab="overview" role="tab">Overview</button>
-<button class="tab" data-tab="trades" role="tab">Trading history</button>
-<button class="tab" data-tab="orders" role="tab">Orders &amp; warnings</button>
-<button class="tab" data-tab="evidence" role="tab">Evidence</button></nav>
+<nav class="rail" role="tablist" aria-label="Sections">
+<div class="rail-brand">PT</div>
+<button class="rail-btn" id="rail-search" title="Search (/)" aria-label="Search">{ICON_SEARCH}</button>
+<div class="rail-sep"></div>
+<button class="rail-btn tab active" data-tab="overview" role="tab" title="Overview" aria-label="Overview">{ICON_HOME}</button>
+<button class="rail-btn tab" data-tab="stocks" role="tab" title="Stocks &amp; crypto" aria-label="Stocks and crypto">{ICON_CHART}</button>
+<button class="rail-btn tab" data-tab="forex" role="tab" title="Forex" aria-label="Forex">{ICON_FX}</button>
+<button class="rail-btn tab" data-tab="trades" role="tab" title="Trading history" aria-label="Trading history">{ICON_LIST}</button>
+<button class="rail-btn tab" data-tab="orders" role="tab" title="Orders &amp; warnings" aria-label="Orders and warnings">{ICON_BELL}</button>
+<button class="rail-btn tab" data-tab="evidence" role="tab" title="Evidence: does each strategy work?" aria-label="Evidence">{ICON_FLASK}</button>
+</nav>
 <main>
 <section data-panel="overview">
 <ul class="headline">{head_lines}</ul>
@@ -435,6 +462,8 @@ def render(d: dict) -> str:
 <div><dt>Account size</dt><dd>{_money(d['start_equity'])}</dd></div><div><dt>Accounts</dt><dd>{len(d['accounts'])}</dd></div></dl>
 {f"<p class='bad'>Kill switch: {html.escape(d['kill_reason'])}</p>" if d['kill_switch'] else ''}</div></div>
 <h2>Trading objectives</h2><div class="tiles">{tiles}</div>
+</section>
+<section data-panel="stocks" hidden>
 <h2>Strategies</h2><div class="grid sleeves">{sleeve_cards}</div>
 <div class="card chartcard"><div class="row"><div><div class="label">Strategy vs buy-and-hold</div>
 <div class="subtle">Value of each $10,000 strategy</div></div><div class="spacer"></div>
@@ -443,8 +472,10 @@ def render(d: dict) -> str:
 <div class="legend">{legend_sleeves}</div>
 <div class="chart" id="sleeves-chart" aria-label="Sleeve values over time"></div></div>
 {shadow_card}
-{fx_card}
 <h2>Open positions</h2><div class="card scroll"><table>{trade_head}{open_rows or "<tr><td colspan=13 class='subtle'>No open positions.</td></tr>"}</table></div>
+</section>
+<section data-panel="forex" hidden>
+{fx_card or '<h2>Forex</h2><p class="subtle">No forex sleeve is switched on.</p>'}
 </section>
 <section data-panel="trades" hidden><h2>Trading history</h2>
 <div class="card scroll"><input class="search" placeholder="Search symbol, sleeve or reason…" aria-label="Search trades">
@@ -481,7 +512,7 @@ T-bills". A strategy that fails here has not earned real money, whatever its rec
 <p class="ap-note">Reads your data and runs read-only <code>trader</code> commands.
 Cannot place orders, change files or read credentials. Will not tell you what to buy.</p></div></aside><div class="tip" id="tip" hidden></div>
 <script id="chart-data" type="application/json">{chart_data}</script><script>{JS}</script>
-<script>{CHAT_JS}</script></body></html>"""
+<script>{SEARCH_JS}</script><script>{CHAT_JS}</script></body></html>"""
 
 
 def dashboard_html(settings: Settings, journal: Journal, engines: list[Engine], refresh_s: int = 300) -> str:
@@ -498,6 +529,25 @@ def write_dashboard(settings: Settings, journal: Journal, engines: list[Engine])
 
 
 CSS = """
+.rail{position:fixed;left:0;top:0;bottom:0;width:62px;background:#111110;border-right:1px solid var(--line);
+  display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 0;z-index:50}
+.rail-brand{width:34px;height:34px;border-radius:9px;background:#c98500;color:#1a1a18;font-weight:600;
+  display:flex;align-items:center;justify-content:center;font-size:.82rem;margin-bottom:6px}
+.rail-sep{width:26px;height:1px;background:var(--line);margin:4px 0}
+.rail-btn{width:40px;height:40px;border:0;border-radius:10px;background:none;color:#78766f;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;position:relative}
+.rail-btn:hover{background:#232321;color:#e8e6e1}
+.rail-btn.active{background:#232321;color:#c98500}
+.rail-btn.active::before{content:"";position:absolute;left:-12px;top:9px;bottom:9px;width:3px;
+  border-radius:0 3px 3px 0;background:#c98500}
+body{padding-left:62px}
+#searchbar{position:fixed;left:62px;right:0;top:0;z-index:45;padding:10px 28px;background:#141412;
+  border-bottom:1px solid var(--line);display:none}
+#searchbar.on{display:block}
+#searchbar input{width:100%;max-width:560px;background:#1b1b19;border:1px solid #3a3a37;color:#e8e6e1;
+  border-radius:8px;padding:.55rem .8rem;font:inherit}
+#searchbar input:focus{outline:none;border-color:#c98500}
+tr.hide{display:none}
 ul.headline{list-style:none;margin:14px 0 22px;padding:0;display:flex;flex-direction:column;gap:.45rem}
 ul.headline li{padding:.55rem .9rem;border-radius:8px;border-left:3px solid #3a3a37;background:#161614;
   font-size:.95rem;line-height:1.5;color:#d6d4cf}
@@ -598,6 +648,34 @@ td.num { text-align:right; font-variant-numeric:tabular-nums; } th:nth-child(n+6
   font-size:12px; z-index:10; box-shadow:0 8px 24px rgba(0,0,0,.4); }
 .tip i { display:inline-block; width:10px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }
 p.bad { color:var(--down); }
+"""
+
+SEARCH_JS = r"""
+(function () {
+  // Filters every table on the page rather than one, so a symbol is findable wherever it appears.
+  var bar = document.getElementById('searchbar'), box = document.getElementById('searchbox'),
+      btn = document.getElementById('rail-search');
+  if (!bar || !box || !btn) return;
+  function apply() {
+    var q = box.value.trim().toLowerCase();
+    document.querySelectorAll('main table tr').forEach(function (tr) {
+      if (tr.querySelector('th')) return;                 // never hide a header
+      tr.classList.toggle('hide', q !== '' && tr.textContent.toLowerCase().indexOf(q) === -1);
+    });
+  }
+  function open(on) {
+    bar.classList.toggle('on', on);
+    btn.classList.toggle('active', on);
+    if (on) { box.focus(); } else { box.value = ''; apply(); }
+  }
+  btn.addEventListener('click', function () { open(!bar.classList.contains('on')); });
+  box.addEventListener('input', apply);
+  document.addEventListener('keydown', function (e) {
+    var typing = /^(INPUT|TEXTAREA)$/.test((e.target || {}).tagName || '');
+    if (e.key === '/' && !typing) { e.preventDefault(); open(true); }
+    if (e.key === 'Escape' && bar.classList.contains('on')) open(false);
+  });
+})();
 """
 
 CHAT_JS = r"""
