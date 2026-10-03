@@ -177,6 +177,9 @@ def test_two_brokers_each_trade_only_their_own_sleeves(settings, journal):
     s4 = settings.sleeves["S4"].model_copy(update={"enabled": True, "broker": "oanda",
                                                    "params": {"fast": 50, "slow": 150, "atr_mult": 3.5}})
     settings.sleeves["S4"] = s4
+    # Same reason the broker is pinned above: this test is about routing, and S8's 40-market basket is
+    # not priced by either fake world here.
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
     now = datetime(2026, 9, 18, 15, 0, tzinfo=timezone.utc)
     alpaca, oanda = SimBroker(name="alpaca", crypto_fee_bps=25), SimBroker(name="oanda")  # like the real brokers
     for broker, start, bars in ((alpaca, STOCKS_CRYPTO, None), (oanda, FX, None)):

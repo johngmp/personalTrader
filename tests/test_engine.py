@@ -60,6 +60,10 @@ def world(settings, tmp_path):
 
     clock = Clock()
     journal = Journal(tmp_path / "journal.db", clock=clock)
+    # S8 trades 40 markets and this world prices four, so leaving it on would fail every test here with
+    # a missing-bars error about a symbol none of them is testing. Same pattern as test_shadow.py.
+    # test_s8_decides_on_its_whole_widened_basket covers S8 against a world built for it.
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
     bars = FakeBars()
     broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
 
@@ -280,3 +284,89 @@ def test_alpaca_replaced_status_is_final():
 
     assert _STATUS_MAP["replaced"] is OrderStatus.CANCELED
     assert _STATUS_MAP["pending_replace"] is OrderStatus.SUBMITTED
+
+
+# --- S8's widened 40-market basket (2026-10-03) ---------------------------------------------------
+
+def _wide_world(settings, tmp_path, seed=7):
+    """S8 enabled on 40 markets, every one of them trending up, against the simulated broker."""
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": True})
+    for sid in ("B0", "S1"):
+        settings.sleeves[sid] = settings.sleeves[sid].model_copy(update={"enabled": False})
+    symbols = settings.sleeves["S8"].symbols
+    idx = pd.bdate_range("2025-01-01", periods=260)
+    rng = np.random.default_rng(seed)
+    # A steady uptrend in everything, so every symbol has a signal and nothing is skipped for want of
+    # one. This is about covering the basket, not about picking winners.
+    full = {}
+    for symbol in symbols:
+        close = 100.0 * np.cumprod(1 + 0.002 + rng.normal(0, 0.004, 260))
+        full[symbol] = pd.DataFrame({"open": close, "high": close * 1.004, "low": close * 0.996,
+                                     "close": close, "volume": 1.0}, index=idx)
+
+    class WideBars:
+        def completed_bars(self, symbol, asset_class, now, market):
+            return full[symbol]
+
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    for symbol, df in full.items():
+        broker.set_price(symbol, float(df["close"].iloc[-1]), clock.now)
+    engine = Engine(settings, broker, journal, WideBars(), notifier=NullNotifier(), clock=clock,
+                    executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                    fill_wait_s=0)
+    return engine, journal, broker, full, symbols
+
+
+def test_s8_decides_on_its_whole_widened_basket(settings, tmp_path):
+    """S8 went from 19 markets to 40 on 2026-10-03, for speed of EVIDENCE rather than return.
+
+    Measured over 31 years, 19 markets complete 7.0 trades a month and 40 complete 15.1, which turns the
+    50 trades Gate 2 wants from 7.2 months into 3.3. That only holds if the engine really decides on all
+    40, so this asserts the count rather than trusting the config: the first dry run after the change
+    silently decided on 19 of them, because journal rows left behind by a half-finished rename made the
+    other 21 look already-decided.
+    """
+    settings.risk.account.max_orders_per_day = 1000     # isolate this from the budget defect below
+    engine, journal, _broker, full, symbols = _wide_world(settings, tmp_path)
+    assert len(symbols) == 40, "this test is pinned to the widened basket"
+
+    report = engine.run_once()
+    assert not report.problems, report.problems
+    decided = {s for s in symbols if journal.last_decided_bar("S8", s) is not None}
+    assert decided == set(symbols), f"did not decide on {sorted(set(symbols) - decided)}"
+
+    # No leverage: a sleeve is capped at its own capital, whatever the gate was asked for.
+    held = journal.sleeve_holdings("S8")
+    assert held, "S8 bought nothing at all"
+    invested = sum(q * float(full[s]["close"].iloc[-1]) for s, q in held.items())
+    assert invested <= settings.sleeves["S8"].capital_usd * 1.001, f"S8 levered to ${invested:,.0f}"
+    journal.close()
+
+
+def test_s8_at_the_shipped_order_budget_starves_its_stops(settings, tmp_path):
+    """Why S8 ships DISABLED: 40 markets need 80 orders to cold-start, and the account allows 60.
+
+    An entry and its protective stop are two orders. The entries go first, so when the budget runs out
+    it is the STOPS that are refused -- open positions with nothing protecting them for the rest of the
+    day, which is the single failure this system exists to prevent. The budget is account-wide and
+    shadow orders count against it too, so a research sleeve can starve B0's and S1's stops as well.
+    Raising max_orders_per_day in config/risk.yaml is the fix, and that file is the user's to change.
+    """
+    shipped = settings.risk.account.max_orders_per_day
+    assert shipped == 60, f"risk.yaml now allows {shipped}/day; re-check whether 40 markets still fit"
+
+    engine, journal, _broker, _full, symbols = _wide_world(settings, tmp_path)
+    report = engine.run_once()
+
+    starved = [p for p in report.problems if "stop" in p and "max_orders_per_day" in p]
+    assert starved, f"expected starved stops at a {shipped}-order budget, got {report.problems}"
+    # The damage is specific: positions are open and some of them have no stop at the broker.
+    held = set(journal.sleeve_holdings("S8"))
+    stopped = {o.symbol for o in _broker.get_open_orders()
+               if o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)}
+    assert held - stopped, "budget was exhausted yet every position still had a stop"
+    journal.close()

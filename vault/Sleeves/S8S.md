@@ -1,0 +1,51 @@
+---
+sleeve: "S8S"
+enabled: false
+strategy: "S8"
+params: {"fast": 20, "slow": 200, "atr_mult": 2.5}
+capital_usd: 10000.0
+tags: ["sleeve"]
+---
+
+# S8S · Trend following, diversified (19 markets, shadow archive)
+
+<!-- engine:start -->
+**Value:** $10,000.00 (+0.00%) · **invested:** $0.00 · **closed trades:** 5 · **win rate:** 0% · **average R:** -0.73
+
+Symbols: SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD, SLV, DBC, USO, VNQ, XLE, XLU, XLV, UUP, BTC/USD, ETH/USD, SOL/USD · settings: `{"fast": 20, "slow": 200, "atr_mult": 2.5}`
+
+## Open positions
+| Symbol | Qty | Entry | Now | P&L |
+|---|---|---|---|---|
+| BTC/USD | 0.0059383 | $81,480.85 | – | $-485.07 |
+| ETH/USD | 0.13147 | $2,651.00 | – | $-349.40 |
+| SOL/USD | 3.03647 | $112.13 | – | $-341.32 |
+| SPY | 1 | $766.59 | – | $-766.59 |
+| QQQ | 1 | $730.60 | – | $-730.60 |
+| DBC | 26 | $32.64 | – | $-848.51 |
+| XLV | 5 | $168.66 | – | $-843.30 |
+| UUP | 33 | $28.41 | – | $-937.69 |
+| IWM | 5 | $276.99 | – | $-1,386.07 |
+| XLE | 35 | $61.60 | – | $-2,156.10 |
+
+## Trades
+- [[Trades/2026/10/2026-10-01_S8S_XLE_d54ddb|2026-10-01 XLE]] · open
+- [[Trades/2026/10/2026-10-01_S8S_IWM_61450a|2026-10-01 IWM]] · open
+- [[Trades/2026/09/2026-09-21_S8S_UUP_bb4ff1|2026-09-21 UUP]] · open
+- [[Trades/2026/09/2026-09-21_S8S_XLV_1c4e44|2026-09-21 XLV]] · open
+- [[Trades/2026/09/2026-09-21_S8S_XLE_c647cf|2026-09-21 XLE]] · $-21.45
+- [[Trades/2026/09/2026-09-21_S8S_USO_0145fe|2026-09-21 USO]] · $-15.79
+- [[Trades/2026/09/2026-09-21_S8S_DBC_8745e4|2026-09-21 DBC]] · open
+- [[Trades/2026/09/2026-09-21_S8S_EEM_524826|2026-09-21 EEM]] · $-26.78
+- [[Trades/2026/09/2026-09-21_S8S_EFA_0f4131|2026-09-21 EFA]] · $-21.08
+- [[Trades/2026/09/2026-09-21_S8S_IWM_8b465a|2026-09-21 IWM]] · $-20.72
+- [[Trades/2026/09/2026-09-21_S8S_QQQ_0749a3|2026-09-21 QQQ]] · open
+- [[Trades/2026/09/2026-09-21_S8S_SPY_604279|2026-09-21 SPY]] · open
+- [[Trades/2026/09/2026-09-19_S8S_SOL-USD_364ca6|2026-09-19 SOL/USD]] · open
+- [[Trades/2026/09/2026-09-19_S8S_ETH-USD_53434c|2026-09-19 ETH/USD]] · open
+- [[Trades/2026/09/2026-09-19_S8S_BTC-USD_14402a|2026-09-19 BTC/USD]] · open
+<!-- engine:end -->
+
+## Review
+
+_Added by the weekly review (Phase 4) or by you. The engine never edits below the line above._

@@ -82,12 +82,18 @@ class BroadTrend(TrendFollowing):
 
     name: ClassVar[str] = "S8"
     title: ClassVar[str] = "Trend following, diversified"
+    # Widened 19 -> 40 on 2026-10-03. Breadth is this strategy's only real edge, and it is also what
+    # sets how fast it can be judged: measured over 31 years, 19 markets produce 7.0 completed trades a
+    # month and 40 produce 15.1, so the 50 trades Gate 2 wants arrive in 3.3 months instead of 7.2.
     default_symbols: ClassVar[list[str]] = [
-        "SPY", "QQQ", "IWM", "EFA", "EEM",          # stock indices: US large, tech, small; developed; emerging
-        "TLT", "IEF",                                # US government bonds: long and medium
-        "GLD", "SLV", "DBC", "USO", "VNQ",           # gold, silver, broad commodities, oil, real estate
-        "XLE", "XLU", "XLV",                         # energy, utilities, health care sectors
-        "UUP",                                       # US dollar
+        "SPY", "QQQ", "IWM", "MDY",                  # US equity: large, tech, small, mid
+        "EFA", "EEM", "EWJ", "EWZ", "FXI", "EWU", "EWA",   # developed, emerging, Japan, Brazil, China, UK, Australia
+        "XLF", "XLK", "XLI", "XLP", "XLY", "XLB", "XLE", "XLU", "XLV",   # all nine US sectors
+        "TLT", "IEF", "SHY", "TIP",                  # US government bonds: long, medium, short, inflation-linked
+        "LQD", "HYG",                                # investment-grade and high-yield credit
+        "GLD", "SLV", "GDX",                         # gold, silver, gold miners
+        "DBC", "USO", "UNG", "DBA", "VNQ",           # broad commodities, oil, natural gas, agriculture, real estate
+        "UUP", "FXE", "FXY",                         # US dollar, euro, yen
         "BTC/USD", "ETH/USD", "SOL/USD",             # crypto
     ]
 

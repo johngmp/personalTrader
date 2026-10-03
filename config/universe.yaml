@@ -34,6 +34,36 @@ symbols:
   BRK.B: us_equity
   JNJ: us_equity
   XOM: us_equity
+  # --- Widened S8 basket (2026-10-03): 19 -> 40 markets. Trend following gets its edge from breadth,
+  # and trade COUNT scales with the number of markets, which is what makes a verdict arrive in weeks
+  # rather than a year. Chosen for liquidity and for being genuinely different return streams: adding
+  # more US large-cap proxies would add trades without adding information.
+  # Remaining US sectors (XLE/XLU/XLV were already here)
+  XLF: us_equity
+  XLK: us_equity
+  XLI: us_equity
+  XLP: us_equity
+  XLY: us_equity
+  XLB: us_equity
+  # Single-country equity, which trends on its own currency and policy cycle rather than the S&P's
+  EWJ: us_equity
+  EWZ: us_equity
+  FXI: us_equity
+  EWU: us_equity
+  EWA: us_equity
+  # Rates and credit: the longest-trending series in the whole basket
+  SHY: us_equity
+  TIP: us_equity
+  LQD: us_equity
+  HYG: us_equity
+  # Commodities beyond oil
+  DBA: us_equity
+  UNG: us_equity
+  # Size, miners, currencies
+  MDY: us_equity
+  GDX: us_equity
+  FXE: us_equity
+  FXY: us_equity
   # Forex + gold: researched now, traded from Phase 4b (OANDA)
   EUR/USD: forex
   AUD/USD: forex
@@ -43,7 +73,25 @@ symbols:
 
 # Symbols that tend to move together. Their combined exposure is capped by
 # account.max_correlated_exposure_pct in risk.yaml.
+# Widening to 40 markets makes these groups the thing that actually controls risk: a "diversified"
+# basket of 40 tickers that all fall together in a crash is not diversified, it is one bet with 40
+# tickets. The cap is on combined exposure, so these deliberately overlap -- an order has to satisfy
+# EVERY group it belongs to.
 correlation_groups:
   crypto: [BTC/USD, ETH/USD, SOL/USD]
   us_growth: [QQQ, SPY]
   us_mega_tech: [QQQ, AAPL, MSFT, NVDA, GOOGL, AMZN, META]
+  # Every US equity exposure in the basket. The sector ETFs sum to the S&P, so without this cap the
+  # engine could hold nine sectors and believe it held nine uncorrelated things.
+  us_equity_beta: [SPY, QQQ, IWM, MDY, XLF, XLK, XLI, XLP, XLY, XLB, XLE, XLU, XLV]
+  us_sectors: [XLF, XLK, XLI, XLP, XLY, XLB, XLE, XLU, XLV]
+  # Non-US equity moves on its own cycle, but in a global selloff it is still equity.
+  intl_equity: [EFA, EEM, EWJ, EWZ, FXI, EWU, EWA]
+  # Duration: these are all the same bet on falling yields at different maturities.
+  treasuries: [TLT, IEF, SHY, TIP]
+  credit: [LQD, HYG]
+  # Precious metals and the miners that lever them.
+  metals: [GLD, SLV, GDX, XAU/USD]
+  energy: [USO, UNG, XLE, DBC]
+  # A long dollar position and a short-euro/yen one are the same trade twice.
+  currency: [UUP, FXE, FXY, EUR/USD, GBP/USD, AUD/USD, USD/JPY]
