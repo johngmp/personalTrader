@@ -17,7 +17,7 @@ import pandas as pd
 from trader.config import Settings
 from trader.journal.db import Journal, trading_day_start
 from trader.engine.explain import GLOSSARY, headline
-from trader.models import AssetClass, format_price
+from trader.models import AssetClass, format_price, price_decimals
 from trader.money import format_aud, stored_rate
 from trader.journal.vault import Trip, round_trips
 
@@ -264,6 +264,139 @@ def fx_series(symbols: list[str], live: dict[str, float] | None = None) -> dict[
     return out
 
 
+def _fx_levels(sleeve, symbols: list[str]) -> dict[str, dict]:
+    """The strategy's OWN latest indicator values, per symbol.
+
+    Built by running the real strategy object over the same daily history the engine uses, rather than
+    recomputing moving averages here. A second implementation would be free to drift from the first, and
+    the panel's whole job is to say why the engine is or is not buying -- being confidently wrong about
+    that is worse than saying nothing.
+    """
+    from trader.data.history import load_history
+    from trader.strategies import LIVE_REGISTRY
+
+    try:
+        cls = LIVE_REGISTRY[sleeve.strategy or sleeve.id]
+        strat = cls(params={**cls.default_params, **sleeve.params}, symbols=list(symbols))
+        bars = {}
+        for symbol in symbols:
+            try:
+                bars[symbol] = load_history(symbol)
+            except Exception:
+                return {}
+        strat.setup(bars)
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for symbol in symbols:
+        frame = strat.indicators.get(symbol)
+        if frame is None or frame.empty:
+            continue
+        last = frame.iloc[-1]
+        out[symbol] = {"fast": float(last["fast"]), "slow": float(last["slow"]),
+                       "atr": float(last["atr"]), "bar_close": float(last["close"]),
+                       "fast_n": int(strat.params["fast"]), "slow_n": int(strat.params["slow"]),
+                       "atr_mult": float(strat.params["atr_mult"]),
+                       "risk_pct": 1.0, "capital": sleeve.capital_usd}
+    return out
+
+
+def _pip(price: float) -> float:
+    """One pip, derived from how the market quotes the price rather than hardcoded per symbol.
+
+    The majors quote to 5 places and move in 0.0001; JPY pairs quote to 3 and move in 0.01; gold quotes
+    to 2 and moves in 0.10. That is the same magnitude rule `price_decimals` already encodes, so deriving
+    it here keeps one source of truth instead of a second table to forget to update.
+    """
+    return 10 ** -(price_decimals(price, AssetClass.FOREX) - 1)
+
+
+def _units(qty: float) -> str:
+    """Quantity at a precision that does not lie about the size.
+
+    Gold is the reason. A $100 risk budget against a $347 stop distance buys 0.29 ounces, and "{:,.0f}"
+    renders that as "0 units" -- which reads as "it cannot trade this", not as a fractional position.
+    """
+    if qty >= 100:
+        return f"{qty:,.0f}"
+    return f"{qty:,.2f}" if qty >= 1 else f"{qty:,.3f}"
+
+
+def _distance(gap: float, price: float) -> str:
+    """How far away a level is, in the unit that market actually uses.
+
+    Pips are right for the majors and for JPY pairs. Gold quotes in dollars and cents, and "3,474 pips"
+    is both technically defensible and useless -- nobody trading gold thinks in pips.
+    """
+    if price_decimals(price, AssetClass.FOREX) <= 2:
+        return _money(gap)
+    return f"{gap / _pip(price):,.0f} pips"
+
+
+def fx_plan(r: dict) -> str:
+    """One pair, in plain English: what it bought at, and what would make it sell.
+
+    Written because "what price does it buy at and when does it plan to sell" has a specific answer for a
+    trend strategy, and the honest part of that answer is counter-intuitive: there is NO planned sell
+    price. There is a stop that only ever moves up, and a trend-ended rule. A panel that invented a
+    target would be describing a different strategy from the one actually running.
+    """
+    sym, px = r["symbol"], r.get("price")
+    fx = AssetClass.FOREX
+    if px is None or r.get("slow") is None:
+        return (f'<div class="plan"><div class="plan-head"><b>{html.escape(sym)}</b>'
+                f'<span class="pill closed">no data</span></div>'
+                f'<p class="subtle">No rate or price history for this pair right now.</p></div>')
+    f = lambda v: format_price(v, fx)          # noqa: E731 - a local shorthand, used a dozen times below
+    stop_gap = r["atr_mult"] * r["atr"]
+    qty_held = r.get("qty") or 0.0
+
+    if qty_held > 0 and r.get("entry_price"):
+        entry, stop = r["entry_price"], r.get("stop") or r.get("initial_stop")
+        pnl = (px - entry) * qty_held
+        to_stop = (px - stop) if stop else None
+        at_risk = to_stop * qty_held if to_stop is not None else None
+        when = (r.get("entry_date") or "")[:10]
+        moved = (stop and r.get("initial_stop") and stop > r["initial_stop"])
+        body = (
+            f'<dl class="plan-rows">'
+            f'<div><dt>Bought at</dt><dd>{f(entry)}<span class="subtle"> on {html.escape(when)}</span></dd></div>'
+            f'<div><dt>Holding</dt><dd>{_units(qty_held)} units</dd></div>'
+            f'<div><dt>Rate now</dt><dd>{f(px)} <span class="{_tone(pnl)}">{_money(pnl, signed=True)}</span></dd></div>'
+            f'<div><dt>Sells if it falls to</dt><dd>{f(stop) if stop else "–"}'
+            + (f'<span class="subtle"> · {_distance(abs(to_stop), px)} away, {_money(at_risk)} more at risk</span>'
+               if to_stop is not None else "") + '</dd></div></dl>'
+            f'<p class="plan-note">That stop{" has already moved up from " + f(r["initial_stop"]) + " and" if moved else ""}'
+            f' only ever moves up, never down, so the worst case keeps improving as the trade works.</p>'
+            f'<p class="plan-note">It also sells straight away if the trend ends &mdash; the {r["fast_n"]}-day '
+            f'average ({f(r["fast"])}) falling back below the {r["slow_n"]}-day ({f(r["slow"])}).</p>'
+            f'<p class="plan-note"><b>There is no target price.</b> This kind of strategy has no planned '
+            f'sell level: it stays in the move until the stop is hit or the trend ends, because cutting a '
+            f'winner at a fixed target is what stops trend following working.</p>')
+        pill = '<span class="pill open">holding</span>'
+    else:
+        above_slow, fast_above = px > r["slow"], r["fast"] > r["slow"]
+        risk_budget = r["capital"] * r["risk_pct"] / 100
+        would_stop = px - stop_gap
+        would_qty = risk_budget / stop_gap if stop_gap > 0 else 0
+        tick = lambda ok: '<span class="up">yes</span>' if ok else '<span class="down">not yet</span>'  # noqa: E731
+        body = (
+            f'<p class="plan-note">Not holding. It buys only when <b>both</b> of these are true:</p>'
+            f'<dl class="plan-rows">'
+            f'<div><dt>Rate above its {r["slow_n"]}-day average</dt>'
+            f'<dd>{f(px)} vs {f(r["slow"])} &middot; {tick(above_slow)}'
+            f'<span class="subtle"> ({(px / r["slow"] - 1):+.2%})</span></dd></div>'
+            f'<div><dt>{r["fast_n"]}-day average above the {r["slow_n"]}-day</dt>'
+            f'<dd>{f(r["fast"])} vs {f(r["slow"])} &middot; {tick(fast_above)}</dd></div></dl>'
+            f'<p class="plan-note">If it bought at today\'s rate it would buy <b>{_units(would_qty)} units</b> '
+            f'at {f(px)} and place the stop at <b>{f(would_stop)}</b> &mdash; {_distance(stop_gap, px)} below, '
+            f'which is {r["atr_mult"]:g}x how far this pair typically moves in a day. The size is chosen so '
+            f'that stop costs {_money(risk_budget)}, {r["risk_pct"]:g}% of the sleeve, and no more.</p>')
+        pill = ('<span class="pill closed">waiting</span>' if not (above_slow and fast_above)
+                else '<span class="pill ok">conditions met</span>')
+    return (f'<div class="plan"><div class="plan-head"><b>{html.escape(sym)}</b>{pill}</div>{body}</div>')
+
+
 def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> dict:
     """Forex: current rates, what the FX sleeve holds, and its Gate 1 verdict.
 
@@ -276,6 +409,7 @@ def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> 
         return {}
     engine = next((e for e in engines if e.broker.name == fx_sleeves[0].broker), None)
     symbols, rows = sorted({x for s in fx_sleeves for x in s.symbols}), []
+    levels = _fx_levels(fx_sleeves[0], symbols)
     held = {}
     for sleeve in fx_sleeves:
         held.update(journal.sleeve_holdings(sleeve.id))
@@ -287,9 +421,14 @@ def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> 
             except Exception:
                 quote = None
         state = journal.position_state(fx_sleeves[0].id, symbol)
-        rows.append({"symbol": symbol, "price": quote.price if quote else None,
-                     "ts": quote.ts if quote else None, "qty": held.get(symbol, 0.0),
-                     "stop": (state or {})["stop"] if state else None})
+        row = {"symbol": symbol, "price": quote.price if quote else None,
+               "ts": quote.ts if quote else None, "qty": held.get(symbol, 0.0),
+               "stop": (state or {})["stop"] if state else None}
+        if state is not None:
+            row.update(entry_price=state["entry_price"], entry_date=state["entry_date"],
+                       initial_stop=state["initial_stop"], high_since=state["high_since_entry"])
+        row.update(levels.get(symbol) or {})
+        rows.append(row)
     verdict = next((r for r in latest_research(settings) if r.get("strategy") in {s.strategy or s.id for s in fx_sleeves}), None)
     clock = None
     try:
@@ -531,6 +670,7 @@ def render(d: dict) -> str:
                 f'<span class="p-r"><span class="px">'
                 f'{format_price(r["price"], AssetClass.FOREX) if r["price"] else "–"}</span>{change}{held}</span>'
                 f'</button>')
+        plans = "".join(fx_plan(r) for r in fx["rows"])
         v = fx.get("verdict") or {}
         verdict_note = ("" if not v else
             f'<p class="subtle">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
@@ -552,7 +692,12 @@ a few minutes.</p>
 <button data-r="1Y">1Y</button><button data-r="All">All</button>
 </div></div>
 <div class="chart" id="fx-chart" aria-label="Exchange rate over time"></div></div>
-</div>{verdict_note}"""
+</div>{verdict_note}
+<h2>What each trade is doing</h2>
+<p class="subtle">The exact rules the engine applies to each pair: what it would pay, how big the
+position would be, and the two things that make it sell. Nothing here is a recommendation &mdash; these
+rules failed their own test, and the sleeve sends no orders anywhere.</p>
+<div class="plans">{plans}</div>"""
     else:
         fx_card = ""
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
@@ -978,6 +1123,24 @@ th:nth-child(n+6){text-align:left}
 .pair .px,.sym .px{font-size:var(--t-md);font-weight:600;color:var(--ink);letter-spacing:-.01em}
 .p-r .up,.p-r .down,.p-r .subtle{font-size:var(--t-xs)}
 .p-chg{display:flex;align-items:baseline;gap:5px}
+
+/* --- the per-pair trade plan ---------------------------------------------------------------------
+   Prose, not a table, because the question it answers ("what did it pay, when will it sell") is a
+   sentence. The numbers inside it are still tabular and still carry their units. */
+.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+.plan{background:var(--s1);border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px 18px}
+.plan-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.plan-head b{font-size:var(--t-lg);letter-spacing:-.01em}
+.plan-rows{display:grid;grid-template-columns:1fr;gap:0;margin:0 0 10px}
+.plan-rows>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:baseline;
+  padding:.4rem 0;border-bottom:1px solid var(--line)}
+.plan-rows>div:last-child{border-bottom:0}
+.plan-rows dt{color:var(--muted);font-size:var(--t-sm);letter-spacing:0;text-transform:none}
+.plan-rows dd{margin:0;text-align:right;font-weight:600;font-size:var(--t-md)}
+.plan-rows dd .subtle{font-weight:400}
+.plan-note{font-size:var(--t-sm);color:var(--ink2);line-height:1.55;margin:.55rem 0 0}
+.plan-note b{color:var(--ink)}
+@media (max-width:760px){.plans{grid-template-columns:1fr}}
 /* The two landing-page panels: what you hold, and how each strategy is doing. Every reference design
    puts these on the front page, and this dashboard had them a tab away in a 13-column table. */
 .grid.holdings-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);margin-top:14px}
