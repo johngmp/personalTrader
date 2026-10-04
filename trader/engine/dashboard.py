@@ -333,7 +333,32 @@ def _distance(gap: float, price: float) -> str:
     return f"{gap / _pip(price):,.0f} pips"
 
 
-def fx_plan(r: dict) -> str:
+def _fx_history(trips: list, price) -> str:
+    """Every trade this sleeve has made in one pair, newest first.
+
+    The plan above says what the rules WILL do; this says what they have actually done. Without it the
+    page can describe a strategy at length and still never answer "so what has it traded here".
+    """
+    if not trips:
+        return '<p class="subtle">No trades in this pair yet.</p>'
+    fx = AssetClass.FOREX
+    rows = ""
+    for t in sorted(trips, key=lambda x: x.entry_ts, reverse=True):
+        now = price(t.symbol) if t.is_open else None
+        pnl = t.pnl(now)
+        out_px = now if t.is_open else t.exit_price
+        rows += (
+            f"<tr><td>{t.entry_ts[:10]}</td><td class='num'>{format_price(t.entry_price, fx)}</td>"
+            f"<td>{'open' if t.is_open else t.exit_ts[:10]}</td>"
+            f"<td class='num'>{format_price(out_px, fx) if out_px else '–'}</td>"
+            f"<td class='num'>{_units(t.buy_qty)}</td>"
+            f"<td class='num {_tone(pnl)}'>{_money(pnl, signed=True)}</td>"
+            f"<td class='why'>{html.escape(t.exit_reason or t.entry_reason or '')}</td></tr>")
+    return (f"<table class='histtable'><tr><th>Opened</th><th>Bought at</th><th>Closed</th>"
+            f"<th>Sold at</th><th>Size</th><th>Net P/L</th><th>Why it ended</th></tr>{rows}</table>")
+
+
+def fx_plan(r: dict, trips: list | None = None, price=None) -> str:
     """One pair, in plain English: what it bought at, and what would make it sell.
 
     Written because "what price does it buy at and when does it plan to sell" has a specific answer for a
@@ -394,7 +419,12 @@ def fx_plan(r: dict) -> str:
             f'that stop costs {_money(risk_budget)}, {r["risk_pct"]:g}% of the sleeve, and no more.</p>')
         pill = ('<span class="pill closed">waiting</span>' if not (above_slow and fast_above)
                 else '<span class="pill ok">conditions met</span>')
-    return (f'<div class="plan"><div class="plan-head"><b>{html.escape(sym)}</b>{pill}</div>{body}</div>')
+    history = ("" if trips is None else
+               f'<div class="plan-hist"><div class="label">Trades so far in {html.escape(sym)}</div>'
+               f'{_fx_history(trips, price)}</div>')
+    # Hidden by default; the pair list reveals the selected one, and show() runs on load.
+    return (f'<div class="plan" data-plan="{html.escape(sym)}" hidden><div class="plan-head">'
+            f'<b>{html.escape(sym)}</b>{pill}</div>{body}{history}</div>')
 
 
 def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> dict:
@@ -646,7 +676,7 @@ def render(d: dict) -> str:
             f"<td class='num'>{format_price(r['stop'], AssetClass.FOREX) if r.get('stop') else '–'}</td></tr>"
             for r in fx["rows"])
         verdict_note = ("" if not v else
-            f'<p class="subtle">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
+            f'<p class="fxverdict">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
             f'{html.escape(str(v.get("verdict")))}</b> — out-of-sample Sharpe '
             f'{v.get("oos_sharpe")} against cash. '
             + ("" if v.get("verdict") == "PASS" else
@@ -670,10 +700,14 @@ def render(d: dict) -> str:
                 f'<span class="p-r"><span class="px">'
                 f'{format_price(r["price"], AssetClass.FOREX) if r["price"] else "–"}</span>{change}{held}</span>'
                 f'</button>')
-        plans = "".join(fx_plan(r) for r in fx["rows"])
+        fx_ids = set(fx["sleeves"])
+        plans = "".join(
+            fx_plan(r, [t for t in d["trips"] if t.symbol == r["symbol"] and t.sleeve_id in fx_ids],
+                    d["price"])
+            for r in fx["rows"])
         v = fx.get("verdict") or {}
         verdict_note = ("" if not v else
-            f'<p class="subtle">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
+            f'<p class="fxverdict">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
             f'{html.escape(str(v.get("verdict")))}</b> — out-of-sample Sharpe {v.get("oos_sharpe")} against cash. '
             + ("" if v.get("verdict") == "PASS" else
                "A negative number means these rules lost to leaving the money in T-bills, so this sleeve "
@@ -682,8 +716,10 @@ def render(d: dict) -> str:
 <p class="subtle">{html.escape(", ".join(fx["sleeves"]))} trades these on live prices with
 <b>no orders sent anywhere</b>. Daily closes with the latest quote on the end; the feed is free and lags
 a few minutes.</p>
+{verdict_note}
 <div class="fxlayout">
 <div class="pairlist">{pair_items}</div>
+<div class="fxright">
 <div class="card chartcard fxchart"><div class="row"><div>
 <div class="label" id="fx-title">&nbsp;</div><div class="subtle" id="fx-sub">&nbsp;</div></div>
 <div class="spacer"></div><div class="ranges" data-for="forex">
@@ -692,12 +728,8 @@ a few minutes.</p>
 <button data-r="1Y">1Y</button><button data-r="All">All</button>
 </div></div>
 <div class="chart" id="fx-chart" aria-label="Exchange rate over time"></div></div>
-</div>{verdict_note}
-<h2>What each trade is doing</h2>
-<p class="subtle">The exact rules the engine applies to each pair: what it would pay, how big the
-position would be, and the two things that make it sell. Nothing here is a recommendation &mdash; these
-rules failed their own test, and the sleeve sends no orders anywhere.</p>
-<div class="plans">{plans}</div>"""
+<div id="fx-plans">{plans}</div>
+</div>"""
     else:
         fx_card = ""
     risk_class = {"Low risk": "ok", "Elevated risk": "warn"}.get(d["risk_level"], "bad")
@@ -1127,8 +1159,16 @@ th:nth-child(n+6){text-align:left}
 /* --- the per-pair trade plan ---------------------------------------------------------------------
    Prose, not a table, because the question it answers ("what did it pay, when will it sell") is a
    sentence. The numbers inside it are still tabular and still carry their units. */
-.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}
+.fxright{display:flex;flex-direction:column;gap:14px;min-width:0}
+#fx-plans>[data-plan][hidden]{display:none}
 .plan{background:var(--s1);border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px 18px}
+.plan-hist{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+/* The Gate 1 verdict is a warning, not a footnote: full width, above everything it qualifies. */
+.fxverdict{background:var(--down-bg);border:1px solid var(--down-line);border-radius:var(--radius);
+  padding:10px 14px;margin:0 0 14px;font-size:var(--t-sm);line-height:1.55;color:var(--ink2)}
+.fxverdict b{color:var(--down)}
+.histtable{margin-top:8px;font-size:var(--t-sm)}
+.histtable th{position:static}
 .plan-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .plan-head b{font-size:var(--t-lg);letter-spacing:-.01em}
 .plan-rows{display:grid;grid-template-columns:1fr;gap:0;margin:0 0 10px}
@@ -1366,7 +1406,16 @@ window.__ptCandlePanel = function (opts) {
     draw(pts);
   }
 
+  function selectPlan(pair) {
+    if (!opts.plans) return;
+    var box = document.querySelector(opts.plans);
+    if (!box) return;
+    box.querySelectorAll('[data-plan]').forEach(function (el) {
+      el.hidden = el.dataset.plan !== pair;
+    });
+  }
   function show(pair) {
+    selectPlan(pair);
     if (range === '1D' || range === '5D') {
       current = pair;
       list.querySelectorAll('.pair,.sym').forEach(function (b) { b.classList.toggle('on', b.dataset.pair === pair); });
@@ -1412,7 +1461,7 @@ window.__ptCandlePanel = function (opts) {
 };
 
 __ptCandlePanel({chart: 'fx-chart', list: '.pairlist', key: 'fx', title: 'fx-title', sub: 'fx-sub',
-                tab: 'forex', money: false,
+                tab: 'forex', money: false, plans: '#fx-plans',
                 noVolumeNote: 'spot FX has no exchange volume to report'});
 __ptCandlePanel({chart: 'eq-chart', list: '.symlist', key: 'equities', title: 'eq-title', sub: 'eq-sub',
                 tab: 'stocks', money: true});

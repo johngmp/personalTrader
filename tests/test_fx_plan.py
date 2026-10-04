@@ -10,7 +10,28 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from trader.engine.dashboard import _distance, _units, fx_plan
+
+
+@pytest.fixture(scope="module")
+def page() -> str:
+    from pathlib import Path
+
+    from trader.config import load_settings
+    from trader.engine.brokers_setup import configured_brokers
+    from trader.engine.dashboard import dashboard_html
+    from trader.engine.live import Engine
+    from trader.journal.db import Journal
+
+    settings = load_settings()
+    journal = Journal(Path("data/journal.db"))
+    engines = [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings, journal)]
+    try:
+        return dashboard_html(settings, journal, engines)
+    finally:
+        journal.close()
 
 COMMON = {"fast_n": 50, "slow_n": 150, "atr_mult": 3.5, "risk_pct": 1.0, "capital": 10_000.0}
 
@@ -102,3 +123,73 @@ def test_units_and_distance_pick_the_right_precision():
 def test_a_pair_with_no_data_says_so_rather_than_rendering_blanks():
     assert "no data" in fx_plan({"symbol": "EUR/USD", "price": None, "qty": 0.0})
     assert "no data" in fx_plan({"symbol": "EUR/USD", "price": 1.1, "qty": 0.0, "slow": None})
+
+
+# --- the plan follows the pair you click ------------------------------------------------------------
+
+class _Trip:
+    """Just the attributes _fx_history reads, so the test does not depend on the journal."""
+
+    symbol = "AUD/USD"
+
+    def __init__(self, is_open=False, **kw):
+        self.is_open = is_open
+        self.entry_ts, self.entry_price = "2026-09-21T21:06:36+00:00", 0.71230
+        self.exit_ts, self.exit_price = "2026-09-23T21:03:53+00:00", 0.70447
+        self.buy_qty, self.exit_reason, self.entry_reason = 3439.0, "trend ended", "trend up"
+        self.__dict__.update(kw)
+
+    def pnl(self, now=None):
+        out = (now if self.is_open else self.exit_price) - self.entry_price
+        return out * self.buy_qty
+
+
+def test_a_closed_trade_is_listed_with_both_prices_and_why_it_ended():
+    out = _text(fx_plan(flat_row(symbol="AUD/USD"), [_Trip()], lambda s: 0.70447))
+    assert "2026-09-21" in out and "0.71230" in out, "when and at what price it bought"
+    assert "2026-09-23" in out and "0.70447" in out, "when and at what price it sold"
+    assert "3,439" in out
+    assert "trend ended" in out, "why it ended is the whole point of logging it"
+    # (0.70447 - 0.71230) * 3439 = -$26.93. The live journal shows -$26.92 because a real Trip also
+    # subtracts the cost haircut; this stub is raw arithmetic on purpose.
+    assert "−$26.93" in out, out
+
+
+def test_an_open_trade_is_marked_open_and_valued_at_the_live_rate():
+    out = _text(fx_plan(flat_row(symbol="AUD/USD"), [_Trip(is_open=True)], lambda s: 0.72000))
+    assert "open" in out
+    # (0.72000 - 0.71230) * 3439 = +$26.48, at the live rate rather than a stale exit price
+    assert "$26.48" in out, out
+
+
+def test_a_pair_with_no_trades_says_so_rather_than_an_empty_table():
+    out = _text(fx_plan(flat_row(), [], lambda s: 1.1))
+    assert "No trades in this pair yet." in out
+    assert "<table" not in fx_plan(flat_row(), [], lambda s: 1.1)
+
+
+def test_each_plan_is_addressable_by_pair_and_starts_hidden():
+    """The pair list reveals one; they cannot all be visible at once or the page is four plans long."""
+    html_ = fx_plan(flat_row(symbol="EUR/USD"), [], lambda s: 1.1)
+    assert 'data-plan="EUR/USD"' in html_
+    assert "hidden" in html_.split(">")[0], "plans must start hidden; show() reveals the selected one"
+
+
+def test_selecting_a_pair_switches_its_plan_and_is_scoped_to_one_panel():
+    """Scoped on purpose: an unscoped querySelectorAll would let the stocks list, which has no plans,
+    hide the forex one the moment you clicked a stock."""
+    from trader.engine import dashboard as dash
+
+    assert "selectPlan" in dash.FX_JS
+    assert "if (!opts.plans) return;" in dash.FX_JS, "must no-op for panels without plans"
+    assert "plans: '#fx-plans'" in dash.FX_JS, "the forex panel opts in"
+    assert dash.FX_JS.count("selectPlan(pair)") >= 1, "show() must call it"
+
+
+def test_the_gate_1_failure_is_stated_before_the_trade_detail(page):
+    """Spelling out exactly what each trade would do and only then mentioning that the rules failed
+    their own test gets the order of those two facts backwards."""
+    body = page[page.index('data-panel="forex"'):]
+    verdict, plans = body.find("fxverdict"), body.find('id="fx-plans"')
+    assert verdict != -1 and plans != -1, "both must be on the page"
+    assert verdict < plans, "the Gate 1 verdict must come before the per-pair plans"
