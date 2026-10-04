@@ -471,6 +471,33 @@ comes from the available width.
 | **London opening-range breakout, intraday FX** (S-IRB) | 2026-10-03 | **Rejected on real tick data.** 212 trading days of Dukascopy EUR/USD 5-minute bars with the spread actually quoted (median 0.30 pips). At the defaults: 161 trades, 32.9% win rate, **gross −$64 BEFORE any spread**, spread then −$611, net **−6.75%** over ten months. The cost floor was not the binding problem after all — there is no gross edge for the cost to eat. Selected cleanly (best of 18 settings on the first 60%, measured once on the rest) it returned **−13.67% in four months, ≈−36%/yr**, gross −$1,116; 8 of the 18 were profitable in-sample, which is noise around zero, and taking the best of them was actively harmful. A deliberate methodology note: an earlier check that chose three settings using the WHOLE period and only then split it showed them "holding" at +$31 — the identical data inverts its answer depending on whether selection saw the test set. Also measured: `min_range_pips` never binds (median opening range 12.9 pips; 0 of 212 sessions below 3) |
 
 
+#### Intraday attempt 2: session mean reversion (2026-10-04) — PROMISING, NOT PROVEN
+The opening-range breakout failed because it had no gross edge. This is the other mechanism rather than
+the same one reparameterised: daily FX trends on carry and macro flow, but *inside* a session it is
+dominated by liquidity provision, so a sharp move away from the session open tends to overshoot and come
+back. It therefore has a target (reverting means reverting TO something), which trend following must not.
+
+Tested on 272 trading days of Dukascopy EUR/USD 5-minute bars with the spread actually quoted. Chosen
+cleanly — 30 settings on the first 60%, then measured ONCE on the rest:
+
+| | in-sample | out-of-sample |
+|---|---|---|
+| best setting (drop 0.5 / stop 0.3 / target 1.0) | +$1,161 | **+$679 = +17.2%/yr** |
+| gross, out-of-sample | | +$792 against $113 of spread |
+| settings net positive | 27/30 (90%) | **23/30 (77%)** |
+| settings gross positive, out-of-sample | | 25/30 (83%) |
+
+That 77% is the number that matters: the breakout managed 8/18 in-sample and then −36%/yr out-of-sample,
+which is what noise looks like. Here the whole neighbourhood survives, and the chosen setting is not an
+outlier within it (+$595, +$756, +$636 sit beside it). Mechanics check out too — stops fire 13 times in
+34 trades and R is capped at −1.02, so nothing is running away.
+
+**It is not proven and must not be traded yet.** Three things are missing. It is ONE pair, and Gate 1's
+"works on most of its symbols" check exists precisely for this — AUD/USD and GBP/USD ticks are
+downloading. Out-of-sample is 34 trades against Gate 1's bar of 50. And the long-only rule means it can
+buy dips but never sell rallies, so if falls and rises revert differently this test cannot see it.
+
+
 ### Phase 5: Tournament (≥ 90 days, mostly waiting)
 - [ ] Weekly scoreboard in Telegram + dashboard
 - [ ] Monthly experiment session with you: run the proposed experiments in the research lab; approved ones become challenger versions (e.g. S3 v2 vs v1) logged in `Changelog.md`

@@ -68,11 +68,19 @@ def run(strategy, bars: pd.DataFrame, capital: float = 10_000.0,
         slip = slippage_pips / 1e4
         fill_in = entry + spread_at_entry / 2 + slip        # pay the ask, plus slippage
 
+        # A mean-reverting plan has somewhere to go; a trend-following one does not. When both a stop and
+        # a target sit inside the same bar we take the STOP, because a 5-minute bar does not say which
+        # came first and assuming the good one is how a backtest flatters itself.
+        target = plan.get("target")
         exit_price, exit_ts, reason = None, after.index[-1], "session end"
         for ts, bar in after.iterrows():
             if bar["low"] <= stop:
                 exit_price = min(float(bar["open"]), stop)   # gapped through: take the worse
                 exit_ts, reason = ts, "stop"
+                break
+            if target is not None and bar["high"] >= target:
+                exit_price = target                          # a limit fills AT its level, never better
+                exit_ts, reason = ts, "target"
                 break
         if exit_price is None:
             exit_price = float(after["close"].iloc[-1])
