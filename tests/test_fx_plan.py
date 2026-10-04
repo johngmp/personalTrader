@@ -37,7 +37,10 @@ COMMON = {"fast_n": 50, "slow_n": 150, "atr_mult": 3.5, "risk_pct": 1.0, "capita
 
 
 def _text(html_: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_)).strip()
+    """Tags stripped and entities decoded, so assertions match what a reader actually sees."""
+    import html as _h
+
+    return re.sub(r"\s+", " ", _h.unescape(re.sub(r"<[^>]+>", " ", html_))).strip()
 
 
 def holding_row(**over):
@@ -193,3 +196,69 @@ def test_the_gate_1_failure_is_stated_before_the_trade_detail(page):
     verdict, plans = body.find("fxverdict"), body.find('id="fx-plans"')
     assert verdict != -1 and plans != -1, "both must be on the page"
     assert verdict < plans, "the Gate 1 verdict must come before the per-pair plans"
+
+
+# --- the stop ladder --------------------------------------------------------------------------------
+
+def test_the_ladder_places_entry_and_now_between_the_stop_and_the_best_rate():
+    """The track runs from the level that ends the trade to the best rate since buying, so "how much
+    room is left" is a distance you can see instead of a subtraction you have to do."""
+    import re
+
+    out = fx_plan(holding_row(price=0.71980, stop=0.70850, entry_price=0.71230,
+                              high_since=0.72310, qty=3439.0), [], lambda s: 0.71980)
+    # span 0.70850 -> 0.72310 = 0.01460; entry sits 0.00380 in (26.0%), now 0.01130 in (77.4%)
+    assert re.search(r'ladder-mark entry" style="left:26\.0%', out), out
+    assert re.search(r'ladder-mark now up" style="left:77\.4%', out), out
+    assert re.search(r'ladder-fill up" style="width:77\.4%', out), out
+
+
+def test_the_ladder_names_all_three_of_its_reference_points():
+    """A bare tick mark on a track is only meaningful if you are told what it marks."""
+    out = _text(fx_plan(holding_row(price=0.71980, stop=0.70850, entry_price=0.71230,
+                                    high_since=0.72310), [], lambda s: 0.71980))
+    assert "0.70850 · sells here" in out
+    assert "bought 0.71230" in out
+    assert "best 0.72310" in out
+
+
+def test_a_losing_trade_colours_the_ladder_down():
+    out = fx_plan(holding_row(price=0.70900, entry_price=0.71230, stop=0.70850,
+                              high_since=0.71400), [], lambda s: 0.70900)
+    assert 'ladder-mark now down' in out and 'ladder-fill down' in out
+
+
+def test_the_ladder_is_skipped_when_it_would_divide_by_zero():
+    """A stop at or above every other level has no span to draw, and 1/0 beats a wrong picture."""
+    assert "ladder-track" not in fx_plan(
+        holding_row(price=0.70000, entry_price=0.70000, stop=0.70000, high_since=0.70000),
+        [], lambda s: 0.70000)
+
+
+def test_an_open_trade_does_not_claim_a_reason_for_ending():
+    """It used to fall back to the ENTRY reason, so an open position read "trend up" under the heading
+    "Why it ended" -- stating that a live trade had finished, and why."""
+    out = _text(fx_plan(flat_row(symbol="AUD/USD"), [_Trip(is_open=True)], lambda s: 0.72000))
+    assert "still open" in out
+    assert "trend up" not in out, "the entry reason must not appear under 'why it ended'"
+
+
+# --- the entry conditions, as rule cards ------------------------------------------------------------
+
+def test_each_entry_condition_states_what_it_needs_and_what_it_is():
+    # Both conditions fail on this fixture, so both pills read "not yet".
+    out = _text(fx_plan(flat_row(), [], lambda s: 1.1))
+    assert "Needs" in out and "Now" in out
+    assert "above 1.15603" in out, "the level being waited for, not just a yes/no"
+    assert out.count("not yet") == 2 and "met" not in out
+
+    # One of each: price still below the slow average, but the fast one has crossed above it.
+    mixed = _text(fx_plan(flat_row(price=1.12575, fast=1.16000, slow=1.15603), [], lambda s: 1.1))
+    assert "not yet" in mixed and "met" in mixed
+
+
+def test_the_size_and_the_worst_case_are_figures_not_a_sentence():
+    out = _text(fx_plan(flat_row(), [], lambda s: 1.1))
+    for label in ("Buys", "At", "Stop goes at", "Most it can lose"):
+        assert label in out, f"{label} should be its own figure"
+    assert "$100.00" in out

@@ -353,9 +353,48 @@ def _fx_history(trips: list, price) -> str:
             f"<td class='num'>{format_price(out_px, fx) if out_px else '–'}</td>"
             f"<td class='num'>{_units(t.buy_qty)}</td>"
             f"<td class='num {_tone(pnl)}'>{_money(pnl, signed=True)}</td>"
-            f"<td class='why'>{html.escape(t.exit_reason or t.entry_reason or '')}</td></tr>")
+            f"<td class='why'>{'<span class=\'subtle\'>still open</span>' if t.is_open else html.escape(t.exit_reason or '')}</td></tr>")
     return (f"<table class='histtable'><tr><th>Opened</th><th>Bought at</th><th>Closed</th>"
             f"<th>Sold at</th><th>Size</th><th>Net P/L</th><th>Why it ended</th></tr>{rows}</table>")
+
+
+def _ladder(stop: float, entry: float, now: float, high: float | None, fx) -> str:
+    """Where the rate sits between the level that ends the trade and the best it has seen.
+
+    Taken from the loss-limit bars in prop-firm dashboards (E8 Markets): a track whose left end is the
+    level that stops you out, so "how much room is left" is a distance you can see rather than a
+    subtraction you have to do. The numbers are already stated above it; this is for the glance.
+    """
+    top = max(high or 0.0, now, entry)
+    span = top - stop
+    if span <= 0:
+        return ""
+    pos = lambda v: max(0.0, min(100.0, (v - stop) / span * 100))   # noqa: E731
+    now_pct, entry_pct = pos(now), pos(entry)
+    tone = "up" if now >= entry else "down"
+    return (
+        f'<div class="ladder">'
+        f'<div class="ladder-track">'
+        f'<div class="ladder-fill {tone}" style="width:{now_pct:.1f}%"></div>'
+        f'<div class="ladder-mark entry" style="left:{entry_pct:.1f}%" title="bought here"></div>'
+        f'<div class="ladder-mark now {tone}" style="left:{now_pct:.1f}%" title="now"></div>'
+        f'</div>'
+        f'<div class="ladder-ends"><span class="down">{format_price(stop, fx)} &middot; sells here</span>'
+        f'<span class="spacer"></span><span class="subtle">bought {format_price(entry, fx)}</span>'
+        f'<span class="spacer"></span><span class="subtle">best {format_price(top, fx)}</span>'
+        f'</div></div>')
+
+
+def _rule(name: str, need: str, have: str, ok: bool) -> str:
+    """One entry condition as a card: what the rule wants, what it currently is, and whether it is met.
+
+    The Goal Overview cards in E8's dashboard do this well -- the requirement and the live value get
+    equal weight, and a pill states the verdict rather than leaving you to compare two numbers.
+    """
+    pill = ('<span class="pill ok">met</span>' if ok else '<span class="pill closed">not yet</span>')
+    return (f'<div class="rule"><div class="rule-head"><span class="label">{name}</span>{pill}</div>'
+            f'<div class="rule-vals"><div><dt>Needs</dt><dd>{need}</dd></div>'
+            f'<div><dt>Now</dt><dd class="{"up" if ok else "down"}">{have}</dd></div></div></div>')
 
 
 def fx_plan(r: dict, trips: list | None = None, price=None) -> str:
@@ -391,7 +430,8 @@ def fx_plan(r: dict, trips: list | None = None, price=None) -> str:
             f'<div><dt>Sells if it falls to</dt><dd>{f(stop) if stop else "–"}'
             + (f'<span class="subtle"> · {_distance(abs(to_stop), px)} away, {_money(at_risk)} more at risk</span>'
                if to_stop is not None else "") + '</dd></div></dl>'
-            f'<p class="plan-note">That stop{" has already moved up from " + f(r["initial_stop"]) + " and" if moved else ""}'
+            + (_ladder(stop, entry, px, r.get("high_since"), fx) if stop else "")
+            + f'<p class="plan-note">That stop{" has already moved up from " + f(r["initial_stop"]) + " and" if moved else ""}'
             f' only ever moves up, never down, so the worst case keeps improving as the trade works.</p>'
             f'<p class="plan-note">It also sells straight away if the trend ends &mdash; the {r["fast_n"]}-day '
             f'average ({f(r["fast"])}) falling back below the {r["slow_n"]}-day ({f(r["slow"])}).</p>'
@@ -404,19 +444,23 @@ def fx_plan(r: dict, trips: list | None = None, price=None) -> str:
         risk_budget = r["capital"] * r["risk_pct"] / 100
         would_stop = px - stop_gap
         would_qty = risk_budget / stop_gap if stop_gap > 0 else 0
-        tick = lambda ok: '<span class="up">yes</span>' if ok else '<span class="down">not yet</span>'  # noqa: E731
         body = (
             f'<p class="plan-note">Not holding. It buys only when <b>both</b> of these are true:</p>'
-            f'<dl class="plan-rows">'
-            f'<div><dt>Rate above its {r["slow_n"]}-day average</dt>'
-            f'<dd>{f(px)} vs {f(r["slow"])} &middot; {tick(above_slow)}'
-            f'<span class="subtle"> ({(px / r["slow"] - 1):+.2%})</span></dd></div>'
-            f'<div><dt>{r["fast_n"]}-day average above the {r["slow_n"]}-day</dt>'
-            f'<dd>{f(r["fast"])} vs {f(r["slow"])} &middot; {tick(fast_above)}</dd></div></dl>'
-            f'<p class="plan-note">If it bought at today\'s rate it would buy <b>{_units(would_qty)} units</b> '
-            f'at {f(px)} and place the stop at <b>{f(would_stop)}</b> &mdash; {_distance(stop_gap, px)} below, '
-            f'which is {r["atr_mult"]:g}x how far this pair typically moves in a day. The size is chosen so '
-            f'that stop costs {_money(risk_budget)}, {r["risk_pct"]:g}% of the sleeve, and no more.</p>')
+            f'<div class="rules">'
+            + _rule(f'Rate above its {r["slow_n"]}-day average', f'above {f(r["slow"])}',
+                    f'{f(px)} ({(px / r["slow"] - 1):+.2%})', above_slow)
+            + _rule(f'{r["fast_n"]}-day average above the {r["slow_n"]}-day', f'above {f(r["slow"])}',
+                    f(r["fast"]), fast_above)
+            + '</div>'
+            f'<div class="label" style="margin-top:16px">If it bought at today\'s rate</div>'
+            f'<div class="would">'
+            f'<div><dt>Buys</dt><dd>{_units(would_qty)}<span class="subtle"> units</span></dd></div>'
+            f'<div><dt>At</dt><dd>{f(px)}</dd></div>'
+            f'<div><dt>Stop goes at</dt><dd>{f(would_stop)}</dd></div>'
+            f'<div><dt>Most it can lose</dt><dd class="down">{_money(risk_budget)}</dd></div></div>'
+            f'<p class="plan-note">The stop sits {_distance(stop_gap, px)} below, which is '
+            f'{r["atr_mult"]:g}x how far this pair typically moves in a day. The size is worked backwards '
+            f'from it, so being stopped out costs {r["risk_pct"]:g}% of the sleeve and no more.</p>')
         pill = ('<span class="pill closed">waiting</span>' if not (above_slow and fast_above)
                 else '<span class="pill ok">conditions met</span>')
     history = ("" if trips is None else
@@ -555,7 +599,7 @@ def _trip_row(t: Trip, price, state) -> str:
             f"<td class='num'>{_money(t.entry_price)}</td><td>{close_time}</td><td class='num'>{close_px}</td>"
             f"<td class='num'>{t.buy_qty:g}</td><td class='num'>{_money(stop)}</td><td>{status}</td>"
             f"<td class='num {_tone(pnl)}'>{_money(pnl, signed=True)}<span class='subtle'> {_pct(pnl / base)}</span></td>"
-            f"<td class='why'>{html.escape(t.exit_reason or t.entry_reason or '')}</td></tr>")
+            f"<td class='why'>{'<span class=\'subtle\'>still open</span>' if t.is_open else html.escape(t.exit_reason or '')}</td></tr>")
 
 
 def _holding_row(t: Trip, price) -> str:
@@ -1163,6 +1207,36 @@ th:nth-child(n+6){text-align:left}
 #fx-plans>[data-plan][hidden]{display:none}
 .plan{background:var(--s1);border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px 18px}
 .plan-hist{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+
+/* The stop ladder: left end is the level that ends the trade, so the room left is a distance you can
+   see. Borrowed from the loss-limit bars in prop-firm dashboards. */
+.ladder{margin:14px 0 4px}
+.ladder-track{position:relative;height:8px;border-radius:5px;background:var(--s3);
+  border:1px solid var(--line)}
+.ladder-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;opacity:.35}
+.ladder-fill.up{background:var(--up)} .ladder-fill.down{background:var(--down)}
+.ladder-mark{position:absolute;top:-4px;width:2px;height:16px;border-radius:1px;transform:translateX(-1px)}
+.ladder-mark.entry{background:var(--ink2)}
+.ladder-mark.now{width:3px;height:18px;top:-5px}
+.ladder-mark.now.up{background:var(--up)} .ladder-mark.now.down{background:var(--down)}
+.ladder-ends{display:flex;gap:10px;margin-top:7px;font-size:var(--t-xs)}
+
+/* Each entry condition as a card: what it needs, what it is, and a pill for the verdict. */
+.rules{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:10px;margin:10px 0 0}
+.rule{background:var(--s2);border:1px solid var(--line);border-radius:var(--radius);padding:11px 13px}
+.rule-head{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.rule-head .label{margin:0;text-transform:none;letter-spacing:0;font-size:var(--t-sm);color:var(--ink2);
+  flex:1;line-height:1.3}
+.rule-vals{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.rule-vals dt{color:var(--muted);font-size:10px;letter-spacing:.05em;text-transform:uppercase}
+.rule-vals dd{margin:2px 0 0;font-weight:600;font-size:var(--t-md)}
+
+/* What it would do right now, as figures rather than a sentence. */
+.would{display:grid;grid-template-columns:repeat(auto-fit,minmax(108px,1fr));gap:12px;margin-top:8px;
+  background:var(--s2);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
+.would dt{color:var(--muted);font-size:10px;letter-spacing:.05em;text-transform:uppercase}
+.would dd{margin:3px 0 0;font-weight:600;font-size:var(--t-lg);letter-spacing:-.01em}
+.would dd .subtle{font-weight:400;font-size:var(--t-sm)}
 /* The Gate 1 verdict is a warning, not a footnote: full width, above everything it qualifies. */
 .fxverdict{background:var(--down-bg);border:1px solid var(--down-line);border-radius:var(--radius);
   padding:10px 14px;margin:0 0 14px;font-size:var(--t-sm);line-height:1.55;color:var(--ink2)}
