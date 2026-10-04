@@ -262,3 +262,45 @@ def test_the_size_and_the_worst_case_are_figures_not_a_sentence():
     for label in ("Buys", "At", "Stop goes at", "Most it can lose"):
         assert label in out, f"{label} should be its own figure"
     assert "$100.00" in out
+
+
+# --- the phone alert for a hand-executed trade ------------------------------------------------------
+
+def test_a_buy_alert_carries_the_stop_so_one_message_is_a_complete_instruction():
+    """S9 is executed by hand, so the alert IS the trade ticket.
+
+    The buy used to arrive alone and the stop followed on the next engine run, up to fifteen minutes
+    later. In that gap you were either out of a trade the rules had taken, or in it unprotected --
+    neither of which is what the backtest measured, because there the stop exists from entry.
+    """
+    from datetime import datetime, timezone
+
+    from trader.engine.live import _fill_text
+    from trader.models import AssetClass, Fill, Side
+
+    fill = Fill(client_order_id="x", sleeve_id="S9", symbol="AUD/USD", side=Side.BUY, qty=3439,
+                price=0.71230, cost_haircut_usd=0.0, ts=datetime.now(timezone.utc))
+    text = _fill_text(fill, "trend up", AssetClass.FOREX, stop=0.69681)
+    assert "0.71230" in text and "3439" in text, "what to buy and at what price"
+    assert "0.69681" in text, "where the stop goes"
+    assert "$53" in text, "what being stopped out costs"
+    # A rate is not a dollar amount; "$0.69681" would be wrong.
+    assert "$0.69681" not in text
+
+
+def test_a_sell_alert_does_not_invent_a_stop():
+    from datetime import datetime, timezone
+
+    from trader.engine.live import _fill_text
+    from trader.models import AssetClass, Fill, Side
+
+    fill = Fill(client_order_id="x", sleeve_id="S9", symbol="AUD/USD", side=Side.SELL, qty=3439,
+                price=0.70447, cost_haircut_usd=0.0, ts=datetime.now(timezone.utc))
+    assert "Stop" not in _fill_text(fill, "trend ended", AssetClass.FOREX, stop=0.69681)
+
+
+def test_the_fx_sleeve_is_still_the_one_shadow_sleeve_that_reaches_your_phone():
+    """If this set ever loses shadow_fx, hand-executed signals go silent and nothing says so."""
+    from trader.engine.live import HAND_EXECUTED
+
+    assert "shadow_fx" in HAND_EXECUTED

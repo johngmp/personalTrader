@@ -472,7 +472,8 @@ class Engine:
             for fill in result.fills or []:
                 report.fills.append(fill)
                 if self.broker.name != "shadow":
-                    self.notifier.send(_fill_text(fill, order.reason, self.settings.asset_class(order.symbol)))
+                    self.notifier.send(_fill_text(fill, order.reason, self.settings.asset_class(order.symbol),
+                                                  stop=order.stop_price))
             if not result.fills and order.order_type is OrderType.MARKET and self.broker.name != "shadow":
                 self.notifier.send(f"🕒 Queued {what}; fills when the market opens.")
         return result
@@ -563,13 +564,27 @@ class Engine:
         return status_text([self])
 
 
-def _fill_text(fill: Fill, reason: str = "", asset_class: AssetClass | None = None) -> str:
+def _fill_text(fill: Fill, reason: str = "", asset_class: AssetClass | None = None,
+               stop: float | None = None) -> str:
+    """One message that is a complete instruction.
+
+    The stop is on here because of how this reads on a phone when you are the one placing the trade. The
+    buy used to arrive on its own and the stop followed in a separate message on the NEXT engine run --
+    up to fifteen minutes later. In between you either sat out of a trade the rules had taken, or you
+    were in it with nothing protecting you. Both are worse than waiting, and neither is what the backtest
+    measured, because there the stop exists from the moment of entry.
+    """
     verb = "Bought" if fill.side is Side.BUY else "Sold"
     extra = f" ({reason})" if reason else ""
     ac = asset_class or AssetClass.US_EQUITY
     money = "" if ac is AssetClass.FOREX else "$"   # 1.14890 is a rate, not a dollar amount
-    return (f"{'🟢' if fill.side is Side.BUY else '🔴'} {fill.sleeve_id} {verb} {fill.qty:g} {fill.symbol} "
+    text = (f"{'🟢' if fill.side is Side.BUY else '🔴'} {fill.sleeve_id} {verb} {fill.qty:g} {fill.symbol} "
             f"@ {money}{format_price(fill.price, ac)}{extra}")
+    if stop and fill.side is Side.BUY:
+        risk = (fill.price - stop) * fill.qty
+        text += (f"\n🛑 Stop {money}{format_price(stop, ac)}"
+                 + (f" · risks ${risk:,.0f} if it is hit" if risk > 0 else ""))
+    return text
 
 
 def _stop_move_text(sleeve_id: str, symbol: str, old: float | None, new: float,
