@@ -65,9 +65,15 @@ def stored_rate(journal: Journal) -> Rate | None:
         return None
 
 
-def format_aud(usd: float, rate: Rate | None, signed: bool = False) -> str:
-    """'A$1,234.56', or an empty string when there is no trustworthy rate to use."""
-    if rate is None or rate.is_stale():
+def format_aud(usd: float, rate: Rate | None, signed: bool = False,
+               now: datetime | None = None) -> str:
+    """'A$1,234.56', or an empty string when there is no trustworthy rate to use.
+
+    `now` exists so staleness can be judged against a supplied clock. Without it this reads the wall
+    clock, which meant a test pinning a rate to a fixed date passed on the day it was written and began
+    failing four days later with an empty string and no hint why.
+    """
+    if rate is None or rate.is_stale(now):
         return ""
     aud = rate.to_aud(usd)
     body = f"{aud:+,.2f}" if signed else f"{aud:,.2f}"

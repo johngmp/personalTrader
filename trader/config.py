@@ -110,6 +110,30 @@ class CostModel(_Strict):
         return self.half_spread_bps + self.slippage_bps + self.fee_bps
 
 
+class IntradayConfig(BaseModel):
+    """The session-reversion watcher. It sends signals and never places an order.
+
+    Deliberately not a sleeve. A sleeve holds capital, sends orders through the risk gate and decides
+    once per daily bar; this holds nothing, sends nothing, and decides inside the day. Forcing it into
+    the sleeve machinery would hide that difference rather than show it.
+    """
+
+    enabled: bool = False
+    symbol: str = "EUR/USD"
+    drop_atr: float = 0.5
+    stop_atr: float = 0.3
+    target_frac: float = 1.0
+    atr_days: int = 20
+    open_utc: str = "07:00"
+    close_utc: str = "16:00"
+    # How late after the open a plan may still be built. The levels are measured FROM the session open,
+    # so a plan built at 11:20 from the 11:20 rate is a different trade from the one that was tested.
+    # Miss the window -- a restart, an outage, a laptop asleep -- and the day is skipped instead.
+    plan_within_minutes: int = 30
+    capital_usd: float = 10_000.0
+    risk_pct: float = 1.0
+
+
 class Settings(BaseModel):
     """Everything loaded from config/, cross-checked for consistency."""
 
@@ -118,6 +142,7 @@ class Settings(BaseModel):
     sleeves: dict[str, SleeveConfig]
     universe: UniverseConfig
     costs: dict[AssetClass, CostModel]
+    intraday: IntradayConfig = IntradayConfig()
 
     @model_validator(mode="after")
     def _cross_check(self) -> Settings:
@@ -145,7 +170,14 @@ class Settings(BaseModel):
         return self.root / "data" / "journal.db"
 
 
-def _read_yaml(path: Path) -> dict:
+def _read_yaml(path: Path, missing_ok: bool = False) -> dict:
+    """Load a config file. `missing_ok` is for files that have usable defaults and are off by default.
+
+    Deliberately not the default: a missing risk.yaml quietly falling back to built-in limits is exactly
+    the kind of silence this project should not have.
+    """
+    if missing_ok and not path.exists():
+        return {}
     with path.open() as f:
         return yaml.safe_load(f) or {}
 
@@ -162,6 +194,7 @@ def load_settings(root: Path = PROJECT_ROOT) -> Settings:
         sleeves={s.id: s for s in sleeves},
         universe=UniverseConfig(**_read_yaml(config_dir / "universe.yaml")),
         costs={AssetClass(k): CostModel(**v) for k, v in _read_yaml(config_dir / "costs.yaml").items()},
+        intraday=IntradayConfig(**_read_yaml(config_dir / "intraday.yaml", missing_ok=True)),
     )
 
 

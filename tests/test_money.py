@@ -33,7 +33,8 @@ def test_converting_does_not_silently_shrink_the_account():
     (-1000.0, True, "−A$1,437.30"),
 ])
 def test_formatting(usd, signed, expected):
-    assert format_aud(usd, RATE, signed=signed) == expected
+    # Pin the clock: this is about formatting, and staleness has its own test below.
+    assert format_aud(usd, RATE, signed=signed, now=NOW) == expected
 
 
 def test_no_rate_means_no_aud_column_rather_than_a_guess():

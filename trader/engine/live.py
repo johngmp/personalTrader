@@ -666,7 +666,10 @@ class Coordinator:
             except Exception as exc:
                 self.journal.log(f"telegram commands failed: {exc}", level="error")
             reports = [engine._run() for engine in self.engines]  # noqa: SLF001
-            for name, fn in (("vault", lambda: write_vault(self.settings, self.journal, self.engines)),
+            # Once per cycle, not once per broker: it is a watcher over one symbol, and running it per
+            # engine would message you twice for the same signal.
+            for name, fn in (("intraday watch", lambda: self._intraday(reports[0])),
+                             ("vault", lambda: write_vault(self.settings, self.journal, self.engines)),
                              ("dashboard", lambda: write_dashboard(self.settings, self.journal, self.engines)),
                              ("daily digest", lambda: send_digest(self.notifier, self.journal, self.engines, self.clock()))):
                 try:
@@ -676,3 +679,19 @@ class Coordinator:
                     self.journal.log(f"{name} failed: {exc}", level="error")
                     self.notifier.send(f"⚠️ {name} failed: {exc}")
             return reports
+
+    def _intraday(self, report: RunReport) -> None:
+        """Session-reversion signals. Sends messages; never places an order.
+
+        Kill-switch aware on purpose. It places nothing, so it cannot breach a limit -- but a halted
+        system that keeps texting you trades to place by hand has not really halted.
+        """
+        from trader.engine.intraday_watch import IntradayWatcher
+
+        if not self.settings.intraday.enabled:
+            return
+        if self.engines[0].kill_switch.active:
+            return
+        watcher = IntradayWatcher(self.settings, self.journal, self.notifier, clock=self.clock)
+        report.actions += watcher.run_once(report)
+        report.actions += watcher.close_out()

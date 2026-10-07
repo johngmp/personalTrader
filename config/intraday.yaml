@@ -1,0 +1,35 @@
+# Intraday session-reversion signals, sent to Telegram for you to execute by hand.
+# This NEVER places an order. It is a watcher: it works out the day's levels, then tells you when the
+# rate reaches them.
+#
+# EUR/USD only, and that is the whole finding rather than a default nobody got round to changing.
+# Tested on 272 / 268 / 244 days of real tick data with the spread actually quoted, using the setting
+# chosen on EUR/USD's first 60% and applied unchanged to pairs it had never seen:
+#
+#     EUR/USD   +17.2%/yr    gross +$792   spread  $113
+#     GBP/USD    +3.0%/yr    gross +$593   spread  $265
+#     AUD/USD    -1.3%/yr    gross +$406   spread  $541
+#
+# The gross edge is similar on all three; what differs is the cost. London-session median spreads are
+# 0.29 / 0.62 / 0.88 pips, so the same edge clears the bar only where the bar is lowest. And no filter
+# fixes the others: 0.0% of AUD/USD's London bars are at or under 0.5 pips, so waiting for a tight
+# spread there means never trading at all.
+#
+# So this is a one-pair strategy running in public to find out whether it is real. It is NOT advice.
+enabled: true
+symbol: EUR/USD
+
+# Chosen on EUR/USD's first 60% of history, then measured once on the rest. Do not tune these against
+# recent results: that is exactly how the opening-range breakout produced +$506 in-sample and -36%/yr
+# out of it.
+drop_atr: 0.5          # how far below the session open a fall must go before it is worth buying
+stop_atr: 0.3          # how much further it may go before the idea is wrong
+target_frac: 1.0       # 1.0 = aim all the way back to the session open
+atr_days: 20           # days of daily range used to size "how far is far"
+
+open_utc: "07:00"      # London open
+close_utc: "16:00"     # flat before the thin late session
+
+# Used only to state a position size in the message. No money is allocated and no order is sent.
+capital_usd: 10000
+risk_pct: 1.0
