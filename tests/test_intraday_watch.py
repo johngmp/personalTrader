@@ -417,3 +417,35 @@ def test_no_price_history_means_no_plan_rather_than_a_guess(journal, monkeypatch
                         price=lambda _s: 1.11894)
     assert w.run_once() == [] and w.notifier.sent == []
     assert w._stored_plan(date(2026, 10, 8)) is None
+
+
+def test_a_day_that_never_triggered_says_so_at_the_close(journal):
+    """You asked why no messages were arriving. The answer was that the setup had not happened -- which
+    the system knew all day and never said. Silence should not need interpreting."""
+    w = _watcher(journal, "07:05", 1.11919)
+    w.run_once()
+    assert "BUY if it falls to" in w.notifier.sent[0]
+
+    quiet = _watcher(journal, "16:05", 1.12100)          # drifted up all day, never near the trigger
+    actions = quiet.run_once() + quiet.close_out()
+    assert actions and "no EUR/USD setup today" in actions[0]
+    assert len(quiet.notifier.sent) == 1
+    assert "No EUR/USD trade today" in quiet.notifier.sent[0]
+    assert "one day in three" in quiet.notifier.sent[0], "the frequency is the reassurance"
+
+    # Once, not on every run after the close.
+    again = _watcher(journal, "16:20", 1.12100)
+    assert again.run_once() + again.close_out() == [] and again.notifier.sent == []
+
+
+def test_a_day_that_did_trade_still_gets_a_sell_not_a_quiet_note(journal):
+    """The quiet note must not swallow the session-end exit."""
+    _watcher(journal, "07:05", 1.11919).run_once()
+    plan = _watcher(journal, "07:05", 1.0, )._stored_plan(DAY)
+    _watcher(journal, "09:00", plan.trigger).run_once()   # in
+    out = _watcher(journal, "16:05", plan.trigger + 0.0010)
+    out.run_once()
+    actions = out.close_out()
+    assert actions and "SELL" in actions[0]
+    assert "SELL EUR/USD now" in out.notifier.sent[0] and "session end" in out.notifier.sent[0]
+    assert "No EUR/USD trade today" not in "".join(out.notifier.sent)

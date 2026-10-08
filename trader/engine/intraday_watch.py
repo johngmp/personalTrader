@@ -169,6 +169,21 @@ def gapped_text(p: Plan, rate: float) -> str:
             f"entry, which is a different trade from the one that was tested.")
 
 
+def no_setup_text(p: Plan, cfg: IntradayConfig) -> str:
+    """Said at the close on a day that never triggered, so silence never has to be interpreted.
+
+    The setup fires on about a third of days -- measured at 32% over 250 days of tick data, a median of
+    4 days apart, with a 35-day quiet spell in the record. So most days there is genuinely nothing, and
+    without this message "nothing happened" and "something is broken" look identical from the outside.
+    """
+    f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
+    return (f"😐 No {p.symbol} trade today ({p.day:%a %d %b})\n"
+            f"It needed to fall to {f(p.trigger)} and never got there, so there was nothing to take.\n"
+            f"\n"
+            f"This is the normal case: the setup appears on roughly one day in three. Nothing is wrong, "
+            f"and no news is the same as this message.")
+
+
 def stranded_text(p: Plan, entry: float | None = None) -> str:
     """For a day that ended with you holding something and nothing awake to say so."""
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
@@ -350,11 +365,23 @@ class IntradayWatcher:
         day = now.date()
         if now.time() < _parse(self.cfg.close_utc):
             return []
-        if (self._get(day, "state") or "waiting") != "in":
+        state = self._get(day, "state") or "waiting"
+        if state not in ("in", "waiting"):
             return []
         plan = self._stored_plan(day)
+        if plan is None:
+            return []
+
+        if state == "waiting":
+            # The day is over and the level was never reached. Said once, because you asked why no
+            # messages were arriving and the honest answer was "the setup did not happen" -- which the
+            # system knew and never told you. Silence should not need interpreting.
+            self._set(day, "state", "done")
+            self.notifier.send(no_setup_text(plan, self.cfg))
+            return [f"intraday: no {self.cfg.symbol} setup today"]
+
         rate = self._rate()
-        if plan is None or rate is None:
+        if rate is None:
             return []
         self._set(day, "state", "done")
         self.notifier.send(sell_text(plan, rate, "session end", self._entry(day)))

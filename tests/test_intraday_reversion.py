@@ -110,3 +110,42 @@ def test_a_plan_without_a_target_still_runs_to_the_stop_or_the_session_end():
 
     t = ib.run(NoTarget(), bars, capital=10_000.0)["trades"][0]
     assert t.reason == "session end", "with no target it must ride to the close"
+
+
+# --- the short side, tested and rejected -----------------------------------------------------------
+
+def test_the_harness_can_price_a_short_and_mirrors_every_pessimistic_assumption():
+    """The short side had to be TESTED before it could be rejected, and testing it needed a harness that
+    does not quietly flatter it: sold into the bid, bought back at the ask, stopped on the HIGH, and
+    gapped fills taken at the worse of the stop and the bar's open.
+
+    It was rejected on the evidence, not on the absence of it -- see PLAN.md. The support stays because
+    the next idea of this shape should be measurable without rebuilding it.
+    """
+    import inspect
+
+    from trader.research import intraday_backtest
+
+    src = inspect.getsource(intraday_backtest.run)
+    assert 'plan.get("side", "long") == "short"' in src, "a plan must be able to say which way it goes"
+    assert 'bar["high"] >= stop if short else bar["low"] <= stop' in src
+    assert "max(float(bar[\"open\"]), stop) if short else min(float(bar[\"open\"]), stop)" in src
+    assert "entry - spread_at_entry / 2 - slip if short" in src, "a short is sold into the bid"
+    assert "exit_price + spread_at_exit / 2 + slip if short" in src, "and bought back at the ask"
+    assert "qty * (fill_in - fill_out) if short" in src
+
+
+def test_a_short_trade_sizes_off_its_own_stop_distance():
+    """Sizing used `entry - stop`, which is negative for a short and would have skipped every one."""
+    import inspect
+
+    from trader.research import intraday_backtest
+
+    src = inspect.getsource(intraday_backtest.run)
+    assert "risk_per_unit = (stop - entry) if short else (entry - stop)" in src
+    assert "if after.empty or risk_per_unit <= 0:" in src
+
+    trade = intraday_backtest.IntradayTrade(
+        day=None, entry_ts=None, exit_ts=None, entry=1.1200, exit=1.1180, qty=10_000,
+        stop=1.1220, spread_cost=1.0, pnl=19.0, reason="target", side="short")
+    assert trade.r_multiple == pytest.approx(19.0 / (10_000 * 0.0020), rel=1e-6)

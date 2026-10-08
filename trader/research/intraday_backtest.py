@@ -9,7 +9,11 @@ Everything else follows the daily backtester's rules, because they are what stop
   - a breakout fills at the level, never at the bar's close
   - a stop fills at the worse of the stop and the bar's open, so a gap through it costs what it cost
   - position size comes from the stop distance, so the 1% risk rule holds here too
-  - long only, matching the risk gate
+  - a plan may be long or SHORT. The live engine's risk gate forbids shorting, so the daily sleeves are
+    long only -- but these signals are executed by hand on a broker that allows it, and refusing to test
+    half the hypothesis is not caution, it is just a gap in the evidence. A short pays the bid going in
+    and the ask coming out, stops on the HIGH and targets on the LOW, so every assumption that is
+    pessimistic for a long is mirrored rather than relaxed.
 """
 
 from __future__ import annotations
@@ -32,9 +36,11 @@ class IntradayTrade:
     pnl: float              # after spread
     reason: str
 
+    side: str = "long"
+
     @property
     def r_multiple(self) -> float | None:
-        risk = self.qty * (self.entry - self.stop)
+        risk = self.qty * (self.stop - self.entry if self.side == "short" else self.entry - self.stop)
         return self.pnl / risk if risk > 0 else None
 
 
@@ -59,14 +65,17 @@ def run(strategy, bars: pd.DataFrame, capital: float = 10_000.0,
 
         entry_ts, entry, stop = plan["entry_ts"], plan["entry"], plan["stop"]
         after = session[session.index >= entry_ts]
-        if after.empty or entry <= stop:
+        short = plan.get("side", "long") == "short"
+        risk_per_unit = (stop - entry) if short else (entry - stop)
+        if after.empty or risk_per_unit <= 0:
             continue
 
         # Size from the stop distance: the same 1% rule the live risk gate applies.
-        qty = (equity * risk_per_trade) / (entry - stop)
+        qty = (equity * risk_per_trade) / risk_per_unit
         spread_at_entry = float(after["spread"].iloc[0])
         slip = slippage_pips / 1e4
-        fill_in = entry + spread_at_entry / 2 + slip        # pay the ask, plus slippage
+        # Long pays the ask going in; short is sold into the bid. Both are the worse side.
+        fill_in = entry - spread_at_entry / 2 - slip if short else entry + spread_at_entry / 2 + slip
 
         # A mean-reverting plan has somewhere to go; a trend-following one does not. When both a stop and
         # a target sit inside the same bar we take the STOP, because a 5-minute bar does not say which
@@ -74,11 +83,13 @@ def run(strategy, bars: pd.DataFrame, capital: float = 10_000.0,
         target = plan.get("target")
         exit_price, exit_ts, reason = None, after.index[-1], "session end"
         for ts, bar in after.iterrows():
-            if bar["low"] <= stop:
-                exit_price = min(float(bar["open"]), stop)   # gapped through: take the worse
+            stopped = bar["high"] >= stop if short else bar["low"] <= stop
+            if stopped:
+                # Gapped through the stop: take the worse of the stop and the bar's open, either way.
+                exit_price = max(float(bar["open"]), stop) if short else min(float(bar["open"]), stop)
                 exit_ts, reason = ts, "stop"
                 break
-            if target is not None and bar["high"] >= target:
+            if target is not None and (bar["low"] <= target if short else bar["high"] >= target):
                 exit_price = target                          # a limit fills AT its level, never better
                 exit_ts, reason = ts, "target"
                 break
@@ -87,14 +98,15 @@ def run(strategy, bars: pd.DataFrame, capital: float = 10_000.0,
             exit_ts = after.index[-1]
 
         spread_at_exit = float(after.loc[exit_ts, "spread"]) if exit_ts in after.index else spread_at_entry
-        fill_out = exit_price - spread_at_exit / 2 - slip   # sell into the bid, plus slippage
+        # Long sells into the bid; short buys back at the ask.
+        fill_out = exit_price + spread_at_exit / 2 + slip if short else exit_price - spread_at_exit / 2 - slip
 
         spread_cost = qty * (spread_at_entry / 2 + spread_at_exit / 2 + 2 * slip)
-        pnl = qty * (fill_out - fill_in)
+        pnl = qty * (fill_in - fill_out) if short else qty * (fill_out - fill_in)
         equity += pnl
         trades.append(IntradayTrade(day=day, entry_ts=entry_ts, exit_ts=exit_ts, entry=fill_in,
                                     exit=fill_out, qty=qty, stop=stop, spread_cost=spread_cost,
-                                    pnl=pnl, reason=reason))
+                                    pnl=pnl, reason=reason, side="short" if short else "long"))
         curve.append((exit_ts, equity))
 
     return {"trades": trades, "equity": equity, "capital": capital,

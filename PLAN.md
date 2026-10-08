@@ -794,6 +794,52 @@ status code alone is not proof of delivery.
 Delivery itself was verified end to end rather than assumed: Telegram accepted a message for the
 configured chat and named the account it went to.
 
+#### Intraday attempt 3: the SHORT side — TESTED AND REJECTED (2026-10-08)
+The watcher can only ever say "buy now, sell later". It cannot say "sell this currency", because the
+rule is long-only — so half the hypothesis had never been measured, and half the opportunities were
+unavailable. Mean reversion ought to be roughly symmetric, so selling a sharp *rise* away from the
+session open is a real idea rather than a way of getting more messages.
+
+Tested properly: the intraday harness was extended to price a short without flattering it (sold into the
+bid, bought back at the ask, stopped on the **high**, gapped fills at the worse of the stop and the bar's
+open, sized off its own stop distance), then 30 settings chosen on the first 60% of days and measured
+**once** on the rest.
+
+The headline looks superb and is worthless: **30 of 30 settings net positive out of sample**, against
+23 of 30 for the long side. The grid says why:
+
+| | in-sample (163 days) | out-of-sample (109 days) |
+|---|---|---|
+| rise 0.4 / stop 0.5 / tgt 0.5 — 38 OOS trades | **−$630** | +$501 |
+| rise 0.5 / stop 0.5 / tgt 0.5 — 28 OOS trades | **−$419** | +$542 |
+| rise 0.6 / stop 0.3 / tgt 1.0 — 20 OOS trades | **−$1,473** | +$244 |
+| rise 1.0 / stop 0.3 / tgt 1.0 — *the in-sample winner* | +$465 | +$102, **6 trades** |
+
+**Every setting that trades often loses in-sample and wins out-of-sample.** EUR/USD was flat over the
+first period (+6 pips) and fell **450 pips (−3.84%)** over the second, so a short-the-rally rule was
+run over while the pair ground up and paid while it fell. Thirty settings agreeing out of sample is
+**one bet on that regime**, not thirty independent confirmations — which is exactly what "30/30" hides.
+
+The honest selection procedure picks the in-sample winner, and that is the rarest setting in the grid:
+**6 out-of-sample trades** at +3.4%/yr, against Gate 1's bar of 50. Choosing one of the busy settings
+instead would mean choosing on out-of-sample data, which is precisely the error that produced the
+breakout's +$506 in-sample and −36%/yr out of it.
+
+Worth noting what held up: the profit mechanism IS reversion, not drift — 17 target hits (+$838) against
+9 session-end exits (−$84). The idea is not wrong. It is **regime-dependent**, which for a signal sent
+to a phone to be traded by hand is the same as unusable. The long side, by contrast, was positive in
+**both** periods (+$1,161 and +$679).
+
+So no short signals. The harness keeps its short support, with tests, because the next idea of this shape
+should be measurable without rebuilding it.
+
+#### Silence now explains itself (2026-10-08)
+Asked why no currency messages were arriving, the true answer was "the setup did not happen" — something
+the system knew all day and never said. The level is reached on about **one day in three**, so most days
+there is genuinely nothing, and from the outside "nothing happened" and "something is broken" looked
+identical. At the close, a day that never triggered now says so, once, and says how often to expect a
+trade. The alternative was the user having to ask.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

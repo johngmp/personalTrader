@@ -44,7 +44,12 @@ def test_a_day_of_candles_comes_back_at_a_legible_spacing():
     assert len(got) < 200, "a day must not come back as hundreds of candles"
     stamps = [datetime.fromisoformat(c[ISO]) for c in got]
     gaps = [(b - a).total_seconds() / 60 for a, b in zip(stamps, stamps[1:])]
-    assert gaps, "a single candle says nothing about the interval"
+    if len(gaps) < 2:
+        # Yahoo's "1d" window for FX starts at the session open, around 22:00-23:00 UTC, so for the first
+        # minutes of a new forex day it genuinely holds one or two candles. That is the feed being
+        # correct, not the spacing being wrong, and this used to FAIL there -- a test that breaks for a
+        # quarter of an hour every evening teaches you to ignore the suite.
+        pytest.skip(f"only {len(got)} candle(s) so far in this forex day; nothing to measure spacing on")
     assert Counter(gaps).most_common(1)[0][0] == 15, f"expected 15-minute bars, gaps were {set(gaps)}"
 
 
