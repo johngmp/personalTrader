@@ -92,3 +92,95 @@ def test_only_brokers_you_act_on_reach_your_phone(broker, notifies):
 def test_the_hand_executed_set_is_all_shadow_brokers():
     """A hand-executed broker that wasn't a shadow one would mean real orders going out unsupervised."""
     assert all(name.startswith("shadow") for name in HAND_EXECUTED)
+
+
+# --- a message that never arrives ------------------------------------------------------------------
+
+def test_a_failed_telegram_send_is_recorded_not_swallowed():
+    """`send` must never raise -- an alert failing cannot be allowed to stop the engine trading -- but
+    it must not vanish either. It logged to a Python logger nobody reads, so a wrong chat id, a revoked
+    token or a blocked bot would make every message disappear while the run reported itself clean.
+
+    For a system whose whole job is to tell you things, that is indistinguishable from a quiet market:
+    you would sit waiting for a signal that had already been sent into nothing.
+    """
+    import httpx
+
+    from trader.notify.telegram import Telegram
+
+    def dead(_request):
+        return httpx.Response(401, json={"ok": False, "description": "Unauthorized"})
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(dead)))
+    bot.send("hello")                                   # must not raise
+    assert bot.failures == 1
+    assert "Unauthorized" in (bot.last_error or "") or "401" in (bot.last_error or "")
+
+
+def test_a_two_hundred_with_ok_false_still_counts_as_a_failure():
+    """Telegram can answer 200 with ok:false, so the status code alone is not proof of delivery."""
+    import httpx
+
+    from trader.notify.telegram import Telegram
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(
+        lambda _r: httpx.Response(200, json={"ok": False, "description": "chat not found"}))))
+    bot.send("hello")
+    assert bot.failures == 1 and "chat not found" in (bot.last_error or "")
+
+
+def test_a_successful_send_clears_the_failure_count():
+    """Otherwise one network blip would report a broken notifier for the rest of the day."""
+    import httpx
+
+    from trader.notify.telegram import Telegram
+
+    ok = {"n": 0}
+
+    def flaky(_request):
+        ok["n"] += 1
+        return httpx.Response(500) if ok["n"] == 1 else httpx.Response(200, json={"ok": True})
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(flaky)))
+    bot.send("one")
+    assert bot.failures == 1
+    bot.send("two")
+    assert bot.failures == 0 and bot.last_error is None
+
+
+def test_the_run_reports_alerts_that_did_not_arrive(settings, tmp_path):
+    """The count is useless unless something reads it."""
+    from trader.brokers.sim import SimBroker
+    from trader.engine.live import Coordinator, Engine, RunReport
+    from trader.journal.db import Journal
+
+    class Broken:
+        failures = 3
+        last_error = "HTTPStatusError: 401 Unauthorized"
+
+        def send(self, text): pass
+        def poll_commands(self, store): return []
+
+    journal = Journal(tmp_path / "j.db")
+    engines = [Engine(settings, SimBroker(cash=1_000, name="alpaca"), journal, {}, notifier=Broken())]
+    report = RunReport(started=datetime(2026, 10, 8, tzinfo=timezone.utc))
+    Coordinator(settings, journal, engines, Broken())._check_alerts_got_through(report)
+
+    assert any("did not reach Telegram" in p for p in report.problems)
+    assert any("401" in p for p in report.problems)
+    assert any("telegram delivery failing" in (r["message"] or "") for r in journal.recent_events(5))
+    journal.close()
+
+
+def test_every_run_actually_checks_that_the_alerts_arrived():
+    """The wiring, not the method.
+
+    The test above calls _check_alerts_got_through directly and passes with the call deleted from
+    run_once -- the third time today a test of a helper said nothing about whether anything calls it,
+    after the forex clock the executor never handed the gate and the risk fit _enter never applied.
+    """
+    import inspect
+
+    from trader.engine.live import Coordinator
+
+    assert "_check_alerts_got_through" in inspect.getsource(Coordinator.run_once)

@@ -954,6 +954,7 @@ class Coordinator:
             reports = [engine._run() for engine in self.engines]  # noqa: SLF001
             # Once per cycle, not once per broker: it is a watcher over one symbol, and running it per
             # engine would message you twice for the same signal.
+            self._check_alerts_got_through(reports[0])
             for name, fn in (("intraday watch", lambda: self._intraday(reports[0])),
                              ("vault", lambda: write_vault(self.settings, self.journal, self.engines)),
                              ("dashboard", lambda: write_dashboard(self.settings, self.journal, self.engines)),
@@ -965,6 +966,23 @@ class Coordinator:
                     self.journal.log(f"{name} failed: {exc}", level="error")
                     self.notifier.send(f"⚠️ {name} failed: {exc}")
             return reports
+
+    def _check_alerts_got_through(self, report: RunReport) -> None:
+        """Did the messages this run sent actually reach the phone?
+
+        `Telegram.send` deliberately swallows failures so an alert cannot stop the engine trading, and it
+        used to swallow them into a Python logger nobody reads. A wrong chat id, a revoked token or a
+        blocked bot would then make every message disappear while the run reported itself clean -- and
+        for a system whose entire job is to tell you things, that is indistinguishable from a quiet
+        market. You would sit waiting for a signal that had already been sent into nothing.
+        """
+        failures = getattr(self.notifier, "failures", 0)
+        if not failures:
+            return
+        detail = getattr(self.notifier, "last_error", None) or "unknown error"
+        report.problems.append(f"{failures} alert(s) did not reach Telegram: {detail}")
+        self.journal.log(f"telegram delivery failing: {failures} consecutive, last error {detail}",
+                         level="error")
 
     def _intraday(self, report: RunReport) -> None:
         """Session-reversion signals. Sends messages; never places an order.

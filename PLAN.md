@@ -775,6 +775,25 @@ it was, not better.
 Both of these are the same shape as the forex clock: two things that must agree, with nothing checking
 that they do. Worth looking for more of them.
 
+##### A message that goes nowhere looks exactly like a quiet market (2026-10-08)
+Asked why no currency signals were arriving, the answer turned out to be that the setup had not
+triggered — yesterday's session low was 1.11757 against a buy level of 1.11621, missing by 13.6 pips.
+Measured on the same 250 days of tick data the research used, the setup fires on **32% of days**, a
+median of **4 calendar days** apart, and the record contains a **35-day** quiet spell. One silent day is
+unremarkable; the strategy is a patient one.
+
+But checking it exposed something that would have produced the same silence for a much worse reason.
+`Telegram.send` deliberately never raises, so a failed alert cannot stop the engine trading — and it
+swallowed the failure into a Python logger nobody reads. A wrong chat id, a revoked token or a blocked
+bot would have made every message vanish while the run reported itself clean. For a system whose entire
+job is to tell you things, that is indistinguishable from a quiet market: you would sit waiting for a
+signal that had already been sent into nothing. Failures are now counted, reported in the run and
+written to the journal as an error, and a 200 carrying `ok: false` counts as a failure too, because the
+status code alone is not proof of delivery.
+
+Delivery itself was verified end to end rather than assumed: Telegram accepted a message for the
+configured chat and named the account it went to.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
