@@ -14,22 +14,9 @@ from trader.engine import dashboard as dash
 
 
 @pytest.fixture(scope="module")
-def page() -> str:
-    """The real rendered page, from the running project's own data."""
-    from pathlib import Path
-
-    from trader.config import load_settings
-    from trader.engine.brokers_setup import configured_brokers
-    from trader.engine.live import Engine
-    from trader.journal.db import Journal
-
-    settings = load_settings()
-    journal = Journal(Path("data/journal.db"))
-    engines = [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings, journal)]
-    try:
-        return dash.dashboard_html(settings, journal, engines)
-    finally:
-        journal.close()
+def page(live_page) -> str:
+    """The real rendered page, built once for the whole session (see conftest.live_page)."""
+    return live_page
 
 
 def buttons(page: str) -> set[str]:

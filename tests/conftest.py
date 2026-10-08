@@ -39,3 +39,32 @@ def sim() -> SimBroker:
     b.set_price("SPY", 500, NOW)
     b.set_price("QQQ", 450, NOW)
     return b
+
+
+@pytest.fixture(scope="session")
+def live_page() -> str:
+    """The real dashboard, rendered ONCE for the whole session.
+
+    Four test files each had their own module-scoped copy of this, so the suite built live broker
+    engines and rendered the whole page six times over. Every one of those is network work -- Alpaca
+    quotes, Yahoo history -- which is slow, repeated for no benefit, and the reason a run could hang for
+    minutes when a feed went quiet.
+
+    Session-scoped is safe here because every test using it asserts on the page's STRUCTURE, and none
+    of them mutate it.
+    """
+    from pathlib import Path as _Path
+
+    from trader.config import load_settings
+    from trader.engine.brokers_setup import configured_brokers
+    from trader.engine.dashboard import dashboard_html
+    from trader.engine.live import Engine
+    from trader.journal.db import Journal
+
+    settings = load_settings(PROJECT_ROOT)
+    journal = Journal(_Path("data/journal.db"))
+    engines = [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings, journal)]
+    try:
+        return dashboard_html(settings, journal, engines)
+    finally:
+        journal.close()

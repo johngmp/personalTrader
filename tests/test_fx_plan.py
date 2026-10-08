@@ -16,22 +16,10 @@ from trader.engine.dashboard import _distance, _units, fx_plan
 
 
 @pytest.fixture(scope="module")
-def page() -> str:
-    from pathlib import Path
+def page(live_page) -> str:
+    """The real rendered page, built once for the whole session (see conftest.live_page)."""
+    return live_page
 
-    from trader.config import load_settings
-    from trader.engine.brokers_setup import configured_brokers
-    from trader.engine.dashboard import dashboard_html
-    from trader.engine.live import Engine
-    from trader.journal.db import Journal
-
-    settings = load_settings()
-    journal = Journal(Path("data/journal.db"))
-    engines = [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings, journal)]
-    try:
-        return dashboard_html(settings, journal, engines)
-    finally:
-        journal.close()
 
 COMMON = {"fast_n": 50, "slow_n": 150, "atr_mult": 3.5, "risk_pct": 1.0, "capital": 10_000.0}
 

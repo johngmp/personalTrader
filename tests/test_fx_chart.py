@@ -128,7 +128,7 @@ def test_clicking_a_pair_switches_the_chart():
     assert "e.target.closest('.pair')" in dash.FX_JS
 
 
-def test_the_percentage_in_the_list_says_what_period_it_covers():
+def test_the_percentage_in_the_list_says_what_period_it_covers(live_page):
     """A bare "-3.39%" is unreadable: over a day, a month, a year?
 
     Asserted against the RENDERED page rather than the source. It used to match the exact markup
@@ -137,22 +137,8 @@ def test_the_percentage_in_the_list_says_what_period_it_covers():
     """
     import re
 
-    from pathlib import Path
-
-    from trader.config import load_settings
-    from trader.engine.brokers_setup import configured_brokers
-    from trader.engine.live import Engine
-    from trader.journal.db import Journal
-
-    settings = load_settings()
-    journal = Journal(Path("data/journal.db"))
-    engines = [Engine(settings, b, journal, bars) for b, bars in configured_brokers(settings, journal)]
-    try:
-        page = dash.dashboard_html(settings, journal, engines)
-    finally:
-        journal.close()
-
     # Every percentage in an instrument row carries a period beside it.
+    page = live_page
     rows = re.findall(r'<span class="p-chg">(.*?)</span>\s*</span>', page, re.S)
     if not rows:
         # This renders the REAL page, so it needs live quotes. Under a full run the feeds are hit by
