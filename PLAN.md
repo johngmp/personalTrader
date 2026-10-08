@@ -703,6 +703,14 @@ last one is the message most likely to be read and least likely to be questioned
 read a simulation of a losing strategy as money that had been made. It now reads "simulated, NOT an
 account". None of these were actionable on their own, which is exactly why they had survived.
 
+**Then switched off entirely, which was the right fix all along (2026-10-08).** Labelling those messages
+treated the symptom. S9 runs rules this system has already concluded lose to T-bills; sending a buy, a
+stop and a dollar figure to a phone for them is a standing invitation to act, however carefully the
+caveat is worded. `HAND_EXECUTED` is now empty and S9 is silent. It keeps running and keeps accumulating
+evidence on the dashboard and in the daily summary, marked as simulated — it just no longer interrupts.
+The shadow-aware message wording stays as a guard for whatever is added to that set next, and the set's
+comment now says that anything added to it goes straight to the phone.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

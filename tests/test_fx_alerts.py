@@ -80,7 +80,7 @@ def test_the_first_stop_reads_sensibly_when_there_was_none_before():
 @pytest.mark.parametrize(("broker", "notifies"), [
     ("alpaca", True),        # real paper account
     ("shadow", False),       # research only: stays off your phone
-    ("shadow_fx", True),     # you execute this one by hand, so it must reach you
+    ("shadow_fx", False),    # S9 failed Gate 1; it records evidence instead of interrupting you
 ])
 def test_only_brokers_you_act_on_reach_your_phone(broker, notifies):
     from trader.engine.live import Engine

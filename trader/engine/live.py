@@ -55,7 +55,18 @@ SIZING_MARGIN = 0.98            # size entries 2% under the limits, so small pri
 AI_VERDICT_WAIT = timedelta(hours=8)  # analyst-team entries skip if the AI hasn't answered by then
 # Shadow sleeves are research and stay off your phone. These are the exception: their whole purpose is to
 # reach it, because you execute them by hand and nothing else will move your stop for you.
-HAND_EXECUTED = {"shadow_fx"}
+# Shadow brokers whose signals are yours to place by hand, and so are worth a message.
+#
+# EMPTY on purpose since 2026-10-08. shadow_fx (S9) was the only member, and S9 runs the FX rules that
+# failed Gate 1 at an out-of-sample Sharpe of -0.184: it lost to leaving the money in T-bills. Sending a
+# buy, a stop and a dollar figure to a phone for a strategy this system has already concluded does not
+# work is a standing invitation to lose money, however carefully the message is labelled -- and labelling
+# it was the previous fix, which was the wrong fix. S9 keeps running and keeps accumulating evidence; it
+# appears on the dashboard and in the daily summary, marked as simulated. It just no longer interrupts
+# you. The forex messages you DO want come from the intraday watcher, which passed a clean test.
+#
+# Anything added here goes straight to the phone, so add a broker only once its rules have earned it.
+HAND_EXECUTED: set[str] = set()
 
 
 @dataclass

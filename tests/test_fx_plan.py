@@ -287,8 +287,19 @@ def test_a_sell_alert_does_not_invent_a_stop():
     assert "Stop" not in _fill_text(fill, "trend ended", AssetClass.FOREX, stop=0.69681)
 
 
-def test_the_fx_sleeve_is_still_the_one_shadow_sleeve_that_reaches_your_phone():
-    """If this set ever loses shadow_fx, hand-executed signals go silent and nothing says so."""
+def test_the_fx_shadow_no_longer_reaches_your_phone():
+    """It used to, and that was the mistake.
+
+    S9 runs the FX rules that failed Gate 1 at an out-of-sample Sharpe of -0.184 -- they lost to leaving
+    the money in T-bills. It was sending a buy, a stop and a dollar risk figure to a phone, which is a
+    standing invitation to act on a strategy this system has already concluded does not work. The first
+    fix labelled those messages. The right fix was to stop sending them.
+
+    S9 still runs and still accumulates evidence on the dashboard and in the daily summary, marked as
+    simulated. The forex messages that DO arrive come from the intraday watcher, which passed a clean
+    out-of-sample test on EUR/USD.
+    """
     from trader.engine.live import HAND_EXECUTED
 
-    assert "shadow_fx" in HAND_EXECUTED
+    assert "shadow_fx" not in HAND_EXECUTED
+    assert HAND_EXECUTED == set(), "anything in here goes straight to the phone"
