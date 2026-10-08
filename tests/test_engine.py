@@ -448,3 +448,69 @@ def test_the_unaffordable_alert_fires_once_a_day_not_every_run(settings, tmp_pat
     assert first, "the first run of the day must say so"
     assert not second, "the second run must not repeat it"
     journal.close()
+
+
+def test_a_buy_is_not_sent_when_another_sleeve_has_a_resting_stop_on_it(settings, tmp_path):
+    """The wash-trade conflict, measured live on 2026-10-08.
+
+    The broker sees ONE account; sleeves are our abstraction, not its. Alpaca refuses a buy while any
+    opposite-side order rests on the same symbol, and it refuses a plain LIMIT order too -- so the
+    error's advice to "use complex orders" means brackets and OCO, not an order type we can substitute.
+    The conflict cannot be traded through, only avoided, and cancelling the other sleeve's stop to make
+    room is not avoiding it: it leaves a real position unprotected to place a new one.
+
+    So the engine must not send an order the broker is always going to reject, and must say why.
+    """
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    for s, df in bars.full.items():
+        broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+    engine = Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                    executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                    fill_wait_s=0)
+    engine.run_once()                                   # B0 and S1 take their positions and stops
+
+    # Another sleeve now wants a symbol S1 already holds with a resting stop.
+    held = [s for s in journal.sleeve_holdings("S1") if journal.position_state("S1", s)]
+    assert held, "S1 should hold something with a state after the first run"
+    symbol = held[0]
+    blocker = engine._blocking_stop("S8", symbol)
+    assert blocker == "S1", f"expected S1 to be named as the blocker for {symbol}, got {blocker}"
+
+    # And a sleeve is never blocked by its own stop.
+    assert engine._blocking_stop("S1", symbol) is None, "a sleeve must not block itself"
+    journal.close()
+
+
+def test_a_wash_blocked_market_is_reported_as_a_problem(settings, tmp_path):
+    """Unlike the affordability problem, no amount of capital fixes this one, so it has to be said."""
+    from trader.engine.live import RunReport
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    for s, df in bars.full.items():
+        broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+    engine = Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                    executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                    fill_wait_s=0)
+    report = RunReport(started=clock.now)
+    report.wash_blocked = ["SPY (held by S1)", "QQQ (held by S1)"]
+    engine._report_wash_blocked(report)
+    assert report.problems and "wash trade" in report.problems[0]
+    assert "More capital will not fix" in report.problems[0]
+
+    # Once a day, not once every fifteen minutes.
+    again = RunReport(started=clock.now)
+    again.wash_blocked = ["SPY (held by S1)"]
+    engine._report_wash_blocked(again)
+    assert not again.problems, "the same conflict must not alert on every run"
+    journal.close()

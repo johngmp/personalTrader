@@ -69,6 +69,8 @@ class RunReport:
     # raised as ONE problem at the end: twenty separate alerts for a broad rally would be noise, and
     # noise is how this gets ignored.
     unaffordable: list[str] = field(default_factory=list)
+    # Markets a sleeve wanted but another sleeve's resting stop makes untradeable at this broker.
+    wash_blocked: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = [f"{len(self.fills)} fill(s)", f"{len(self.actions)} action(s)"]
@@ -125,6 +127,7 @@ class Engine:
             ("protective stops", self._protect),
             ("decisions", self._decide),
             ("unaffordable markets", self._report_unaffordable),
+            ("wash-blocked markets", self._report_wash_blocked),
             ("position state", self._refresh_states),  # register positions filled just now...
             ("protective stops", self._protect),       # ...so they get their stop in this same run
             ("sleeve values", self._record_equity),
@@ -146,6 +149,25 @@ class Engine:
         return report
 
     # --- steps ------------------------------------------------------------------------------------
+
+    def _report_wash_blocked(self, report: RunReport) -> None:
+        """One alert per day naming the markets another sleeve's stop is keeping this one out of.
+
+        Worth saying out loud rather than logging: it means the sleeve is not holding the basket that
+        passed Gate 1, and unlike the affordability problem no amount of capital fixes it. It is a
+        property of running several strategies through one brokerage account.
+        """
+        if not report.wash_blocked:
+            return
+        key = f"washblocked:{self.broker.name}:{self.clock().date()}"
+        if self.journal.kv_get(key) is not None:
+            self.journal.log(f"still wash-blocked: {', '.join(report.wash_blocked)}", level="warning")
+            return
+        self.journal.kv_set(key, "1")
+        report.problems.append(
+            f"{len(report.wash_blocked)} market(s) another sleeve already holds with a stop, so this "
+            f"broker refuses the buy as a wash trade: {', '.join(report.wash_blocked)}. "
+            f"More capital will not fix this one.")
 
     def _report_unaffordable(self, report: RunReport) -> None:
         """One alert per run naming every market the sleeve wanted and could not afford a share of.
@@ -440,8 +462,36 @@ class Engine:
 
     # --- orders -------------------------------------------------------------------------------------
 
+    def _blocking_stop(self, sleeve_id: str, symbol: str) -> str | None:
+        """The sleeve whose resting sell-stop would make a buy here a wash trade, if there is one.
+
+        The broker sees ONE account; sleeves are our abstraction, not its. Alpaca refuses a buy while any
+        opposite-side order rests on the same symbol: "potential wash trade detected". Measured on
+        2026-10-08, it refuses a plain limit order too, so the error's advice to "use complex orders"
+        means brackets and OCO, not a different order type we can slip in.
+
+        So the conflict cannot be traded through, only avoided -- and cancelling the other sleeve's stop
+        to make room is not avoiding it, it is leaving a real position unprotected to place a new one.
+        This reports instead. The cost is honest and visible; the alternative was an order the broker was
+        always going to reject, logged as a broker error among real ones.
+        """
+        for state in self.journal.position_states():
+            if state["sleeve_id"] == sleeve_id or state["symbol"] != symbol:
+                continue
+            if state["sleeve_id"] not in self.my_sleeves:
+                continue                                    # a different broker, a different account
+            order = self.journal.order(state["stop_order_id"]) if state["stop_order_id"] else None
+            if order is not None and OrderStatus(order["status"]).is_open:
+                return str(state["sleeve_id"])
+        return None
+
     def _enter(self, sleeve_id: str, symbol: str, dollars: float, price: float, stop: float | None, reason: str,
                report: RunReport) -> None:
+        blocker = self._blocking_stop(sleeve_id, symbol)
+        if blocker is not None:
+            report.actions.append(f"{sleeve_id} skipped {symbol}: {blocker} has a resting stop on it")
+            report.wash_blocked.append(f"{symbol} (held by {blocker})")
+            return
         asset_class = self.settings.asset_class(symbol)
         step = self.broker.order_step(symbol, asset_class)  # type: ignore[arg-type]
         if step is not None:  # whole shares at Alpaca, whole units at OANDA
