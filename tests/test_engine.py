@@ -968,3 +968,50 @@ def test_the_entry_path_actually_applies_the_risk_fit(world):
     budget = world["settings"].sleeves["S1"].capital_usd * \
         world["settings"].sleeve_limits("S1").risk_per_trade_pct / 100
     assert order.notional * (1 - stop / price) <= budget
+
+
+def test_removing_a_held_symbol_from_a_sleeve_does_not_freeze_the_whole_sleeve(settings, tmp_path):
+    """Quotes were fetched for `sleeve.symbols`; the weights looked one up for every symbol HELD.
+
+    Take a symbol out of a sleeve's list in sleeves.yaml while it still holds one and those two disagree,
+    which raised KeyError -- and because each sleeve's decisions are wrapped so one sleeve cannot stop
+    the others, it killed the WHOLE sleeve on every run. Not just the removed symbol: nothing else in
+    the sleeve was decided either, so a trend that ended never sold and the sleeve sat frozen.
+    """
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=lambda: clock.now)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+
+    def engine_now():
+        for sym, df in bars.full.items():
+            broker.set_price(sym, float(df["close"].iloc[-1]), clock.now)
+        return Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=lambda: clock.now,
+                      executor=Executor(settings, broker, journal, clock=lambda: clock.now,
+                                        sleep=lambda _: None), fill_wait_s=0)
+
+    engine_now().run_once()
+    assert "SPY" in journal.sleeve_holdings("S1")
+
+    # The config edit: SPY leaves S1's list while S1 still holds it.
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(
+        update={"symbols": [x for x in settings.sleeves["S1"].symbols if x != "SPY"]})
+    clock.now += timedelta(hours=24)
+    bars.add_day({})
+    report = engine_now().run_once()
+
+    assert not any("decisions failed" in p for p in report.problems), report.problems
+    assert any("no longer in its symbol list" in p for p in report.problems), \
+        "a holding no strategy is steering must be reported, not silent"
+    assert any(a.startswith("S1 decided") for a in report.actions), "the rest of the sleeve must still run"
+
+    # The point of all this: an exit elsewhere in the sleeve still happens.
+    clock.now += timedelta(hours=24)
+    bars.add_day({"QQQ": -0.35})                        # trend ends well below the 200-day average
+    engine_now().run_once()
+    assert "QQQ" not in journal.sleeve_holdings("S1"), "the frozen sleeve could never sell this"
+    assert journal.sleeve_holdings("S1").get("SPY") == 2.0, "the orphan is kept, not liquidated"
+    journal.close()

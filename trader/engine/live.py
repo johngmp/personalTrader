@@ -423,6 +423,7 @@ class Engine:
         # the risk gate checks a moment later. Sizing on yesterday's close could break the 1% risk rule
         # after an overnight move.
         live = {s: self.broker.get_quote(s, self.settings.asset_class(s)).price for s in sleeve.symbols}  # type: ignore[arg-type]
+        self._price_what_it_still_holds(sleeve, self.journal.sleeve_holdings(sleeve.id), live, report)
         for date in sorted(due):
             symbols = due[date]
             equity, _ = self.sleeve_value(sleeve)
@@ -449,7 +450,9 @@ class Engine:
                                                                self.settings.asset_class(symbol),
                                                                shadow=self._is_shadow()))
             prices = live
-            current = {s: q * prices[s] / equity for s, q in held.items() if equity > 0}
+            # `s in prices` because a symbol can be held and unpriceable at once -- see
+            # _price_what_it_still_holds, which reports those rather than letting them raise here.
+            current = {s: q * prices[s] / equity for s, q in held.items() if equity > 0 and s in prices}
             deferred: set[str] = set()
             for symbol, weight in plan_weights(targets, current, prices, limits).items():
                 reason = targets[symbol].reason
@@ -586,6 +589,39 @@ class Engine:
             order = OrderRequest(sleeve_id=sleeve_id, symbol=symbol, side=Side.BUY, notional=round(dollars, 2),
                                  stop_price=stop, reason=reason)
         self._submit(order, report)
+
+    def _price_what_it_still_holds(self, sleeve: SleeveConfig, held: dict[str, float],
+                                   prices: dict[str, float], report: RunReport) -> None:
+        """Add a price for anything the sleeve HOLDS but no longer trades.
+
+        Quotes were fetched for `sleeve.symbols` only, while the weights below look up a price for every
+        symbol the sleeve HOLDS. Take a symbol out of a sleeve's list in sleeves.yaml while it still
+        holds one and the two disagree, which raised KeyError -- and because a sleeve's decisions are
+        wrapped so that one sleeve cannot stop the others, that killed the WHOLE sleeve, every run.
+        Not just the removed symbol: nothing else in the sleeve got decided either, so a trend that
+        ended never sold. Reproduced on 2026-10-08 by removing SPY from S1 while it held 2 shares:
+        "S1 decisions failed: KeyError: 'SPY'", and S1 then sat frozen holding all four of its markets.
+
+        The broker's own valuation is used, since an orphan is by definition not in the sleeve's quote
+        set and may not even be in the universe any more. Counting it matters: its weight is part of the
+        sleeve's exposure, and leaving it out would let the next entry be sized as though the room were
+        free.
+
+        The position is NOT liquidated here. Removing a symbol from a list is not the same instruction as
+        "sell this now", `retiring` already exists for a wind-down, and the position keeps the protective
+        stop it already has. It is reported on every run instead, because a holding no strategy is
+        steering should not be quiet.
+        """
+        orphans = [s for s in held if s not in prices]
+        if not orphans:
+            return
+        for position in self.broker.get_positions():
+            if position.symbol in orphans and position.qty:
+                prices[position.symbol] = abs(position.market_value / position.qty)
+        report.problems.append(
+            f"{sleeve.id} still holds {', '.join(sorted(orphans))}, which is no longer in its symbol "
+            f"list. The position keeps its stop but no strategy is steering it; set `retiring: true` to "
+            f"wind the sleeve down, or put the symbol back.")
 
     def _fit_to_risk(self, sleeve_id: str, symbol: str, dollars: float, price: float,
                      stop: float | None, report: RunReport) -> float:

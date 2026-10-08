@@ -746,6 +746,23 @@ The test for it was written wrong first, in the same way as the bug above: it ca
 and passed with the call site deleted. A unit test on a helper says nothing about whether anything calls
 it. There is now a test that goes through the entry path and checks the order that reaches the broker.
 
+##### One config edit froze an entire sleeve (2026-10-08)
+Quotes were fetched for `sleeve.symbols`. The weights then looked a price up for every symbol the sleeve
+**held**. Those two are the same list right up until a symbol is taken out of `sleeves.yaml` while a
+position in it is still open — and then the lookup raised `KeyError`. Because each sleeve's decisions are
+wrapped so that one sleeve's failure cannot stop the others, the exception killed the **whole sleeve**,
+every run: not just the removed symbol, but every other position in it. A trend that ended never sold.
+
+Reproduced by removing SPY from S1 while it held 2 shares — `S1 decisions failed: KeyError: 'SPY'` — after
+which S1 sat frozen holding all four of its markets. This was reachable by an ordinary edit, and S8's own
+symbol list had been **widened** 19 → 40 only days earlier; narrowing it would have triggered this.
+
+An orphan is now priced from the broker's own valuation, which matters because its weight is part of the
+sleeve's exposure and omitting it would let the next entry be sized as though that room were free. The
+position is deliberately **not** liquidated: removing a symbol from a list is not the instruction "sell
+this now", `retiring` already exists for a wind-down, and the position keeps the stop it has. It is
+reported on every run instead, because a holding no strategy is steering should not be quiet.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
