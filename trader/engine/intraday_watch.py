@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 
 from trader.config import IntradayConfig
-from trader.models import AssetClass, format_price
+from trader.models import AssetClass, format_price, round_price
 
 PIP = 1e-4
 
@@ -70,11 +70,19 @@ def build_plan(cfg: IntradayConfig, session_open: float, daily_ranges: list[floa
     if not recent or session_open <= 0:
         return None
     atr = sum(recent) / len(recent)
-    trigger = session_open - cfg.drop_atr * atr
-    stop = trigger - cfg.stop_atr * atr
-    target = session_open - (1 - cfg.target_frac) * (session_open - trigger)
+    # Rounded to the precision the messages are written in, and compared at that precision for the rest
+    # of the day. Unrounded, the level you are told is not the level being watched: a target of
+    # 1.118943691 prints as "Target 1.11894", and a rate of exactly 1.11894 then fails `rate >= target`
+    # by four ten-millionths, so the day you watch it touch your number is the day nothing is sent.
+    fx = AssetClass.FOREX
+    session_open = round_price(session_open, fx)
+    trigger = round_price(session_open - cfg.drop_atr * atr, fx)
+    stop = round_price(trigger - cfg.stop_atr * atr, fx)
+    target = round_price(session_open - (1 - cfg.target_frac) * (session_open - trigger), fx)
     if not (stop < trigger < target) or stop <= 0:
         return None
+    # Sized off the rounded levels, so the dollar risk quoted in the message is the risk those levels
+    # actually carry rather than the one an unrounded distance would have had.
     qty = (cfg.capital_usd * cfg.risk_pct / 100) / (trigger - stop)
     return Plan(day=day, symbol=cfg.symbol, session_open=session_open, atr=atr,
                 trigger=trigger, stop=stop, target=target, qty=qty)
@@ -113,11 +121,24 @@ def buy_text(p: Plan, rate: float) -> str:
             f"You will pay the ask, a touch above this mid.")
 
 
-def stranded_text(p: Plan) -> str:
+def gapped_text(p: Plan, rate: float) -> str:
+    """Both levels crossed before anything looked. See the call site for why this is not a buy."""
+    f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
+    return (f"⏭️ {p.symbol} skipped today — it went straight through\n"
+            f"Now {f(rate)}, past both the buy at {f(p.trigger)} and the stop at {f(p.stop)}.\n"
+            f"\n"
+            f"If you left a resting limit buy at {f(p.trigger)} with its stop, that trade has already "
+            f"happened and your stop closed it. Nothing to do.\n"
+            f"If you were waiting on this message, do NOT buy now: down here the stop is above the "
+            f"entry, which is a different trade from the one that was tested.")
+
+
+def stranded_text(p: Plan, entry: float | None = None) -> str:
     """For a day that ended with you holding something and nothing awake to say so."""
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
     return (f"⚠️ {p.symbol} from {p.day:%a %d %b} was never closed\n"
-            f"You were told to buy near {f(p.trigger)} and the session ended without a sell message, "
+            f"You were told to buy at {f(p.trigger if entry is None else entry)} and the session ended "
+            f"without a sell message, "
             f"because nothing was running at 16:00 UTC — usually this Mac asleep.\n"
             f"\n"
             f"If you are still holding it, close it now. The tested rule is flat at the session end, so "
@@ -126,11 +147,20 @@ def stranded_text(p: Plan) -> str:
             f"to invent. Check your broker for what you actually got.")
 
 
-def sell_text(p: Plan, rate: float, why: str) -> str:
+def sell_text(p: Plan, rate: float, why: str, entry: float | None = None) -> str:
+    """`entry` is the rate the BUY message actually quoted, which is at or below the trigger.
+
+    Measuring the result from the trigger instead was wrong by the difference between the two: the buy
+    fires on the first observation at or under the trigger, so a 15-minute window that steps past it
+    reports a gain smaller than the one you had, and a loss larger. Wrong in your favour is still wrong,
+    and it would read as a mistake the first time you compared it with your broker.
+    """
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
-    pips = (rate - p.trigger) / PIP
+    entry = p.trigger if entry is None else entry
+    pips = (rate - entry) / PIP
     return (f"🔴 SELL {p.symbol} now — {f(rate)} ({why})\n"
-            f"Bought {f(p.trigger)} · {pips:+.0f} pips · about {pips * PIP * p.qty:+,.0f} USD")
+            f"Bought {f(entry)} · {pips:+.0f} pips · about {pips * PIP * p.qty:+,.0f} USD\n"
+            f"At the mid, before the spread you actually paid on the way in.")
 
 
 class IntradayWatcher:
@@ -162,6 +192,10 @@ class IntradayWatcher:
         o, a, t, s, g, q = (float(x) for x in raw.split(","))
         return Plan(day=day, symbol=self.cfg.symbol, session_open=o, atr=a, trigger=t, stop=s,
                     target=g, qty=q)
+
+    def _entry(self, day: date) -> float | None:
+        raw = self._get(day, "entry")
+        return float(raw) if raw else None
 
     def _store_plan(self, p: Plan) -> None:
         self._set(p.day, "plan", f"{p.session_open},{p.atr},{p.trigger},{p.stop},{p.target},{p.qty}")
@@ -206,15 +240,25 @@ class IntradayWatcher:
             return [f"intraday plan for {self.cfg.symbol}: buy {plan.trigger:.5f}"]
 
         state = self._get(day, "state") or "waiting"
-        if state in ("done", "missed"):
+        if state in ("done", "missed", "gapped"):
             return []
         rate = self._rate()
         if rate is None:
             return []
 
         if state == "waiting":
+            if rate <= plan.stop:
+                # Straight through both levels inside one fifteen-minute window, as a news spike does.
+                # Saying "BUY now" here would quote a stop ABOVE the entry and have you sell at a loss
+                # on the next run. The tested rule enters with a RESTING LIMIT at the trigger, so it is
+                # either already filled and already stopped, or it never happened -- and a fresh entry
+                # down here is simply a different trade from the one that was measured.
+                self._set(day, "state", "gapped")
+                self.notifier.send(gapped_text(plan, rate))
+                return [f"intraday: {self.cfg.symbol} gapped past the stop at {rate:.5f}; day skipped"]
             if rate <= plan.trigger:
                 self._set(day, "state", "in")
+                self._set(day, "entry", f"{rate}")       # what the message quoted, for the sell to measure from
                 self.notifier.send(buy_text(plan, rate))
                 return [f"intraday BUY {self.cfg.symbol} at {rate:.5f}"]
             return []
@@ -227,7 +271,7 @@ class IntradayWatcher:
         else:
             return []
         self._set(day, "state", "done")
-        self.notifier.send(sell_text(plan, rate, why))
+        self.notifier.send(sell_text(plan, rate, why, self._entry(day)))
         return [f"intraday SELL {self.cfg.symbol} at {rate:.5f} ({why})"]
 
     def sweep_unfinished(self) -> list[str]:
@@ -258,7 +302,7 @@ class IntradayWatcher:
             if plan is None:
                 continue
             self._set(day, "state", "done")
-            self.notifier.send(stranded_text(plan))
+            self.notifier.send(stranded_text(plan, self._entry(day)))
             out.append(f"intraday: {self.cfg.symbol} from {day} was left open; told you to check it")
         return out
 
@@ -277,7 +321,7 @@ class IntradayWatcher:
         if plan is None or rate is None:
             return []
         self._set(day, "state", "done")
-        self.notifier.send(sell_text(plan, rate, "session end"))
+        self.notifier.send(sell_text(plan, rate, "session end", self._entry(day)))
         return [f"intraday SELL {self.cfg.symbol} at {rate:.5f} (session end)"]
 
     # --- data ---------------------------------------------------------------------------------------

@@ -605,6 +605,31 @@ never fires, because you are the one holding the position. Every run now sweeps 
 says so once, quoting no exit price — the rate at a close nothing was awake for is not a number to
 invent, so it points you at your broker instead.
 
+##### Three bugs in the sell half, found by exercising it rather than waiting (2026-10-08)
+The buy went out at 07:05 and the sell path had never run live, so it was driven deliberately through
+every outcome — target, stop, session end, and a gap — against a copy of the real journal using the
+day's real plan. All three of these were live defects, not test gaps:
+
+1. **The target you are told was not the target being watched.** `target_frac 1.0` makes the target the
+   session open, so it is almost never a round number: 1.118943691 prints as "Target 1.11894", and a rate
+   of exactly 1.11894 then failed `rate >= target` by four ten-millionths. The day you watched the rate
+   touch your own number was the day nothing was sent. The levels are now rounded to the precision they
+   are printed in, so the number in the message is the number being compared.
+2. **A gap through both levels was sent as a buy.** Crossing the trigger and the stop inside one
+   fifteen-minute window — an ordinary news spike — produced "BUY now" quoting a stop *above* the entry,
+   and the next run would have told you to sell at a loss. The tested rule enters with a resting limit at
+   the trigger, so either that filled and the stop closed it, or it never happened; a fresh entry below
+   the stop is a different trade. The day is now skipped, with a message that says which case you are in.
+3. **The result was measured from the trigger, not from where you were told to buy.** The buy fires on
+   the first observation at or *under* the trigger, so the sell understated every gain. Wrong in your
+   favour is still wrong, and it would read as a mistake the first time it was checked against a broker
+   statement. The signalled entry is now recorded and reported.
+
+Bug 1 is the one worth remembering: it cannot be caught by any test whose numbers are tidy. The suite had
+used a flat 20-day range, which makes `drop_atr * atr` land exactly on five decimals by luck and hides
+the whole class of defect. The tests now use ranges shaped like real EUR/USD days.
+
+
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.
 - **Planned starting capital: ~US$100** (noted 2026-09-18). Needs a *small-account mode*: fractional/dollar-amount

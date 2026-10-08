@@ -20,6 +20,11 @@ CFG = IntradayConfig(enabled=True, symbol="EUR/USD", drop_atr=0.5, stop_atr=0.3,
 DAY = date(2026, 10, 7)
 NEXT_DAY = datetime(2026, 10, 8, 7, 5, tzinfo=timezone.utc)
 RANGES = [0.0062] * 20
+# Real daily ranges are not all equal, and the difference matters: a flat 0.0062 makes drop_atr * atr
+# land exactly on five decimals by luck, which hides every rounding bug in the levels. These are the
+# shape of actual EUR/USD days.
+ODD_RANGES = [0.01197, 0.00619, 0.00951, 0.00723, 0.00901, 0.00488, 0.00672, 0.00534, 0.00812, 0.00466,
+              0.00739, 0.00588, 0.00641, 0.00503, 0.00877, 0.00412, 0.00694, 0.00556, 0.00783, 0.00627]
 
 
 class Spy:
@@ -37,11 +42,11 @@ def journal(tmp_path):
     j.close()
 
 
-def _watcher(journal, at: str, rate: float, cfg=CFG):
+def _watcher(journal, at: str, rate: float, cfg=CFG, ranges=None):
     now = datetime.fromisoformat(f"2026-10-07T{at}+00:00")
     s = load_settings().model_copy(update={"intraday": cfg})
     return IntradayWatcher(s, journal, Spy(), clock=lambda: now, price=lambda _s: rate,
-                           ranges=RANGES)
+                           ranges=RANGES if ranges is None else ranges)
 
 
 def test_the_levels_are_the_ones_the_backtest_used():
@@ -188,7 +193,7 @@ def test_a_trade_left_open_by_a_missed_close_is_raised_not_forgotten(journal):
     """
     yesterday = _watcher(journal, "07:05", 1.11919)
     yesterday.run_once()                                 # plan goes out
-    entered = _watcher(journal, "09:00", 1.11000)        # falls through the trigger
+    entered = _watcher(journal, "09:00", 1.11500)        # through the trigger, short of the stop
     entered.run_once()
     assert "BUY" in entered.notifier.sent[0]
 
@@ -211,8 +216,80 @@ def test_the_sweep_leaves_today_alone(journal):
     """Today still belongs to close_out, which knows the rate and can quote a real exit."""
     w = _watcher(journal, "07:05", 1.11919)
     w.run_once()
-    held = _watcher(journal, "09:00", 1.11000)
+    held = _watcher(journal, "09:00", 1.11500)
     held.run_once()
     mid = _watcher(journal, "12:00", 1.11500)
     assert mid.sweep_unfinished() == [], "a live position must not be declared stranded"
     assert mid.notifier.sent == []
+
+
+# --- the three bugs the sell path had ---------------------------------------------------------------
+
+def test_the_target_you_are_told_is_the_target_that_triggers_the_sell():
+    """The levels are rounded to the precision they are printed in, and watched at that precision.
+
+    Unrounded, a target of 1.118943691 printed as "Target 1.11894" and a rate of exactly 1.11894 then
+    failed `rate >= target` by four ten-millionths. The day you watched the rate touch your own number
+    was the day nothing was sent -- and with target_frac 1.0 the target IS the session open, so this was
+    not a rare corner.
+    """
+    p = build_plan(CFG, 1.11894369125, ODD_RANGES, DAY)
+    for name in ("trigger", "stop", "target", "session_open"):
+        level = getattr(p, name)
+        assert level == float(format(level, ".5f")), \
+            f"{name} is {level!r} but a message would print {level:.5f}"
+
+
+def test_a_rate_at_the_printed_target_sells(journal):
+    w = _watcher(journal, "07:05", 1.11894369125, ranges=ODD_RANGES)
+    w.run_once()
+    plan = w._stored_plan(DAY)
+    # Exactly the figures a message prints, not the floats behind them.
+    trigger, target = float(f"{plan.trigger:.5f}"), float(f"{plan.target:.5f}")
+    _watcher(journal, "09:00", trigger, ranges=ODD_RANGES).run_once()          # in
+    out = _watcher(journal, "12:00", target, ranges=ODD_RANGES)
+    assert out.run_once(), "the rate reached the stated target and nothing was sent"
+    assert "SELL" in out.notifier.sent[0] and "target" in out.notifier.sent[0]
+
+
+def test_a_setup_that_gapped_past_its_own_stop_is_not_a_buy(journal):
+    """Both levels crossed inside one 15-minute window, as a news spike does.
+
+    This used to send "BUY now" quoting a stop ABOVE the entry, so the next run told you to sell at a
+    loss. The tested rule enters with a resting limit at the trigger: either that filled and the stop
+    closed it, or it never happened. A fresh entry below the stop is a different trade.
+    """
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    plan = w._stored_plan(DAY)
+
+    gap = _watcher(journal, "09:00", plan.stop - 0.0020)
+    actions = gap.run_once()
+    assert actions and "gapped" in actions[0]
+    assert "BUY" not in gap.notifier.sent[0]
+    assert "do NOT buy now" in gap.notifier.sent[0]
+
+    # And the day is over: no late entry once the move has already happened.
+    assert _watcher(journal, "11:00", plan.trigger).run_once() == []
+
+
+def test_the_sell_measures_from_what_the_buy_actually_quoted(journal):
+    """It measured from the trigger, which is not where the buy message said to buy.
+
+    The buy fires on the first observation at or under the trigger, so a window that steps past it
+    quotes a better entry than the trigger -- and the sell then understated the gain. Wrong in your
+    favour is still wrong, and it reads as a mistake the first time you check it against your broker.
+    """
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    plan = w._stored_plan(DAY)
+    entry = plan.trigger - 0.0005                 # stepped straight past the trigger, still above the stop
+    assert entry > plan.stop
+
+    _watcher(journal, "09:00", entry).run_once()
+    out = _watcher(journal, "12:00", plan.target)
+    out.run_once()
+    message = out.notifier.sent[0]
+    assert f"Bought {entry:.5f}" in message, f"the sell must name the entry it signalled: {message}"
+    expected = round((plan.target - entry) / 1e-4)
+    assert f"{expected:+.0f} pips" in message
