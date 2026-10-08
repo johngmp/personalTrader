@@ -629,6 +629,39 @@ Bug 1 is the one worth remembering: it cannot be caught by any test whose number
 used a flat 20-day range, which makes `drop_atr * atr` land exactly on five decimals by luck and hides
 the whole class of defect. The tests now use ranges shaped like real EUR/USD days.
 
+##### And the levels were sized off the wrong number entirely (2026-10-08)
+The watcher took its ATR from Yahoo's daily bars while the research used the range of its own Dukascopy
+5-minute bars over the whole UTC day. A comment said the two "differ a little at the edges of the day;
+it moves the levels by a fraction of a pip". That was wrong by most of an order of magnitude. Measured
+over the 268 days where both sources exist:
+
+| 20-day ATR, versus the bars the research used | median error | mean | worst |
+|---|---|---|---|
+| hourly bars grouped into whole UTC days | **1.2 pips** | 1.2 | 2.0 |
+| Yahoo's own daily bars *(what was live)* | **6.9 pips** | 8.3 | 21.0 |
+
+Yahoo's FX daily bar understates the range — its day does not start at midnight UTC and it misses
+extremes in thin hours — and it understates it in one direction, so the error does not average out.
+Eight pips of ATR moves the buy level about 3.5 pips and tightens the stop by about 9%, which means the
+live version entered earlier and stopped out more often than the one that produced +17.2%/yr. Sizing a
+strategy off a different statistic from the one it was tested on makes it a different strategy.
+
+It now reads hourly bars and groups them into whole UTC days, with a day of fewer than 20 hourly bars
+discarded as a weekend, holiday or partial feed — all of which understate a range. On today's data that
+moves the ATR from 54.7 to 59.7 pips, the buy 2.4 pips deeper and the stop from 16.4 to 17.9 pips.
+There is deliberately **no fallback** to the daily bars: falling back would quietly resume trading the
+biased version, so a failed fetch means no plan, and the missed-open message says so.
+
+Two things this did not change. Today's plan was already sent, so it keeps the levels on the phone
+rather than being quietly re-pointed at different ones. And the +17.2%/yr figure still stands on the
+tick data, because this brings live *towards* that test rather than away from it.
+
+The lesson, recorded because it will recur: a comment asserting a quantity ("a fraction of a pip") is a
+measurement nobody took. The DST question was checked the same way and came out clean — the research
+uses a fixed `time(7, 0)` on UTC ticks and so does the engine, so live and backtest agree even though
+07:00 UTC is 08:00 London in summer and 07:00 London in winter. That inconsistency is in the *research*,
+not in the gap between research and production, and closing it would mean trading something untested.
+
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.

@@ -49,6 +49,9 @@ MIN_ATR = 10 * PIP
 # is the most a position could be. At the median ATR the size is 4.6x capital and at the lowest ATR ever
 # seen it is 23.7x, so this cap never binds on a real market either.
 MAX_LEVERAGE = 30.0
+# Hourly bars needed before a UTC day counts as a whole day. Forex runs ~24h on a weekday, so a day with
+# fewer than this is a weekend, a holiday or a partial feed -- all of which understate the range.
+HOURS_FOR_A_FULL_DAY = 20
 
 
 def _parse(hhmm: str) -> time:
@@ -142,7 +145,9 @@ def missed_text(cfg: IntradayConfig, day: date, minutes_in: float) -> str:
             f"The {cfg.open_utc} UTC open was missed by {minutes_in:.0f} min, so the levels cannot be "
             f"measured from it.\n"
             f"Taking the setup from a later rate would be trading something other than what was "
-            f"tested, so today is skipped. Usually this means the Mac was asleep.")
+            f"tested, so today is skipped.\n"
+            f"Usually the Mac was asleep. It can also mean the price history needed to size the levels "
+            f"could not be fetched, in which case no plan is the right answer too.")
 
 
 def buy_text(p: Plan, rate: float) -> str:
@@ -383,20 +388,50 @@ class IntradayWatcher:
         return quote.price
 
     def _daily_ranges(self) -> list[float]:
+        """Daily high-low for earlier days, used only as a scale for "how far is far".
+
+        Built from HOURLY bars grouped into whole UTC days, because that is the window the backtest
+        measured and the two are not interchangeable. Measured against the Dukascopy 5-minute bars the
+        research actually used, over 268 overlapping days:
+
+            hourly, grouped by UTC day     20-day ATR off by a median of 1.2 pips (worst 2.0)
+            Yahoo's own daily bars         off by a median of 6.9 pips, mean 8.3, worst 21.0
+
+        Yahoo's FX daily bar understates the range -- its day boundary is not midnight UTC and it misses
+        extremes in thin hours -- and it understates it in one direction, so the error does not wash out.
+        Eight pips of ATR moves the buy level about 3.5 pips and tightens the stop by about 9%: live would
+        have entered earlier and been stopped out more often than the run that produced +17.2%/yr. A
+        strategy sized off a different number from the one it was tested on is a different strategy.
+
+        No fallback to the daily bars on failure. Returning them would quietly resume trading the biased
+        version; returning nothing means no plan, and the missed-open message then says so.
+        """
         if self._ranges is not None:
             return list(self._ranges)
-        """Daily high-low for earlier days, used only as a scale.
-
-        Yahoo's daily bars, not the tick-derived ones the backtest used. They differ a little at the
-        edges of the day; it moves the levels by a fraction of a pip and keeps this independent of a
-        download that only runs by hand.
-        """
         try:
-            from trader.data.history import load_history
+            import yfinance as yf
 
-            frame = load_history(self.cfg.symbol).tail(self.cfg.atr_days + 5)
+            from trader.data.history import YAHOO_TICKERS
+
+            ticker = YAHOO_TICKERS.get(self.cfg.symbol)
+            if ticker is None:
+                return []
+            frame = yf.Ticker(ticker).history(period="2mo", interval="1h")
+            if frame.empty:
+                return []
+            index = frame.index
+            index = index.tz_localize("UTC") if index.tz is None else index.tz_convert("UTC")
+            frame = frame.set_index(index.tz_localize(None))
             today = self.clock().date()
-            frame = frame[frame.index.date < today]
-            return [float(h - low) for h, low in zip(frame["high"], frame["low"])]
+            out: list[float] = []
+            for day, bars in frame.groupby(frame.index.normalize()):
+                # A part-day understates the range, so it is not a day. Weekends come back short and
+                # drop out here rather than averaging a quiet Sunday into the scale.
+                if day.date() >= today or len(bars) < HOURS_FOR_A_FULL_DAY:
+                    continue
+                span = float(bars["High"].max() - bars["Low"].min())
+                if span > 0:
+                    out.append(span)
+            return out
         except Exception:
             return []

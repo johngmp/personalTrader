@@ -63,12 +63,10 @@ def test_the_scale_never_uses_todays_own_range():
     p = build_plan(CFG, 1.16420, RANGES, DAY)
     huge = build_plan(CFG, 1.16420, RANGES + [0.05], DAY)
     assert huge.atr != p.atr, "a new EARLIER day should move the scale"
-    # And the watcher only ever hands it earlier days: _daily_ranges filters on `index.date < today`.
-    import inspect
-
-    from trader.engine import intraday_watch
-
-    assert "index.date < today" in inspect.getsource(intraday_watch.IntradayWatcher._daily_ranges)
+    # That the watcher only ever hands it earlier days is checked against behaviour, in
+    # test_the_atr_comes_from_whole_utc_days_of_hourly_bars. It used to be asserted by grepping this
+    # module for the string "index.date < today", which broke the moment the source of the ranges
+    # changed -- while the property it was guarding was still perfectly intact.
 
 
 def test_a_plan_goes_out_once_at_the_open_and_is_not_repeated(journal):
@@ -361,3 +359,61 @@ def test_a_stale_quote_is_not_acted_on(journal, monkeypatch):
 
     assert watcher(limit + 60)._rate() is None, "a quote past the forex staleness limit must not be used"
     assert watcher(60)._rate() == pytest.approx(1.11000), "a fresh quote must still be used"
+
+
+def test_the_atr_comes_from_whole_utc_days_of_hourly_bars(journal, monkeypatch):
+    """Measured against the Dukascopy bars the research used, over 268 overlapping days, Yahoo's own
+    DAILY bar puts the 20-day ATR out by a median of 6.9 pips and a mean of 8.3 -- always in the same
+    direction, so it does not wash out. Hourly bars grouped into UTC days are out by 1.2.
+
+    Eight pips of ATR moves the buy level ~3.5 pips and tightens the stop ~9%, so the daily-bar version
+    entered earlier and stopped out more often than the run that produced +17.2%/yr.
+    """
+    import numpy as np
+    import pandas as pd
+
+    now = datetime(2026, 10, 8, 7, 5, tzinfo=timezone.utc)
+    rows, want = [], {}
+    for d in range(1, 9):
+        day = datetime(2026, 10, d, tzinfo=timezone.utc)
+        hours = 24 if d % 7 not in (6, 0) else 6        # two short days stand in for a weekend
+        for h in range(hours):
+            rows.append((day.replace(hour=h), 1.10 + 0.001 * h, 1.10 + 0.001 * h - 0.0005))
+        if hours == 24 and day.date() < now.date():      # today's own range must never be in the scale
+            want[day.date()] = (1.10 + 0.001 * 23) - (1.10 - 0.0005)
+
+    frame = pd.DataFrame({"High": [r[1] for r in rows], "Low": [r[2] for r in rows]},
+                         index=pd.DatetimeIndex([r[0] for r in rows]))
+
+    class Ticker:
+        def __init__(self, *a, **k): pass
+        def history(self, period, interval):
+            assert interval == "1h", "the daily bar is the thing being avoided"
+            return frame
+
+    monkeypatch.setitem(__import__("sys").modules, "yfinance",
+                        type("m", (), {"Ticker": Ticker, "__spec__": None}))
+    s = load_settings().model_copy(update={"intraday": CFG})
+    w = IntradayWatcher(s, journal, Spy(), clock=lambda: now)
+    got = w._daily_ranges()
+
+    # 8 October is today and is excluded; the two short days are not whole days.
+    assert len(got) == len(want), f"expected {sorted(want)}, got {len(got)} ranges"
+    assert got == [pytest.approx(v) for _, v in sorted(want.items())]
+    assert all(abs(g - 0.0235) < 1e-9 for g in got), "a day's range is its own high minus its own low"
+
+
+def test_no_price_history_means_no_plan_rather_than_a_guess(journal, monkeypatch):
+    """Falling back to the daily bars would quietly resume trading the biased version."""
+    class Ticker:
+        def __init__(self, *a, **k): pass
+        def history(self, period, interval):
+            raise RuntimeError("yahoo is down")
+
+    monkeypatch.setitem(__import__("sys").modules, "yfinance",
+                        type("m", (), {"Ticker": Ticker, "__spec__": None}))
+    s = load_settings().model_copy(update={"intraday": CFG})
+    w = IntradayWatcher(s, journal, Spy(), clock=lambda: datetime(2026, 10, 8, 7, 5, tzinfo=timezone.utc),
+                        price=lambda _s: 1.11894)
+    assert w.run_once() == [] and w.notifier.sent == []
+    assert w._stored_plan(date(2026, 10, 8)) is None
