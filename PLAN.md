@@ -662,6 +662,31 @@ uses a fixed `time(7, 0)` on UTC ticks and so does the engine, so live and backt
 07:00 UTC is 08:00 London in summer and 07:00 London in winter. That inconsistency is in the *research*,
 not in the gap between research and production, and closing it would mean trading something untested.
 
+##### The loudest alert carried the quietest caveat (2026-10-08)
+S9 is a shadow sleeve: it places nothing and its fills are simulated. It also runs the FX rules that
+**failed Gate 1 at an out-of-sample Sharpe of −0.184**, and it is in `HAND_EXECUTED`, so its messages go
+to the phone. They read:
+
+> 🟢 S9 Bought 60000 EUR/USD @ 1.11894 (trend up)
+> 🛑 Stop 1.11456 · risks $263 if it is hit
+
+Identical in shape to a real fill from the paper account, with a stop and a dollar figure beside it —
+the most actionable-looking thing this system sends, for the one strategy it has concluded does not work.
+The dashboard states that verdict plainly; the phone did not state it at all. Meanwhile the intraday
+watcher, whose test result is *positive*, ends every message with "Shadow test, EUR/USD only. Not
+advice." The caveats were exactly the wrong way round.
+
+Shadow fills now say "would have bought", carry a 👻 rather than a green circle, and end with a line
+saying nothing was traded, that these rules failed Gate 1, and not to place the trade. Real fills are
+untouched: hedging a real fill with a caveat that does not apply is its own bug.
+
+Found alongside it: three places asked "is this a shadow broker?" as `name != "shadow"`, an exact match,
+so every shadow broker except the one literally called "shadow" was messaged regardless of
+`HAND_EXECUTED`. It agreed with `_should_notify` only by coincidence — `shadow_fx` happens to be
+hand-executed — and a second shadow broker would have been texted to the phone while the method that
+supposedly decides said to stay quiet. One rule decides it now.
+
+
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.

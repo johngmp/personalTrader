@@ -190,14 +190,24 @@ class Engine:
         report.actions += handle_commands(self.notifier, self.journal, self.kill_switch, [self])
 
     def _should_notify(self) -> bool:
-        """Real brokers always message you. Shadow sleeves stay quiet, except the hand-executed ones."""
+        """Real brokers always message you. Shadow sleeves stay quiet, except the hand-executed ones.
+
+        Three other places asked this question as `name != "shadow"`, which matches the name EXACTLY and
+        so said yes to every shadow broker except the one literally called "shadow". It agreed with this
+        method only by coincidence, because shadow_fx happens to be hand-executed; a second shadow
+        broker would have been messaged to your phone while this method said to stay quiet.
+        """
         return not self.broker.name.startswith("shadow") or self.broker.name in HAND_EXECUTED
+
+    def _is_shadow(self) -> bool:
+        return self.broker.name.startswith("shadow")
 
     def _sync_fills(self, report: RunReport) -> None:
         for fill in self.executor.sync_open_orders():
             report.fills.append(fill)
             if self._should_notify():
-                self.notifier.send(_fill_text(fill, asset_class=self.settings.asset_class(fill.symbol)))
+                self.notifier.send(_fill_text(fill, asset_class=self.settings.asset_class(fill.symbol),
+                                              shadow=self._is_shadow()))
 
     def _reconcile(self, report: RunReport) -> None:
         """Journal holdings (this broker's sleeves together) must equal the broker's position in each symbol."""
@@ -229,7 +239,7 @@ class Engine:
                 self._cancel_stop(state)
                 self.journal.delete_position_state(state["sleeve_id"], state["symbol"])
                 report.actions.append(f"{state['sleeve_id']} {state['symbol']} position closed")
-                if self.broker.name != "shadow":
+                if self._should_notify():
                     self.notifier.send(f"✅ {state['sleeve_id']} closed its {state['symbol']} position.")
 
     def _protect(self, report: RunReport) -> None:
@@ -617,10 +627,10 @@ class Engine:
             report.actions.append(f"sent {what}")
             for fill in result.fills or []:
                 report.fills.append(fill)
-                if self.broker.name != "shadow":
+                if self._should_notify():
                     self.notifier.send(_fill_text(fill, order.reason, self.settings.asset_class(order.symbol),
-                                                  stop=order.stop_price))
-            if not result.fills and order.order_type is OrderType.MARKET and self.broker.name != "shadow":
+                                                  stop=order.stop_price, shadow=self._is_shadow()))
+            if not result.fills and order.order_type is OrderType.MARKET and self._should_notify():
                 self.notifier.send(f"🕒 Queued {what}; fills when the market opens.")
         return result
 
@@ -720,7 +730,7 @@ class Engine:
 
 
 def _fill_text(fill: Fill, reason: str = "", asset_class: AssetClass | None = None,
-               stop: float | None = None) -> str:
+               stop: float | None = None, shadow: bool = False) -> str:
     """One message that is a complete instruction.
 
     The stop is on here because of how this reads on a phone when you are the one placing the trade. The
@@ -728,17 +738,30 @@ def _fill_text(fill: Fill, reason: str = "", asset_class: AssetClass | None = No
     up to fifteen minutes later. In between you either sat out of a trade the rules had taken, or you
     were in it with nothing protecting you. Both are worse than waiting, and neither is what the backtest
     measured, because there the stop exists from the moment of entry.
+
+    `shadow` matters more than it looks. A shadow sleeve places nothing: its fills are simulated, and the
+    only enabled one runs the FX rules that FAILED Gate 1 at an out-of-sample Sharpe of -0.184, meaning
+    they lost to leaving the money in T-bills. That message read "S9 Bought 60000 EUR/USD @ 1.11894" with
+    a stop and a dollar figure beside it -- identical in shape to a real fill, and the most
+    actionable-looking thing this system sends. The dashboard says the verdict plainly; the phone did not
+    say it at all, so the one alert that should carry the loudest caveat carried none.
     """
     verb = "Bought" if fill.side is Side.BUY else "Sold"
+    if shadow:
+        verb = "would have bought" if fill.side is Side.BUY else "would have sold"
     extra = f" ({reason})" if reason else ""
     ac = asset_class or AssetClass.US_EQUITY
     money = "" if ac is AssetClass.FOREX else "$"   # 1.14890 is a rate, not a dollar amount
-    text = (f"{'🟢' if fill.side is Side.BUY else '🔴'} {fill.sleeve_id} {verb} {fill.qty:g} {fill.symbol} "
-            f"@ {money}{format_price(fill.price, ac)}{extra}")
+    text = (f"{'👻' if shadow else ('🟢' if fill.side is Side.BUY else '🔴')} {fill.sleeve_id} {verb} "
+            f"{fill.qty:g} {fill.symbol} @ {money}{format_price(fill.price, ac)}{extra}")
     if stop and fill.side is Side.BUY:
         risk = (fill.price - stop) * fill.qty
         text += (f"\n🛑 Stop {money}{format_price(stop, ac)}"
-                 + (f" · risks ${risk:,.0f} if it is hit" if risk > 0 else ""))
+                 + (f" · {'would risk' if shadow else 'risks'} ${risk:,.0f} if it is hit" if risk > 0 else ""))
+    if shadow:
+        text += ("\n\n⚠️ Shadow test — nothing was traded and this is NOT a recommendation. These rules "
+                 "failed Gate 1 out of sample, so they are being recorded to see whether that holds, not "
+                 "followed. Do not place this trade.")
     return text
 
 

@@ -803,3 +803,50 @@ def test_a_resting_stop_does_not_block_the_exit_it_is_being_replaced_by(world):
     sent = world["broker"].submitted[before:]
     assert [o.symbol for o in sent] == ["SPY"], "a stop standing in the way must not cancel the exit"
     assert sent[0].side is Side.SELL
+
+
+# --- shadow alerts must not read as instructions ---------------------------------------------------
+
+def test_a_shadow_fill_says_it_is_not_a_trade_to_place():
+    """The only enabled shadow sleeve runs the FX rules that FAILED Gate 1 at -0.184 out of sample.
+
+    Its message read "S9 Bought 60000 EUR/USD @ 1.11894" with a stop and a dollar risk beside it --
+    identical in shape to a real fill from the paper account, and the most actionable-looking thing this
+    system sends. The dashboard states the verdict plainly. The phone did not state it at all, so the
+    one alert that should carry the loudest caveat carried none.
+    """
+    from trader.engine.live import _fill_text
+    from trader.models import Fill
+
+    fill = Fill(sleeve_id="S9", symbol="EUR/USD", side=Side.BUY, qty=60_000, price=1.11894,
+                ts=datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc), client_order_id="x",
+                broker_order_id="y", cost_haircut_usd=0.0)
+
+    shadow = _fill_text(fill, "trend up", AssetClass.FOREX, stop=1.11456, shadow=True)
+    assert "would have bought" in shadow, "a simulated fill must not claim a purchase happened"
+    assert "NOT a recommendation" in shadow and "Do not place this trade" in shadow
+    assert "failed Gate 1" in shadow, "the reason not to follow it belongs in the message"
+    assert "would risk" in shadow
+
+    real = _fill_text(fill, "trend up", AssetClass.FOREX, stop=1.11456)
+    assert real.startswith("🟢") and "Bought 60000" in real
+    assert "Shadow test" not in real, "a real fill must not be hedged with a caveat that does not apply"
+
+
+def test_one_rule_decides_who_gets_messaged():
+    """Three places asked this as `name != "shadow"`, which matches the name EXACTLY.
+
+    So every shadow broker except the one literally called "shadow" was messaged, regardless of
+    HAND_EXECUTED. It agreed with _should_notify only by coincidence -- shadow_fx happens to be
+    hand-executed -- and a second shadow broker would have been texted to the phone while the method
+    that supposedly decides said to stay quiet.
+    """
+    import inspect
+
+    from trader.engine import live
+
+    # The code form, not the prose: _should_notify's own docstring quotes the bug it replaced, and
+    # matching that was a false positive this test produced on its first run.
+    code = "".join(line.split("#")[0] for line in inspect.getsource(live).splitlines())
+    assert 'self.broker.name != "shadow"' not in code, "the exact-match test IS the bug; ask _should_notify"
+    assert code.count("def _should_notify") == 1
