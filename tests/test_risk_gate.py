@@ -156,13 +156,22 @@ def test_duplicate_orders_within_window_are_blocked(gate):
     assert gate.check(buy(), ctx(recent_orders=other_sleeve)).approved
 
 
-def test_max_orders_per_day(gate):
-    assert failed(gate.check(buy(), ctx(orders_today=60))) == {"max_orders_per_day"}
-    assert gate.check(buy(), ctx(orders_today=59)).approved
+def test_max_orders_per_day(gate, settings):
+    """The boundary comes from the configured cap, not a literal.
+
+    This hardcoded 60 and 59, so raising max_orders_per_day to 150 on 2026-10-08 failed a test about
+    whether the rule works at its boundary. The rule is "at the cap you are refused, one below you are
+    not", and that is true at any cap.
+    """
+    cap = settings.risk.account.max_orders_per_day
+    assert failed(gate.check(buy(), ctx(orders_today=cap))) == {"max_orders_per_day"}
+    assert gate.check(buy(), ctx(orders_today=cap - 1)).approved
 
 
-def test_every_failure_is_reported_not_just_the_first(gate):
-    d = gate.check(buy(notional=5_000, stop=None), ctx(kill_switch_active=True, orders_today=99))
+def test_every_failure_is_reported_not_just_the_first(gate, settings):
+    cap = settings.risk.account.max_orders_per_day
+    d = gate.check(buy(notional=5_000, stop=None),
+                   ctx(kill_switch_active=True, orders_today=cap + 39))
     assert {"kill_switch", "max_orders_per_day", "max_position_of_sleeve", "stop_required"} <= failed(d)
 
 

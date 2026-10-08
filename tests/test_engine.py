@@ -347,26 +347,47 @@ def test_s8_decides_on_its_whole_widened_basket(settings, tmp_path):
     journal.close()
 
 
-def test_s8_at_the_shipped_order_budget_starves_its_stops(settings, tmp_path):
-    """Why S8 ships DISABLED: 40 markets need 80 orders to cold-start, and the account allows 60.
+def test_too_small_an_order_budget_starves_the_stops(settings, tmp_path):
+    """The failure mode the budget exists to prevent, pinned at a deliberately low cap.
 
     An entry and its protective stop are two orders. The entries go first, so when the budget runs out
     it is the STOPS that are refused -- open positions with nothing protecting them for the rest of the
     day, which is the single failure this system exists to prevent. The budget is account-wide and
     shadow orders count against it too, so a research sleeve can starve B0's and S1's stops as well.
-    Raising max_orders_per_day in config/risk.yaml is the fix, and that file is the user's to change.
+
+    This used to assert the SHIPPED cap was 60 and then show it starving. That made the test a record
+    of one day's config rather than of the behaviour: raising the cap to 150 on 2026-10-08 would have
+    failed it, which says nothing about whether the engine is sound. It now sets its own low cap, so it
+    keeps describing the danger whatever risk.yaml happens to say.
     """
-    shipped = settings.risk.account.max_orders_per_day
-    assert shipped == 60, f"risk.yaml now allows {shipped}/day; re-check whether 40 markets still fit"
+    settings.risk.account.max_orders_per_day = 60
 
     engine, journal, _broker, _full, symbols = _wide_world(settings, tmp_path)
     report = engine.run_once()
 
     starved = [p for p in report.problems if "stop" in p and "max_orders_per_day" in p]
-    assert starved, f"expected starved stops at a {shipped}-order budget, got {report.problems}"
+    assert starved, f"expected starved stops at a 60-order budget, got {report.problems}"
     # The damage is specific: positions are open and some of them have no stop at the broker.
     held = set(journal.sleeve_holdings("S8"))
     stopped = {o.symbol for o in _broker.get_open_orders()
                if o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)}
     assert held - stopped, "budget was exhausted yet every position still had a stop"
     journal.close()
+
+
+def test_the_shipped_budget_covers_a_cold_start_of_everything_enabled(settings):
+    """The other half of the starvation test: that the real cap is big enough for the real config.
+
+    Worst case is every enabled sleeve entering every symbol it can on one day, each needing an entry
+    and a protective stop. That is rare -- it needs most markets trending at once -- which is exactly
+    why it cannot be left to chance: it would pass every day until the day the strategies are busiest,
+    and then refuse the stops.
+    """
+    worst = 0
+    for sleeve in settings.sleeves.values():
+        if sleeve.enabled:
+            worst += 2 * len(sleeve.symbols)        # an entry and a stop for each
+    cap = settings.risk.account.max_orders_per_day
+    assert cap >= worst, (
+        f"max_orders_per_day is {cap} but a cold start of the enabled sleeves could want {worst}. "
+        "The overflow lands on the STOPS, leaving positions unprotected.")

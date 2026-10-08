@@ -98,8 +98,7 @@ sleeves:
   # --- Shadow tests: live prices, NO orders sent (research before a paper slice) --------------------
   - id: S8
     name: Trend following, diversified (40 markets)
-    enabled: false
-    # BLOCKED, waiting on one number in config/risk.yaml -- see the note at the bottom of this entry.
+    enabled: true            # unblocked 2026-10-08: risk.yaml max_orders_per_day raised 60 -> 150
     # Promoted shadow -> paper on 2026-10-03, after Gate 1 PASSED on the widened 40-market basket
     # (out-of-sample Sharpe 0.85 vs buy-and-hold 0.62; deflated Sharpe 99.3% after 90 distinct trials).
     # Still PRETEND money: risk.yaml mode=paper and the Alpaca key is a paper key.
@@ -128,15 +127,14 @@ sleeves:
     # keep 95% of the Sharpe, deflated Sharpe 99.3% confident after 90 distinct trials, profitable
     # out-of-sample on 29 of the 40 symbols.
     #
-    # WHY THIS IS STILL DISABLED. A cold start on 40 markets wants 80 orders: an entry and a protective
-    # stop for each. risk.yaml caps the whole ACCOUNT at max_orders_per_day: 60, shared with B0 and S1,
-    # and shadow orders count too (they get a broker_order_id). Measured, not guessed: with the cap
-    # lifted a cold start placed exactly 80; at 60 the entries fill and then the STOPS get refused --
-    # "could not place S8 stop for QQQ: max_orders_per_day". Positions open, unprotected, for the rest
-    # of the day. That is the one failure this system is built to prevent, so S8 stays off until
-    # max_orders_per_day is raised (150 covers a cold start plus stop maintenance with headroom, and
-    # still catches a runaway loop, which would be thousands). risk.yaml says only you change it.
-    # test_s8_at_the_shipped_order_budget_starves_its_stops pins this so it cannot be forgotten.
+    # WHAT WAS BLOCKING IT, and why the budget matters. A cold start on 40 markets wants 80 orders: an
+    # entry and a protective stop for each. risk.yaml used to cap the whole ACCOUNT at 60, shared with
+    # B0 and S1, and shadow orders count too (they get a broker_order_id). Measured, not guessed: with
+    # the cap lifted a cold start placed exactly 80; at 60 the entries filled and then the STOPS were
+    # refused -- "could not place S8 stop for QQQ: max_orders_per_day" -- leaving positions open and
+    # unprotected for the rest of the day. The cap was raised to 150 on 2026-10-08, which covers a cold
+    # start plus stop maintenance. test_s8_at_the_shipped_order_budget_starves_its_stops pins the
+    # failure mode so a future reduction cannot quietly bring it back.
 
   - id: S8S
     name: Trend following, diversified (19 markets, shadow archive)

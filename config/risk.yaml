@@ -9,7 +9,13 @@ account:
   max_daily_loss_pct: 3       # block new entries for the rest of the day
   max_drawdown_halt_pct: 15   # engage the kill switch; needs `trader resume`
   max_correlated_exposure_pct: 40
-  max_orders_per_day: 60
+  # Raised 60 -> 150 on 2026-10-08, at your request, to let S8 run on 40 markets.
+  # A cold start needs an entry AND a protective stop for each market it enters: measured with the cap
+  # lifted, exactly 80 orders. At 60 the entries filled and then the STOPS were refused, which leaves
+  # open positions unprotected for the rest of the day -- the one failure this system exists to prevent.
+  # 150 covers a full cold start plus stop maintenance with headroom, and still catches a runaway loop,
+  # which would be thousands rather than dozens.
+  max_orders_per_day: 150
 
 sleeve_defaults:
   max_position_pct_of_sleeve: 25
