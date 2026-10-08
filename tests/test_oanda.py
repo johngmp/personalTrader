@@ -174,7 +174,12 @@ class Bars:
 def test_two_brokers_each_trade_only_their_own_sleeves(settings, journal):
     # Pin the broker here rather than inheriting it from config/sleeves.yaml: this test is about routing
     # sleeves to the right broker, and it shouldn't break when a sleeve is repointed at a different one.
+    # Capital raised above the config's 10,000 so the sleeve can afford every market it is given.
+    # OANDA trades whole units and gold is ~$3,830 each, which a $2,450 slice of $10,000 cannot buy --
+    # so the run legitimately reported "XAU/USD not affordable" and failed an assertion about routing.
+    # A fixture that hands a sleeve a market it cannot trade is testing two things at once.
     s4 = settings.sleeves["S4"].model_copy(update={"enabled": True, "broker": "oanda",
+                                                   "capital_usd": 25_000,
                                                    "params": {"fast": 50, "slow": 150, "atr_mult": 3.5}})
     settings.sleeves["S4"] = s4
     # Same reason the broker is pinned above: this test is about routing, and S8's 40-market basket is

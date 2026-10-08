@@ -391,3 +391,60 @@ def test_the_shipped_budget_covers_a_cold_start_of_everything_enabled(settings):
     assert cap >= worst, (
         f"max_orders_per_day is {cap} but a cold start of the enabled sleeves could want {worst}. "
         "The overflow lands on the STOPS, leaving positions unprotected.")
+
+
+def test_a_market_the_sleeve_cannot_afford_is_raised_not_swallowed(settings, tmp_path):
+    """The silent failure that nearly went unnoticed on 2026-10-08.
+
+    S8 wanted SPY, QQQ and MDY. Each was allocated $544 against share prices of $777/$758/$664, all
+    three floored to zero whole shares, and NOTHING was ordered or reported -- while the Gate 1
+    backtest held all three, because it sized fractionally. The sleeve looked like it was running the
+    tested basket while missing its core equity exposure.
+    """
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    # A sleeve far too small to buy a single share of anything it wants.
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(update={"enabled": True, "capital_usd": 50.0})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    for s, df in bars.full.items():
+        broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+    engine = Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                    executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                    fill_wait_s=0)
+    report = engine.run_once()
+
+    unaffordable = [p for p in report.problems if "not affordable" in p]
+    assert unaffordable, f"an unaffordable market must be reported, got {report.problems}"
+    assert "Gate 1" in unaffordable[0], "say what the consequence is, not just that it happened"
+    journal.close()
+
+
+def test_the_unaffordable_alert_fires_once_a_day_not_every_run(settings, tmp_path):
+    """The engine runs every fifteen minutes and the same symbols stay unaffordable all day. Alerting
+    on each run is how a real warning gets trained into background noise."""
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(update={"enabled": True, "capital_usd": 50.0})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    for s, df in bars.full.items():
+        broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+
+    def run():
+        engine = Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                        executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                        fill_wait_s=0)
+        return engine.run_once()
+
+    first = [p for p in run().problems if "not affordable" in p]
+    second = [p for p in run().problems if "not affordable" in p]
+    assert first, "the first run of the day must say so"
+    assert not second, "the second run must not repeat it"
+    journal.close()

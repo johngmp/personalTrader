@@ -65,6 +65,10 @@ class RunReport:
     actions: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     mismatched: set[str] = field(default_factory=set)
+    # Markets a sleeve wanted but could not afford a single share of. Collected across the run and
+    # raised as ONE problem at the end: twenty separate alerts for a broad rally would be noise, and
+    # noise is how this gets ignored.
+    unaffordable: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = [f"{len(self.fills)} fill(s)", f"{len(self.actions)} action(s)"]
@@ -120,6 +124,7 @@ class Engine:
             ("position state", self._refresh_states),
             ("protective stops", self._protect),
             ("decisions", self._decide),
+            ("unaffordable markets", self._report_unaffordable),
             ("position state", self._refresh_states),  # register positions filled just now...
             ("protective stops", self._protect),       # ...so they get their stop in this same run
             ("sleeve values", self._record_equity),
@@ -141,6 +146,23 @@ class Engine:
         return report
 
     # --- steps ------------------------------------------------------------------------------------
+
+    def _report_unaffordable(self, report: RunReport) -> None:
+        """One alert per run naming every market the sleeve wanted and could not afford a share of.
+
+        Raised once per day per sleeve, not once per run: the engine runs every fifteen minutes and the
+        same three symbols would be unaffordable all day, which would train you to ignore it.
+        """
+        if not report.unaffordable:
+            return
+        key = f"unaffordable:{self.broker.name}:{self.clock().date()}"
+        if self.journal.kv_get(key) is not None:
+            self.journal.log(f"still unaffordable: {', '.join(report.unaffordable)}", level="warning")
+            return
+        self.journal.kv_set(key, "1")
+        report.problems.append(
+            f"{len(report.unaffordable)} market(s) wanted but not affordable at this sleeve's capital: "
+            f"{', '.join(report.unaffordable)}. The sleeve is not holding the basket that passed Gate 1.")
 
     def _handle_commands(self, report: RunReport) -> None:
         report.actions += handle_commands(self.notifier, self.journal, self.kill_switch, [self])
@@ -425,7 +447,14 @@ class Engine:
         if step is not None:  # whole shares at Alpaca, whole units at OANDA
             qty = self._round_qty(symbol, dollars / price)
             if qty < step[1]:
+                # A problem, not just an action. This is how a sleeve quietly stops being the strategy
+                # that was backtested: on 2026-10-08 S8 wanted SPY, QQQ and MDY, each was allocated
+                # $544 against share prices of $777/$758/$664, all three floored to zero shares, and
+                # nothing was ordered or reported. The backtest held them, because it sized
+                # fractionally. Silence there is the worst outcome -- the sleeve looks like it is
+                # running the tested basket while missing its core holdings.
                 report.actions.append(f"{sleeve_id} skipped {symbol}: ${dollars:,.0f} is below the minimum order size")
+                report.unaffordable.append(f"{symbol} (${dollars:,.0f} < 1 share at ${price:,.2f})")
                 return
             order = OrderRequest(sleeve_id=sleeve_id, symbol=symbol, side=Side.BUY, qty=qty, stop_price=stop,
                                  reason=reason)
