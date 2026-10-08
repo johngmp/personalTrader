@@ -240,7 +240,10 @@ class Engine:
                 self.journal.delete_position_state(state["sleeve_id"], state["symbol"])
                 report.actions.append(f"{state['sleeve_id']} {state['symbol']} position closed")
                 if self._should_notify():
-                    self.notifier.send(f"✅ {state['sleeve_id']} closed its {state['symbol']} position.")
+                    self.notifier.send(
+                        f"👻 {state['sleeve_id']} would have closed its {state['symbol']} position "
+                        f"(shadow test — nothing was held)." if self._is_shadow() else
+                        f"✅ {state['sleeve_id']} closed its {state['symbol']} position.")
 
     def _protect(self, report: RunReport) -> None:
         market = self.broker.get_clock()
@@ -360,8 +363,9 @@ class Engine:
             self.journal.kv_set(key, self.clock().isoformat(timespec="seconds"))
             report.actions.append(f"{sleeve.id} retirement complete: flat, nothing in flight")
             if self._should_notify():
+                sold = "would have sold" if self._is_shadow() else "sold"
                 self.notifier.send(
-                    f"🏁 {sleeve.id} is retired. It sold the last of its positions and will not trade "
+                    f"🏁 {sleeve.id} is retired. It {sold} the last of its positions and will not trade "
                     f"again.\nIt behaves as disabled from now on; set enabled: false in sleeves.yaml "
                     f"when convenient.")
         return True
@@ -632,7 +636,9 @@ class Engine:
                     self.notifier.send(_fill_text(fill, order.reason, self.settings.asset_class(order.symbol),
                                                   stop=order.stop_price, shadow=self._is_shadow()))
             if not result.fills and order.order_type is OrderType.MARKET and self._should_notify():
-                self.notifier.send(f"🕒 Queued {what}; fills when the market opens.")
+                self.notifier.send(
+                    f"👻 {what} would be queued for the next open (shadow test — no order was sent)."
+                    if self._is_shadow() else f"🕒 Queued {what}; fills when the market opens.")
         return result
 
     def _place_stop(self, sleeve_id: str, symbol: str, qty: float, stop: float, asset_class: AssetClass,
@@ -790,11 +796,20 @@ def _stop_move_text(sleeve_id: str, symbol: str, old: float | None, new: float,
 
 
 def status_text(engines: list[Engine]) -> str:
+    """The daily summary, which is the message most likely to be read and least likely to be questioned.
+
+    A shadow engine was listed as "<name> paper account $X" directly beneath the real Alpaca one, and its
+    sleeve's return beside the real sleeves'. A shadow holds no account and placed none of those trades,
+    and the only enabled one runs rules that failed Gate 1, so a glance down this list read a simulation
+    of a losing strategy as money that had been made.
+    """
     lines = [f"Kill switch: {'ON' if engines[0].kill_switch.active else 'off'}"]
     for engine in engines:
         account = engine.executor.account()
         day = account.equity - (account.last_equity or account.equity)
-        lines.append(f"{engine.broker.name} paper account ${account.equity:,.0f} (today {day:+,.0f})")
+        lines.append(f"{engine.broker.name} simulated, NOT an account ${account.equity:,.0f} "
+                     f"(today {day:+,.0f})" if engine._is_shadow() else
+                     f"{engine.broker.name} paper account ${account.equity:,.0f} (today {day:+,.0f})")
         for sleeve in engine._live_sleeves():
             equity, invested = engine.sleeve_value(sleeve)
             lines.append(f"  {sleeve.id} {sleeve.name}: ${equity:,.0f} ({equity / sleeve.capital_usd - 1:+.2%}), "

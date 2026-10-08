@@ -694,6 +694,15 @@ the most direct way this system could cost money — more direct than the fill m
 is phrased as something to go and do. It now says a stop *would* move and not to move a real one. A
 genuinely hand-executed real broker, if one is ever configured, still gets the instruction it needs.
 
+Sweeping every message that can reach the phone — rather than guessing where else the same mistake was —
+found four more of it. A shadow sleeve announced that it "closed its EUR/USD position" (it held none),
+that an order was "Queued, fills when the market opens" (none was sent anywhere), that a retirement
+"sold the last of its positions", and, in the **daily summary**, listed itself as "shadow_fx paper
+account $9,973" directly beneath the real Alpaca account with its return beside the real sleeves'. That
+last one is the message most likely to be read and least likely to be questioned: a glance down the list
+read a simulation of a losing strategy as money that had been made. It now reads "simulated, NOT an
+account". None of these were actionable on their own, which is exactly why they had survived.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

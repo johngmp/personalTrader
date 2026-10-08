@@ -868,3 +868,43 @@ def test_a_shadow_stop_move_does_not_tell_you_to_move_a_real_stop():
     real = _stop_move_text("S4", "EUR/USD", 1.11456, 1.11600, AssetClass.FOREX)
     assert "Move your stop if you are following this by hand." in real
     assert "Shadow test" not in real
+
+
+def test_the_daily_summary_does_not_pass_a_simulation_off_as_an_account(settings, tmp_path):
+    """This is the message most likely to be read and least likely to be questioned.
+
+    A shadow engine was listed as "<name> paper account $X" directly beneath the real Alpaca one, with
+    its sleeve's return beside the real sleeves'. A shadow holds no account and placed none of those
+    trades, and the only enabled one runs rules that failed Gate 1 -- so a glance down the list read a
+    simulation of a losing strategy as money that had been made.
+    """
+    from trader.engine.live import status_text
+    from trader.journal.db import Journal
+
+    journal = Journal(tmp_path / "j.db")
+    real = Engine(settings, SimBroker(cash=100_000, name="alpaca"), journal, FakeBars(),
+                  notifier=NullNotifier())
+    shadow = Engine(settings, SimBroker(cash=10_000, name="shadow_fx"), journal, FakeBars(),
+                    notifier=NullNotifier())
+    text = status_text([real, shadow])
+
+    assert "alpaca paper account" in text
+    assert "shadow_fx paper account" not in text, "a shadow holds no account"
+    assert "simulated, NOT an account" in text
+    journal.close()
+
+
+def test_a_shadow_never_claims_a_trade_happened(settings, tmp_path):
+    """Three more messages asserted real events for a sleeve that places nothing: a position "closed",
+    an order "Queued ... fills when the market opens", and a retirement that "sold" its positions."""
+    import inspect
+
+    from trader.engine import live
+
+    source = inspect.getsource(live)
+    # Each of the three now has a shadow-aware form beside it.
+    assert "would have closed its" in source
+    assert "would be queued for the next open" in source
+    assert 'sold = "would have sold" if self._is_shadow() else "sold"' in source
+    # And every one of them is reached through the single notify rule.
+    assert source.count("_should_notify()") >= 5
