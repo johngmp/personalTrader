@@ -10,7 +10,7 @@ from typing import Callable
 from trader.brokers.base import Broker, LiveTradingRefused
 from trader.config import CostModel, Settings
 from trader.journal.db import Journal, trading_day_start
-from trader.models import AssetClass, BrokerOrder, Fill, OrderRequest, OrderStatus, Quote, RiskDecision
+from trader.models import AssetClass, BrokerOrder, Fill, MarketClock, OrderRequest, OrderStatus, Quote, RiskDecision
 from trader.risk.gate import RiskContext, RiskGate
 from trader.risk.kill_switch import KillSwitch
 
@@ -71,8 +71,26 @@ class Executor:
             recent_orders=self.journal.recent_orders(timedelta(seconds=guards.duplicate_order_window_s), now),
             kill_switch_active=self.kill_switch.active,
             kill_switch_reason=self.kill_switch.reason,
-            market=self.broker.get_clock() if asset_class is AssetClass.US_EQUITY else None,
+            market=self._market(asset_class, now),
         )
+
+    def _market(self, asset_class: AssetClass | None, now: datetime) -> MarketClock | None:
+        """A clock, so the gate can tell "the market is shut" from "the feed has died".
+
+        It only ever got one for US equities, which left the FOREX arm of the gate's freshness check
+        unreachable -- and that arm exists precisely to judge a closed-market quote against the last
+        close. So an FX order over a weekend was refused as "price is 171982s old", blaming the feed for
+        a market that was simply shut. Two of the nine refusals in the journal say exactly that.
+
+        Crypto stays None deliberately: it never closes, so a stale crypto price really is a fault.
+        """
+        if asset_class is AssetClass.US_EQUITY:
+            return self.broker.get_clock()
+        if asset_class is AssetClass.FOREX:
+            from trader.brokers.oanda import fx_clock
+
+            return fx_clock(now)
+        return None
 
     def submit(self, order: OrderRequest, wait_for_fill_s: float = 10.0) -> ExecutionResult:
         asset_class = self.settings.asset_class(order.symbol)

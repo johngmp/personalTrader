@@ -157,3 +157,42 @@ def test_weekend_stub_bars_are_dropped():
     kept = list(drop_forming_bar(df, datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)).index.dayofweek)
     assert 5 not in kept and 6 not in kept          # no Saturday, no Sunday
     assert kept == [4, 0]                            # Friday and Monday survive
+
+
+def test_the_executor_actually_hands_the_gate_a_forex_clock(settings, tmp_path):
+    """The weekend rule above was right, tested, and never reached production.
+
+    Every test of it builds a RiskContext by hand and passes a market clock in. The executor, which
+    builds the real one, supplied a clock only for US equities -- so in production `ctx.market` was None
+    for forex, the FOREX arm of that freshness check was unreachable, and a weekend FX order was refused
+    as "price is 171982s old (limit 300s)". Two of the nine refusals in the journal say exactly that: the
+    feed blamed for a market that was simply shut.
+
+    A unit test on the gate cannot catch a caller that never passes the argument, which is the whole
+    reason this one asserts on the context the executor builds.
+    """
+    from datetime import datetime, timezone
+
+    from trader.brokers.sim import SimBroker
+    from trader.engine.executor import Executor
+    from trader.journal.db import Journal
+    from trader.models import OrderRequest, Side
+
+    journal = Journal(tmp_path / "j.db")
+    broker = SimBroker(cash=10_000, name="alpaca")
+    saturday = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)      # forex is shut
+    for symbol, price in (("EUR/USD", 1.1189), ("SPY", 500.0), ("BTC/USD", 60_000.0)):
+        broker.set_price(symbol, price, saturday)
+    ex = Executor(settings, broker, journal, clock=lambda: saturday, sleep=lambda _: None)
+
+    def market_for(symbol):
+        order = OrderRequest(sleeve_id="S1", symbol=symbol, side=Side.BUY, notional=100.0,
+                             stop_price=broker.get_quote(symbol, settings.asset_class(symbol)).price * 0.98)
+        return ex.build_context(order).market
+
+    fx = market_for("EUR/USD")
+    assert fx is not None, "forex got no clock, so the gate could not tell shut from dead"
+    assert fx.is_open is False, "the forex market is shut on a Saturday"
+    assert market_for("SPY") is not None, "equities always had one"
+    assert market_for("BTC/USD") is None, "crypto never closes, so a stale price really is a fault"
+    journal.close()
