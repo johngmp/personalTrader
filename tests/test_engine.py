@@ -622,3 +622,128 @@ def test_retirement_does_not_wait_for_a_new_daily_bar(settings, tmp_path):
     engine_now().run_once()
     assert not journal.sleeve_holdings("S1"), "it must exit on the same bar, not wait for tomorrow"
     journal.close()
+
+
+def test_a_cancelled_stop_is_still_tracked_until_the_broker_confirms(settings, tmp_path):
+    """Asking to cancel is not the same as it being cancelled.
+
+    An equity stop cancelled while the market is shut sits at "pending_cancel" until the open, which the
+    adapter rightly maps to an OPEN status. The engine used to write CANCELED into the journal itself,
+    which took the order out of open_orders() -- so sync_open_orders stopped checking it, and if the
+    cancel were refused, or the stop filled first, nothing would ever notice. Observed live on
+    2026-10-08 retiring S1: our journal said "canceled" while Alpaca said "pending_cancel" on SPY and
+    QQQ both.
+    """
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    for s, df in bars.full.items():
+        broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+    engine = Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                    executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                    fill_wait_s=0)
+    engine.run_once()
+
+    held = [s for s in journal.sleeve_holdings("S1") if journal.position_state("S1", s)]
+    symbol = next(s for s in held if journal.position_state("S1", s)["stop_order_id"])
+    state = journal.position_state("S1", symbol)
+    stop_id = state["stop_order_id"]
+
+    engine._cancel_stop(state)
+
+    row = journal.order(stop_id)
+    assert row["status"] != OrderStatus.CANCELED.value, (
+        "the engine must not record a cancellation the broker has not confirmed")
+    # The sleeve no longer counts on that stop, but the ORDER stays tracked so the next sync
+    # resolves it to whatever the broker actually did.
+    assert journal.position_state("S1", symbol)["stop_order_id"] is None
+    assert any(r["client_order_id"] == stop_id for r in journal.open_orders("alpaca")), \
+        "a pending cancel must stay in open_orders so sync keeps watching it"
+    journal.close()
+
+
+def test_a_retirement_completes_itself_once_the_sleeve_is_flat(settings, tmp_path):
+    """Winding down should finish on its own, not wait for someone to remember.
+
+    Once the sleeve holds nothing and has nothing queued it is done: `retiring` means it wants nothing,
+    so it cannot enter again. It stops being processed and says so once. The config flag is left alone
+    deliberately -- an engine that rewrites its own configuration unattended is a surprise nobody wants
+    at 3am -- but the behaviour from here is exactly that of a disabled sleeve.
+    """
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    sent = []
+
+    class Spy(NullNotifier):
+        def send(self, text):
+            sent.append(text)
+
+    def engine_now():
+        for s, df in bars.full.items():
+            broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+        return Engine(settings, broker, journal, bars, notifier=Spy(), clock=clock,
+                      executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                      fill_wait_s=0)
+
+    engine_now().run_once()
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(update={"retiring": True})
+    clock.now += timedelta(hours=24)
+    bars.add_day({})
+    engine_now().run_once()                              # sells everything
+    assert not journal.sleeve_holdings("S1")
+
+    sent.clear()
+    clock.now += timedelta(hours=24)
+    bars.add_day({})
+    report = engine_now().run_once()                     # first run after it is flat
+    assert any("retirement complete" in a for a in report.actions), report.actions
+    assert any("retired" in m.lower() for m in sent), "it should say so once"
+
+    # ...and only once, however many times the engine runs afterwards.
+    sent.clear()
+    clock.now += timedelta(hours=24)
+    bars.add_day({})
+    again = engine_now().run_once()
+    assert not any("retirement complete" in a for a in again.actions)
+    assert not sent, "a finished retirement must not keep announcing itself"
+    journal.close()
+
+
+def test_a_retiring_sleeve_is_not_called_finished_while_anything_is_outstanding(settings, tmp_path):
+    """Two ways to still be busy, and both must block completion.
+
+    Holding positions is the obvious one. The subtle one is an equity sell placed while the market was
+    shut: the journal can already show no holdings while the order sits queued until the open, and
+    calling that finished would stop the engine watching it.
+    """
+    from trader.engine.live import RunReport
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+    for s, df in bars.full.items():
+        broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+    engine = Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                    executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                    fill_wait_s=0)
+    engine.run_once()
+    retiring = settings.sleeves["S1"].model_copy(update={"retiring": True})
+
+    assert journal.sleeve_holdings("S1"), "the first run should have taken positions"
+    assert engine._retirement_done(retiring, RunReport(started=clock.now)) is False, \
+        "a sleeve still holding positions is not finished"
+
+    # A sleeve that is NOT retiring is never 'done', whatever it holds.
+    assert engine._retirement_done(settings.sleeves["S1"], RunReport(started=clock.now)) is False

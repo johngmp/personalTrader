@@ -330,7 +330,35 @@ class Engine:
         cls = LIVE_REGISTRY[sleeve.strategy or sleeve.id]
         return cls(params={**cls.default_params, **sleeve.params}, symbols=list(sleeve.symbols))
 
+    def _retirement_done(self, sleeve: SleeveConfig, report: RunReport) -> bool:
+        """True once a retiring sleeve is flat with nothing left in flight.
+
+        From here it is finished: it holds nothing and, because `retiring` makes it want nothing, it
+        cannot enter again. Processing it further would only re-ask the same question every fifteen
+        minutes. The config flag is left to you -- an engine that rewrites its own configuration
+        unattended is a surprise nobody wants at 3am -- but the behaviour is already that of a disabled
+        sleeve, so there is no hurry and no exposure while it waits.
+        """
+        if not sleeve.retiring:
+            return False
+        if self.journal.sleeve_holdings(sleeve.id):
+            return False
+        if any(r["sleeve_id"] == sleeve.id for r in self.journal.open_orders(self.broker.name)):
+            return False                                  # a sell still queued for the open
+        key = f"retired:{sleeve.id}"
+        if self.journal.kv_get(key) is None:
+            self.journal.kv_set(key, self.clock().isoformat(timespec="seconds"))
+            report.actions.append(f"{sleeve.id} retirement complete: flat, nothing in flight")
+            if self._should_notify():
+                self.notifier.send(
+                    f"🏁 {sleeve.id} is retired. It sold the last of its positions and will not trade "
+                    f"again.\nIt behaves as disabled from now on; set enabled: false in sleeves.yaml "
+                    f"when convenient.")
+        return True
+
     def _decide_sleeve(self, sleeve: SleeveConfig, now: datetime, market: MarketClock, report: RunReport) -> None:
+        if self._retirement_done(sleeve, report):
+            return
         strategy = self._strategy(sleeve)
         bars = {s: self.bars.completed_bars(s, self.settings.asset_class(s), now, market)  # type: ignore[arg-type]
                 for s in sleeve.symbols}
@@ -615,7 +643,16 @@ class Engine:
         row = self.journal.order(state["stop_order_id"])
         if row is not None and OrderStatus(row["status"]).is_open and row["broker_order_id"]:
             self.broker.cancel_order(row["broker_order_id"])
-            self.journal.mark_order(row["client_order_id"], OrderStatus.CANCELED, "canceled by engine")
+            # Deliberately NOT marked canceled here. Asking to cancel is not the same as it being
+            # cancelled: an equity stop cancelled while the market is shut sits at "pending_cancel"
+            # until the open, and the adapter rightly maps that to an OPEN status. Writing CANCELED
+            # ourselves would take it out of open_orders(), so sync_open_orders would stop checking it,
+            # and if the cancel were refused -- or the stop filled first -- we would never find out.
+            # Leaving it open lets the next sync read the broker's own answer, whatever it turns out
+            # to be. Observed on 2026-10-08 retiring S1: our journal said "canceled" while Alpaca still
+            # said "pending_cancel" on both SPY and QQQ.
+            self.journal.log(f"cancel requested for {state['symbol']} stop {row['client_order_id']}",
+                             level="info")
         self.journal.upsert_position_state(state["sleeve_id"], state["symbol"], stop_order_id=None)
 
     def _create_state(self, sleeve_id: str, symbol: str) -> None:
