@@ -129,3 +129,50 @@ def test_journal_matches_broker_when_fees_are_taken_in_coins(settings, journal):
     assert result.status is OrderStatus.FILLED, result.error
     assert journal.sleeve_holdings("S1") == {}
     assert broker.get_positions() == []
+
+
+def test_costs_survive_a_symbol_leaving_the_universe(settings, tmp_path):
+    """`asset_class` reads straight from universe.yaml, so deleting a line from it while a position or an
+    open order still exists made the cost lookup `settings.costs[None]`: "sync fills failed: KeyError:
+    None", every run.
+
+    That is worse than it sounds. Syncing is how the engine learns an order filled, so the journal would
+    stop following the broker while every other part of the system carried on trusting it.
+    """
+    from trader.brokers.sim import SimBroker
+    from trader.engine.executor import Executor
+    from trader.journal.db import Journal
+    from trader.models import AssetClass, OrderRequest, Side
+
+    journal = Journal(tmp_path / "j.db")
+    broker = SimBroker(cash=100_000, name="alpaca")
+    broker.set_price("SPY", 500.0, NOW)
+    ex = Executor(settings, broker, journal, clock=lambda: NOW, sleep=lambda _: None)
+    ex.submit(OrderRequest(sleeve_id="S1", symbol="SPY", side=Side.BUY, qty=1.0, stop_price=490.0,
+                           reason="test"), wait_for_fill_s=0.0)
+    assert journal.last_asset_class("SPY") is AssetClass.US_EQUITY
+
+    # SPY is deleted from universe.yaml while the position is still open.
+    symbols = dict(settings.universe.symbols)
+    symbols.pop("SPY")
+    settings.universe.symbols = symbols
+    assert settings.asset_class("SPY") is None
+
+    assert ex._cost_model("SPY") == settings.costs[AssetClass.US_EQUITY], \
+        "the order recorded what it was; that is a fact, not a guess"
+    journal.close()
+
+
+def test_a_symbol_never_ordered_and_not_in_the_universe_costs_the_most(settings, tmp_path):
+    """If this is going to be wrong about a cost, it should be wrong in the direction that makes a
+    strategy look worse than it was. Crypto is the dearest of the three."""
+    from trader.brokers.sim import SimBroker
+    from trader.engine.executor import Executor
+    from trader.journal.db import Journal
+    from trader.models import AssetClass
+
+    journal = Journal(tmp_path / "j.db")
+    ex = Executor(settings, SimBroker(cash=1_000, name="alpaca"), journal, clock=lambda: NOW,
+                  sleep=lambda _: None)
+    assert ex._cost_model("NEVER/TRADED") == settings.costs[AssetClass.CRYPTO]
+    journal.close()

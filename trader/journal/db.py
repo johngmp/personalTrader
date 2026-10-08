@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from trader.config import CostModel
 from trader.journal.cost_haircut import cost_haircut_usd
-from trader.models import BrokerOrder, Fill, OrderRequest, OrderStatus, RiskDecision, Side
+from trader.models import AssetClass, BrokerOrder, Fill, OrderRequest, OrderStatus, RiskDecision, Side
 from trader.risk.gate import RecentOrder
 
 # Daily limits reset on the US trading day, matching Alpaca's "last_equity" (previous close).
@@ -365,6 +365,17 @@ class Journal:
     def kv_get(self, key: str, default: str | None = None) -> str | None:
         row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
+
+    def last_asset_class(self, symbol: str) -> AssetClass | None:
+        """What this symbol WAS when it was last ordered, for when the universe no longer says.
+
+        Recorded on every order at the time it was placed, so it survives the symbol being deleted from
+        universe.yaml -- which is exactly when it is needed.
+        """
+        row = self.conn.execute(
+            "SELECT asset_class FROM orders WHERE symbol=? AND asset_class IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT 1", (symbol,)).fetchone()
+        return AssetClass(row["asset_class"]) if row else None
 
     def kv_keys(self, like: str) -> list[str]:
         """Keys matching a SQL LIKE pattern, in order. For sweeping state a caller cannot name upfront."""

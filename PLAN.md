@@ -763,6 +763,18 @@ position is deliberately **not** liquidated: removing a symbol from a list is no
 this now", `retiring` already exists for a wind-down, and the position keeps the stop it has. It is
 reported on every run instead, because a holding no strategy is steering should not be quiet.
 
+One layer deeper, the same edit broke fill syncing. `asset_class()` reads straight from `universe.yaml`,
+so deleting a line from it while a position or an open order still exists turned the cost lookup into
+`settings.costs[None]` — `sync fills failed: KeyError: None`, every run. That is worse than it sounds:
+syncing is how the engine learns an order filled, so the journal would stop following the broker while
+every other part of the system carried on trusting it. The journal already records each order's asset
+class **at the time it was placed**, so that is the answer and it is a fact rather than an inference;
+failing even that, crypto's costs are used, because a wrong cost should make a strategy look worse than
+it was, not better.
+
+Both of these are the same shape as the forex clock: two things that must agree, with nothing checking
+that they do. Worth looking for more of them.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

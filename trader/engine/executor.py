@@ -156,4 +156,20 @@ class Executor:
         return bo, fills
 
     def _cost_model(self, symbol: str) -> CostModel:
-        return self.settings.costs[self.settings.asset_class(symbol)]  # type: ignore[index]
+        """Costs for a symbol, which must work even once the symbol has left the universe.
+
+        `asset_class` reads straight from `universe.yaml`, so deleting a line from it while a position or
+        an open order still exists made this `self.settings.costs[None]` -- "sync fills failed: KeyError:
+        None", every run. That is worse than it sounds: syncing is how the engine learns an order filled,
+        so the journal would stop following the broker while every other part of the system kept trusting
+        it. Reproduced on 2026-10-08 by removing SPY from the universe while S1 held 2 shares.
+
+        The journal recorded the asset class on the order itself, at the time it was placed, so that is
+        the answer and it is a fact rather than a guess. Failing even that, crypto is used: it has the
+        highest costs of the three, and if this system is going to be wrong about a cost it should be
+        wrong in the direction that makes a strategy look worse than it was.
+        """
+        asset_class = self.settings.asset_class(symbol)
+        if asset_class is None:
+            asset_class = self.journal.last_asset_class(symbol) or AssetClass.CRYPTO
+        return self.settings.costs[asset_class]
