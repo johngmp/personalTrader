@@ -755,7 +755,6 @@ def render(d: dict) -> str:
         '<p class="subtle" style="padding:.5rem .55rem">Nothing is open. The strategies are in cash.</p>'
     fx = d.get("fx") or {}
     if fx.get("rows"):
-        v = fx.get("verdict") or {}
         shut = "" if fx.get("is_open") else '<span class="pill closed">market shut</span>'
         fx_rows = "".join(
             f"<tr><td>{html.escape(r['symbol'])}</td>"
@@ -763,13 +762,6 @@ def render(d: dict) -> str:
             f"<td class='num'>{(format(r['qty'], 'g') if r['qty'] else '–')}</td>"
             f"<td class='num'>{format_price(r['stop'], AssetClass.FOREX) if r.get('stop') else '–'}</td></tr>"
             for r in fx["rows"])
-        verdict_note = ("" if not v else
-            f'<p class="fxverdict">Gate 1 verdict for these rules: <b class="{"up" if v.get("verdict") == "PASS" else "down"}">'
-            f'{html.escape(str(v.get("verdict")))}</b> — out-of-sample Sharpe '
-            f'{v.get("oos_sharpe")} against cash. '
-            + ("" if v.get("verdict") == "PASS" else
-               "A negative number means these rules lost to leaving the money in T-bills, so this sleeve "
-               "sends nothing to any broker and its signals are not advice to act on.") + "</p>")
         pair_items = ""
         for i, r in enumerate(fx["rows"]):
             series = (fx.get("series") or {}).get(r["symbol"]) or []
