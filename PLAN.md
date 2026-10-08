@@ -497,6 +497,22 @@ outlier within it (+$595, +$756, +$636 sit beside it). Mechanics check out too �
 downloading. Out-of-sample is 34 trades against Gate 1's bar of 50. And the long-only rule means it can
 buy dips but never sell rallies, so if falls and rises revert differently this test cannot see it.
 
+##### The other two pairs came back, and they do not confirm it (2026-10-05)
+EUR/USD **+17.2%/yr**, GBP/USD **+3.0%/yr**, AUD/USD **−1.3%/yr** out-of-sample. So the breadth check
+that mattered most is the one it effectively failed: one pair out of three carries the whole result.
+
+The cause is measurable rather than mysterious, which is the only reason this was not abandoned outright.
+The edge is a fixed number of pips per trade, and the spread is subtracted from it, so the pair with the
+tightest spread keeps the most: EUR/USD's median is 0.5 pips, GBP/USD's 0.9, AUD/USD's 1.3. Gross of
+costs all three are positive. Net, only the cheapest one survives, and **no filter rescues AUD/USD** —
+0.0% of its bars trade under 0.5 pips, so there is no subset of the day where it is cheap enough. That is
+not a parameter that needs tuning; it is the pair being too expensive for an edge this size.
+
+What that licenses is narrow. Running this on EUR/USD alone is defensible, because the mechanism is
+understood and the one pair where it works is the one where the arithmetic says it should. Running it on
+a basket is not. So it ships as **EUR/USD only, as messages for you to place by hand, with no capital
+and no Gate 2 claim** — an honest shadow, not a sleeve.
+
 
 ### Phase 5: Tournament (≥ 90 days, mostly waiting)
 - [ ] Weekly scoreboard in Telegram + dashboard
@@ -529,8 +545,53 @@ and **shadow orders count too** — they get a `broker_order_id`. Measured, not 
 start placed exactly 80; at 60 the entries fill and then the stops are refused, leaving open positions
 unprotected for the rest of the day. That is the one failure this system exists to prevent. Raising
 `max_orders_per_day` to ~150 covers a cold start plus stop maintenance and still catches a runaway loop (which
-would be thousands). `risk.yaml` is the user's file to change, so it has not been touched.
-`test_s8_at_the_shipped_order_budget_starves_its_stops` pins the defect.
+would be thousands). `test_s8_at_the_shipped_order_budget_starves_its_stops` pins the defect.
+
+**Resolved 2026-10-08.** You authorised the edit, so `max_orders_per_day` is now **150** with a comment
+in `risk.yaml` recording why. S8 is **live at $33,000** on the paper account.
+
+#### S1 retired into S8, and what the broker taught us (2026-10-08)
+S8 going live made S1 redundant and then actively harmful. S1 trades 4 markets that are a strict **subset**
+of S8's 40, with identical rules, so both sleeves wanted the same symbols at the same moment — and Alpaca
+refuses a buy while an opposite-side order rests on the same symbol (code `40310000`, a wash trade). S1 was
+not adding diversification; it was blocking S8 from four of its positions. It is therefore `retiring: true`:
+it wants nothing, sells through the ordinary exit path so stops are cancelled and every close is journalled,
+and switches itself off once flat.
+
+Three bugs surfaced only against the real broker, none of which a backtest could have shown:
+
+1. **The wash-trade rejection itself.** Now detected *before* submitting, by looking for another sleeve's
+   resting stop on the symbol (`_blocking_stop`). Limit orders are rejected too — Alpaca's advice to "use
+   complex orders" means brackets or OCO, not a limit price.
+2. **An unconfirmed cancel was being trusted.** The engine marked a stop `CANCELED` on asking. An equity stop
+   cancelled while the market is shut sits at `pending_cancel` until the open, so our journal said cancelled
+   while Alpaca still said otherwise on both SPY and QQQ. Asking is not the same as it being done, so the
+   order now stays open until the broker's own answer comes back.
+3. **The same exit sent every run.** A retiring sleeve re-decides every cycle by design, and its first sell
+   was still queued against a shut market. The broker reserves the shares behind that order and refused each
+   repeat — 8 rejections overnight. Fixed by subtracting what is already in flight.
+
+That third fix is worth recording for its **first attempt, which was wrong and was reverted**. Skipping any
+symbol with an open sell looked right and broke a legitimate exit, because `_cancel_stop` deliberately leaves
+the just-cancelled stop open in the journal (bug 2 above): the guard counted it, subtracted the whole
+position and sent nothing, leaving a position that should have closed with neither stop nor exit. A fix that
+silences a log at the cost of not selling is worse than the noise. The guard now counts only plain sells, and
+`test_a_resting_stop_does_not_block_the_exit_it_is_being_replaced_by` pins the trap so it cannot come back.
+
+#### Forex messages to your phone (2026-10-08)
+The session-reversion watcher sends EUR/USD levels to Telegram: a plan at the 07:00 UTC London open
+(buy level, stop, target, size), a prompt when the rate reaches one, and flat by 16:00 either way. It holds
+no capital, touches no broker and places nothing — you execute by hand. It is kill-switch aware on purpose:
+a halted system that keeps texting you trades has not really halted.
+
+**The host, not the code, is the limiting factor.** The watcher's levels are measured FROM the 07:00 open, so
+a first run that lands hours late would be trading a different setup while looking identical; it refuses the
+day instead. On 2026-10-07 that is exactly what happened — the Mac slept from 06:24 to 08:18 UTC and no run
+occurred at the open. The engine's `caffeinate -i -s` only holds sleep off **on AC power**, and the machine
+was on battery at 17%. So the honest statement of this feature's reliability is: it works when the Mac is
+awake and plugged in at 18:00 Sydney, and skips the day otherwise. A skipped day now **sends a message
+saying so**, because a feature whose purpose is to message you must not fail by going quiet. Making it
+sleep-proof needs a system power setting (`pmset`), which is yours to change, or a host that does not sleep.
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.

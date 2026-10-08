@@ -11,7 +11,8 @@ import pytest
 from trader.brokers.sim import SimBroker
 from trader.engine.executor import Executor
 from trader.engine.live import Engine
-from trader.models import AssetClass, OrderStatus, OrderType
+from trader.engine.live import RunReport
+from trader.models import AssetClass, OrderStatus, OrderType, Side
 from trader.notify.telegram import NullNotifier
 from trader.risk.kill_switch import KillSwitch
 
@@ -747,3 +748,58 @@ def test_a_retiring_sleeve_is_not_called_finished_while_anything_is_outstanding(
 
     # A sleeve that is NOT retiring is never 'done', whatever it holds.
     assert engine._retirement_done(settings.sleeves["S1"], RunReport(started=clock.now)) is False
+
+
+# --- the duplicate exit ---------------------------------------------------------------------------
+
+def _queue_sell(journal, sleeve_id, symbol, qty, order_type):
+    """Put a sell at the broker that has not filled: queued against a shut market."""
+    oid = f"queued-{sleeve_id}-{symbol}-{order_type}"
+    journal.conn.execute(
+        """INSERT INTO orders (client_order_id, created_at, sleeve_id, symbol, asset_class, side, qty,
+           order_type, status, broker, broker_order_id, filled_qty, updated_at)
+           VALUES (?,?,?,?,'us_equity','sell',?,?,?,'alpaca',?,0,?)""",
+        (oid, "2026-10-08T03:47:50+00:00", sleeve_id, symbol, qty, order_type,
+         OrderStatus.SUBMITTED.value, f"broker-{oid}", "2026-10-08T03:47:50+00:00"))
+    journal.conn.commit()
+    return oid
+
+
+def test_a_retiring_sleeve_does_not_send_the_same_sell_every_run(world):
+    """The wind-down re-decides every cycle, and its first exit is still queued.
+
+    S1 asked to sell 3 SPY at 03:47 while the market was shut, then asked again at 04:03, 04:19,
+    04:35 ... Alpaca reserves the shares behind the queued order, so every repeat came back
+    "insufficient qty available for order (requested: 3, available: 1)" -- 8 errors overnight on
+    2026-10-08, each one a real broker rejection in the log.
+    """
+    world["engine"].run_once()
+    assert world["journal"].sleeve_holdings("S1").get("SPY")
+
+    held = world["journal"].sleeve_holdings("S1")["SPY"]
+    _queue_sell(world["journal"], "S1", "SPY", held, OrderType.MARKET.value)
+
+    before = len(world["broker"].submitted)
+    world["engine"]._exit("S1", "SPY", "sleeve retiring", RunReport(started=datetime(2026, 10, 8, 3, 47, tzinfo=timezone.utc)))
+    assert len(world["broker"].submitted) == before, \
+        "the exit was already on its way; sending it again can only be rejected"
+
+
+def test_a_resting_stop_does_not_block_the_exit_it_is_being_replaced_by(world):
+    """The trap in the guard above, and the reason a broader version of it was wrong.
+
+    `_exit` cancels the protective stop and then sells. The cancel is deliberately not journalled
+    until the broker confirms it, so at the moment of selling the stop still reads as an open sell for
+    the full position. A guard that counted it would subtract everything and send nothing -- leaving a
+    position that was supposed to close sitting there with no stop and no exit. Much worse than the
+    log noise it was written to silence.
+    """
+    world["engine"].run_once()
+    held = world["journal"].sleeve_holdings("S1")["SPY"]
+    _queue_sell(world["journal"], "S1", "SPY", held, OrderType.STOP.value)
+
+    before = len(world["broker"].submitted)
+    world["engine"]._exit("S1", "SPY", "trend ended", RunReport(started=datetime(2026, 10, 8, 3, 47, tzinfo=timezone.utc)))
+    sent = world["broker"].submitted[before:]
+    assert [o.symbol for o in sent] == ["SPY"], "a stop standing in the way must not cancel the exit"
+    assert sent[0].side is Side.SELL

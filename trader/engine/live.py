@@ -564,10 +564,34 @@ class Engine:
             self._cancel_stop(state)
         held = self.journal.sleeve_holdings(sleeve_id).get(symbol, 0.0)
         at_broker = sum(p.qty for p in self.broker.get_positions() if p.symbol == symbol)
-        qty = min(held, at_broker)
+        # Less whatever is already on its way out. The broker reserves the shares behind a resting sell,
+        # so sending the exit a second time cannot do anything except be rejected.
+        qty = min(held, at_broker) - self._sell_in_flight(sleeve_id, symbol)
         if qty <= DUST_QTY:
             return
         self._submit(OrderRequest(sleeve_id=sleeve_id, symbol=symbol, side=Side.SELL, qty=qty, reason=reason), report)
+
+    def _sell_in_flight(self, sleeve_id: str, symbol: str) -> float:
+        """How much of `symbol` this sleeve is already selling at the broker, protective stops aside.
+
+        A retiring sleeve re-decides on every run, by design: deciding once per daily bar would leave
+        its positions open until tomorrow, when the point is to be out of them. The cost is that it
+        asks to exit the same symbol every cycle, and the first ask is still queued while the market is
+        shut. Alpaca holds the shares behind that queued order and refuses each repeat -- "insufficient
+        qty available for order (requested: 3, available: 1)", logged every 16 minutes through the night
+        of 2026-10-08 as S1 wound SPY and QQQ down into S8.
+
+        Protective stops are deliberately NOT counted. `_exit` has just asked the broker to cancel the
+        stop, and that request is not journalled until the broker confirms it, so the stop still reads
+        as open here. Counting it would subtract the whole position and suppress the very exit being
+        placed -- which is exactly what a broader first version of this guard did, and why a position
+        that should have closed would instead have sat there unsold.
+        """
+        plain = (OrderType.MARKET.value, OrderType.LIMIT.value)
+        return sum(max(0.0, (row["qty"] or 0.0) - (row["filled_qty"] or 0.0))
+                   for row in self.journal.open_orders(self.broker.name)
+                   if row["sleeve_id"] == sleeve_id and row["symbol"] == symbol
+                   and row["side"] == Side.SELL.value and row["order_type"] in plain)
 
     def _resize(self, sleeve_id: str, symbol: str, qty_delta: float, price: float, reason: str,
                 report: RunReport) -> None:

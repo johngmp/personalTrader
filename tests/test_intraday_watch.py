@@ -158,10 +158,16 @@ def test_a_day_whose_open_was_missed_is_skipped_not_improvised(journal):
     different setup from the one that was tested, while looking identical in the message."""
     late = _watcher(journal, "11:20", 1.11919)
     actions = late.run_once()
-    assert late.notifier.sent == [], "no plan may be sent from a rate that is not the open"
     assert actions and "missed" in actions[0]
 
-    # And it stays skipped for the rest of that day, however many times the engine runs.
+    # A skip is reported, not improvised over. What must never go out is a PLAN built from 11:20's rate
+    # dressed up as the open -- that would look identical to a real one and be a different trade.
+    assert len(late.notifier.sent) == 1
+    assert "No EUR/USD plan today" in late.notifier.sent[0]
+    assert "BUY if it falls to" not in late.notifier.sent[0]
+
+    # And it stays skipped for the rest of that day, however many times the engine runs. The notice is
+    # sent once: one message explaining the day, not one every fifteen minutes until midnight.
     for at in ("11:35", "12:00", "14:00"):
         w = _watcher(journal, at, 1.11000)
         assert w.run_once() == [] and w.notifier.sent == []

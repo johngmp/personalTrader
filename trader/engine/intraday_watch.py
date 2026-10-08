@@ -97,6 +97,15 @@ def plan_text(p: Plan, cfg: IntradayConfig) -> str:
     )
 
 
+def missed_text(cfg: IntradayConfig, day: date, minutes_in: float) -> str:
+    """Told, rather than left to wonder. See the call site for why this is worth a message."""
+    return (f"😴 No {cfg.symbol} plan today ({day:%a %d %b})\n"
+            f"The {cfg.open_utc} UTC open was missed by {minutes_in:.0f} min, so the levels cannot be "
+            f"measured from it.\n"
+            f"Taking the setup from a later rate would be trading something other than what was "
+            f"tested, so today is skipped. Usually this means the Mac was asleep.")
+
+
 def buy_text(p: Plan, rate: float) -> str:
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
     return (f"🟢 BUY {p.symbol} now — {f(rate)}\n"
@@ -164,6 +173,12 @@ class IntradayWatcher:
             if minutes_in > self.cfg.plan_within_minutes:
                 if self._get(day, "state") != "missed":
                     self._set(day, "state", "missed")
+                    # Say so on the phone, not just in the run report. A feature whose entire purpose is
+                    # to message you cannot fail by going quiet: a silent day is indistinguishable from
+                    # a day the setup never appeared, and you would be left wondering which. The usual
+                    # cause is this Mac asleep -- caffeinate -s only holds sleep off on AC power, so a
+                    # morning on battery skips the open (observed 2026-10-07, 06:24 to 08:18, no runs).
+                    self.notifier.send(missed_text(self.cfg, day, minutes_in))
                     return [f"intraday: missed the {self.cfg.open_utc} open by "
                             f"{minutes_in:.0f} min; no plan today"]
                 return []
