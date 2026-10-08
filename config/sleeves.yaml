@@ -111,7 +111,15 @@ sleeves:
     # shares are the right choice (Alpaca will not hold a stop against a fractional position, so
     # fractional means positions the broker cannot protect), so the capital has to clear the share
     # price instead. See the note below for what this does and does not fix.
-    capital_usd: 15000
+    # 15,000 -> 33,000 on 2026-10-08. 15,000 cleared one share of everything on a day when 21 markets
+    # were trending, but the allocation scales as 1/n: SPY dropped out again at 23 simultaneous entries,
+    # and a broad rally is exactly when a trend strategy most wants to own it. 33,000 keeps the whole
+    # 40-market basket affordable even when all 40 trend at once.
+    #
+    # The trade-off, stated plainly: risk_per_trade_pct is 1% of sleeve capital, so the risk on any one
+    # trade goes from $150 to $330. The account-level guards are what bound the damage -- 3% daily loss
+    # and a 15% drawdown halt -- not the sleeve size.
+    capital_usd: 33000
     # Widened 19 -> 40 on 2026-10-03, to answer a question about TIME rather than about returns.
     # Measured over its first 14 days, S8 completed 7 round trips across 19 markets -- about 15 closed
     # trades a month, so the 50 trades Gate 2 wants would take ~3.3 months. S1, on 4 markets, completed
