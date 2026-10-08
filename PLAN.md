@@ -711,6 +711,25 @@ evidence on the dashboard and in the daily summary, marked as simulated — it j
 The shadow-aware message wording stays as a guard for whatever is added to that set next, and the set's
 comment now says that anything added to it goes straight to the phone.
 
+##### A rule that was right, tested, and never reached production (2026-10-08)
+The risk gate judges a price by age, with one deliberate exception: when a market is shut, the last
+session's close is as fresh as a price can be, so it is accepted rather than called stale. Forex is in
+that exception on purpose — `test_a_closed_forex_market_accepts_the_last_session_price` says "without
+this, an FX sleeve could never act on a Sunday; the price is always ~36 hours old".
+
+It never worked. Every test of it builds the gate's context by hand and passes a clock in. The executor,
+which builds the real one, supplied a clock only for US equities — so in production `ctx.market` was
+`None` for forex, the FOREX arm of the check was unreachable, and a weekend FX order was refused as
+"price is 171982s old (limit 300s)". Two of the nine refusals in the journal say exactly that: the feed
+blamed for a market that was simply closed. `fx_clock` already existed and the dashboard was already
+using it; only the executor had never been wired to it.
+
+Worth recording how this nearly went wrong. The first fix changed the *gate* to refuse forex while the
+market is shut, which reads sensibly in isolation and contradicted a decision the project had already
+made and written a test for. The two failing tests were the record of that decision. The real fix is one
+line in the executor, and the new test asserts on the context the executor actually builds — because a
+unit test on the gate cannot catch a caller that never passes the argument.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
