@@ -24,11 +24,28 @@ def _clear():
     intraday._cache.clear()
 
 
-def test_a_day_of_candles_comes_back_in_a_legible_count():
-    """288 five-minute candles in a 500px panel draw as a smear; 15-minute bars give ~96."""
+def test_a_day_of_candles_comes_back_at_a_legible_spacing():
+    """288 five-minute candles in a 500px panel draw as a smear; 15-minute bars give ~96.
+
+    This asserts the SPACING, not the count. It used to require `30 < len(got) < 200`, where the lower
+    bound stood in for "these are 15-minute bars and not hourly ones" -- and that quietly depended on
+    the time of day. The FX week rolls over at 21:00 UTC, so a run a few hours later has only a handful
+    of candles so far and the test failed with nothing to suggest the clock was the reason.
+
+    The most common gap is the real invariant: it survives a half-finished session, and it still fails
+    if the interval is ever changed to 5 minutes or an hour.
+    """
+    from collections import Counter
+    from datetime import datetime
+
     got = candles("EUR/USD", "1D")
-    assert 30 < len(got) < 200
+    assert got, "no candles came back at all"
     assert len(got[0]) == 6
+    assert len(got) < 200, "a day must not come back as hundreds of candles"
+    stamps = [datetime.fromisoformat(c[ISO]) for c in got]
+    gaps = [(b - a).total_seconds() / 60 for a, b in zip(stamps, stamps[1:])]
+    assert gaps, "a single candle says nothing about the interval"
+    assert Counter(gaps).most_common(1)[0][0] == 15, f"expected 15-minute bars, gaps were {set(gaps)}"
 
 
 def test_the_high_and_low_bracket_the_open_and_close():
