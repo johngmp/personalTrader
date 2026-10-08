@@ -686,6 +686,14 @@ so every shadow broker except the one literally called "shadow" was messaged reg
 hand-executed — and a second shadow broker would have been texted to the phone while the method that
 supposedly decides said to stay quiet. One rule decides it now.
 
+The same defect was then found in the sibling path, where it was worse. `_stop_move_text` is reached
+*only* for a hand-executed broker, so every message it has ever sent was for that failed strategy — and
+it ended with a flat instruction: "Move your stop if you are following this by hand." There is no
+position behind it. Telling someone to adjust a real position on behalf of rules that lost to T-bills is
+the most direct way this system could cost money — more direct than the fill message, because this one
+is phrased as something to go and do. It now says a stop *would* move and not to move a real one. A
+genuinely hand-executed real broker, if one is ever configured, still gets the instruction it needs.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
