@@ -86,6 +86,24 @@ def _downsample(points: list[tuple[str, float]]) -> list[list]:
     return [[ts.isoformat(timespec="minutes"), round(float(v), 2)] for ts, v in s.items()]
 
 
+def _blocked_today(journal: Journal, now: datetime) -> list[dict]:
+    """Markets a sleeve wanted today and could not take, with the reason.
+
+    These alert once a day on purpose -- the engine runs every fifteen minutes and the same symbols stay
+    blocked all day, so alerting each time trains you to ignore it. But the dashboard only renders
+    events from the last hour, so without this the page would quietly stop mentioning a market the
+    sleeve still cannot buy. The notification is the interruption; this is the state.
+    """
+    out: list[dict] = []
+    for kind, why in (("unaffordable", "not enough capital for one share"),
+                      ("washblocked", "another sleeve holds it with a stop")):
+        for broker in ("alpaca", "oanda", "shadow", "shadow_fx"):
+            detail = journal.kv_get(f"{kind}:{broker}:{now.date()}")
+            if detail and detail != "1":
+                out.append({"kind": kind, "broker": broker, "why": why, "detail": detail})
+    return out
+
+
 def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict:
     """Everything the dashboard shows, across all brokers, as plain data (also handy for tests)."""
     now = datetime.now(timezone.utc)
@@ -143,7 +161,9 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
                         "adjusted_return": (equity - haircut) / sleeve.capital_usd - 1,
                         "invested": invested / equity if equity else 0.0, "capital": sleeve.capital_usd,
                         "open": sum(1 for t in sleeve_trips if t.is_open), "closed": len(closed),
-                        "benchmark": sleeve.id == "B0", "broker": sleeve.broker})
+                        "benchmark": sleeve.id == "B0", "broker": sleeve.broker,
+                        "retiring": sleeve.retiring,
+                        "retired": journal.kv_get(f"retired:{sleeve.id}") is not None})
     for s in sleeves:
         s["vs_b0"] = None if s["benchmark"] or b0_return is None else s["return"] - b0_return
 
@@ -192,6 +212,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "research": latest_research(settings),
         "blocked": blocked_orders(journal),
         "warnings": [e for e in journal.recent_events(60) if e["level"] in ("warning", "error", "critical")][:12],
+        "blocked_today": _blocked_today(journal, now),
         "charts": {
             "account": account_series,
             "sleeves": {sid: _downsample(pts) for sid, pts in sleeve_series.items() if sid in SERIES_COLORS},
@@ -578,6 +599,20 @@ def _explain(label: str) -> str:
     return ""
 
 
+def _retire_pill(s: dict) -> str:
+    """Say when a sleeve is winding down, because otherwise it looks like it is still working.
+
+    A retiring sleeve shows an equity figure and a return like any other, and nothing on the card would
+    tell you it sold everything and will never enter again. That is exactly the sort of thing you should
+    not have to read the config to discover.
+    """
+    if s.get("retired"):
+        return '<span class="pill closed">retired · no longer trading</span>'
+    if s.get("retiring"):
+        return '<span class="pill warn">winding down · selling, no new trades</span>'
+    return ""
+
+
 def _tile(label: str, value: str, sub: str = "", tone: str = "") -> str:
     tip = _explain(label)
     cls = "label help" if tip else "label"
@@ -640,7 +675,7 @@ def render(d: dict) -> str:
     ])
     sleeve_cards = "".join(
         f"""<div class="card sleeve"><div class="row"><span class="dot" style="background:{SHADOW_COLOR if is_shadow(s.get('broker')) else SERIES_COLORS.get(s['id'], '#898781')}"></span>
-<b>{s['id']}</b><span class="subtle">{html.escape(s['name'])}</span>{'<span class="pill closed">benchmark</span>' if s['benchmark'] else ''}{'<span class="pill open">shadow · no orders</span>' if is_shadow(s.get('broker')) else ''}</div>
+<b>{s['id']}</b><span class="subtle">{html.escape(s['name'])}</span>{'<span class="pill closed">benchmark</span>' if s['benchmark'] else ''}{'<span class="pill open">shadow · no orders</span>' if is_shadow(s.get('broker')) else ''}{_retire_pill(s)}</div>
 <div class="big">{_money(s['equity'])}</div>
 <div class="row gap"><span class="{_tone(s['return'])}">{_pct(s['return'])}</span>
 <span class="subtle">after est. costs {_pct(s['adjusted_return'])}</span></div>
@@ -706,6 +741,15 @@ def render(d: dict) -> str:
             f'<span class="p-sub">{html.escape(ASSET_WORDS.get(w["asset_class"], ""))}</span></span>'
             f'<span class="p-r"><span class="px">{_money(w["price"])}</span>{change}</span></button>')
     head_lines = "".join(f'<li class="hl-{tone}">{html.escape(text)}</li>' for tone, text in headline(d))
+    blocked = d.get("blocked_today") or []
+    blocked_panel = "" if not blocked else (
+        '<h2>Markets it wanted and could not take today</h2>'
+        '<p class="subtle">These are not errors. They are the difference between the strategy that was '
+        'tested and the one actually running, which is worth knowing about.</p>'
+        '<div class="card"><ul class="warnings">'
+        + "".join(f'<li><b>{html.escape(b["broker"])}</b> &mdash; {html.escape(b["why"])}: '
+                  f'{html.escape(b["detail"])}</li>' for b in blocked)
+        + '</ul></div>')
     open_trips = [t for t in d["trips"] if t.is_open]
     holdings_rows = "".join(_holding_row(t, d["price"]) for t in open_trips) or \
         '<p class="subtle" style="padding:.5rem .55rem">Nothing is open. The strategies are in cash.</p>'
@@ -857,6 +901,7 @@ a few minutes.</p>
 <div class="card"><div class="row"><div class="label">Strategies</div><div class="spacer"></div>
 <span class="subtle">each starts at $10,000</span></div>
 <div class="holdlist">{sleeve_rows}</div></div></div>
+{blocked_panel}
 <h2>Trading objectives</h2><div class="tiles">{tiles}</div>
 </section>
 <section data-panel="stocks" hidden>

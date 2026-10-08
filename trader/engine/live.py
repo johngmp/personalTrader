@@ -163,7 +163,7 @@ class Engine:
         if self.journal.kv_get(key) is not None:
             self.journal.log(f"still wash-blocked: {', '.join(report.wash_blocked)}", level="warning")
             return
-        self.journal.kv_set(key, "1")
+        self.journal.kv_set(key, "; ".join(report.wash_blocked))
         report.problems.append(
             f"{len(report.wash_blocked)} market(s) another sleeve already holds with a stop, so this "
             f"broker refuses the buy as a wash trade: {', '.join(report.wash_blocked)}. "
@@ -181,7 +181,7 @@ class Engine:
         if self.journal.kv_get(key) is not None:
             self.journal.log(f"still unaffordable: {', '.join(report.unaffordable)}", level="warning")
             return
-        self.journal.kv_set(key, "1")
+        self.journal.kv_set(key, "; ".join(report.unaffordable))
         report.problems.append(
             f"{len(report.unaffordable)} market(s) wanted but not affordable at this sleeve's capital: "
             f"{', '.join(report.unaffordable)}. The sleeve is not holding the basket that passed Gate 1.")
