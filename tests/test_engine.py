@@ -908,3 +908,63 @@ def test_a_shadow_never_claims_a_trade_happened(settings, tmp_path):
     assert 'sold = "would have sold" if self._is_shadow() else "sold"' in source
     # And every one of them is reached through the single notify rule.
     assert source.count("_should_notify()") >= 5
+
+
+def test_a_wide_stop_shrinks_the_entry_instead_of_cancelling_it(world):
+    """The gate refused these outright, so the sleeve held nothing.
+
+    The allocation comes from the strategy's target weight; the gate then judges it by how far the stop
+    is, and nothing connected the two. On 2026-10-08 S1 wanted $1,211 of ETH/USD behind a stop 8.3%
+    below, which risks $100.67 against a $100 budget, and the order was rejected over 67 cents -- leaving
+    the sleeve without a holding the backtest had. The backtest applies no per-trade risk cap at all, so
+    holding 97% of the tested position is a far smaller divergence than holding none of it.
+    """
+    report = RunReport(started=datetime(2026, 10, 8, 0, 8, tzinfo=timezone.utc))
+    price, stop = 2571.72, 2357.9491707013276           # the real numbers from that refusal
+    limits = world["settings"].sleeve_limits("S1")
+    budget = world["settings"].sleeves["S1"].capital_usd * limits.risk_per_trade_pct / 100
+
+    fitted = world["engine"]._fit_to_risk("S1", "ETH/USD", 1211.50, price, stop, report)
+    assert fitted < 1211.50, "an entry whose stop breaches the budget must shrink"
+    assert fitted * (1 - stop / price) <= budget, "and must then fit inside it"
+    assert fitted > 1211.50 * 0.9, "shrinking it to nothing would defeat the point"
+    assert any("sized ETH/USD down" in a for a in report.actions), "a resize must be visible, not silent"
+
+
+def test_an_entry_that_already_fits_is_left_exactly_alone(world):
+    """Trimming every order would make the whole sleeve smaller than the one that was tested."""
+    report = RunReport(started=datetime(2026, 10, 8, tzinfo=timezone.utc))
+    # A 2% stop on a $1,000 entry risks $20, far inside S1's $100 budget.
+    assert world["engine"]._fit_to_risk("S1", "ETH/USD", 1_000.0, 100.0, 98.0, report) == 1_000.0
+    assert report.actions == [], "an order that fits must not be announced as resized"
+
+
+def test_a_sleeve_with_no_stop_rule_is_not_resized(world):
+    """B0 holds the benchmark with no stops, so there is nothing to size against."""
+    report = RunReport(started=datetime(2026, 10, 8, tzinfo=timezone.utc))
+    assert world["engine"]._fit_to_risk("B0", "SPY", 5_000.0, 500.0, None, report) == 5_000.0
+    assert report.actions == []
+
+
+def test_the_entry_path_actually_applies_the_risk_fit(world):
+    """The wiring, not the helper.
+
+    The first version of the test above called _fit_to_risk directly and passed with the call site in
+    _enter deleted -- the same mistake as the forex clock the executor never handed the gate. A unit test
+    on a helper says nothing about whether anything calls it.
+    """
+    report = RunReport(started=datetime(2026, 10, 8, 0, 8, tzinfo=timezone.utc))
+    broker = world["broker"]
+    price, stop = 2571.72, 2357.9491707013276
+    broker.set_price("ETH/USD", price, datetime(2026, 10, 8, 0, 8, tzinfo=timezone.utc))
+
+    before = len(broker.submitted)
+    world["engine"]._enter("S1", "ETH/USD", 1211.50, price, stop, "trend up", report)
+    sent = broker.submitted[before:]
+
+    assert len(sent) == 1, "the entry must still be placed, just smaller"
+    order = sent[0]
+    assert order.notional is not None and order.notional < 1211.50
+    budget = world["settings"].sleeves["S1"].capital_usd * \
+        world["settings"].sleeve_limits("S1").risk_per_trade_pct / 100
+    assert order.notional * (1 - stop / price) <= budget

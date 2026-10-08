@@ -730,6 +730,22 @@ made and written a test for. The two failing tests were the record of that decis
 line in the executor, and the new test asserts on the context the executor actually builds — because a
 unit test on the gate cannot catch a caller that never passes the argument.
 
+##### An entry sized by weight and judged by its stop (2026-10-08)
+The allocation comes from the strategy's target weight. The gate then judges it by how far the stop is.
+Nothing connected the two, so when a wide stop met a large weight the gate refused the order **outright**
+and the sleeve held nothing — the same shape of failure as the $544 allocation that floored to zero
+shares and left S8 without SPY, QQQ and MDY. S1 wanted $1,211 of ETH/USD behind a stop 8.3% below,
+risking $100.67 against a $100 budget, and was refused over **67 cents**.
+
+The backtest applies no per-trade risk cap at all; it sizes on weight alone. So this check is a
+live-only rule and it makes live differ from the test whichever way it goes — and holding **97%** of the
+tested position is a far smaller divergence than holding none of it. Entries are now shrunk to fit the
+budget, and the shrink is reported rather than done quietly.
+
+The test for it was written wrong first, in the same way as the bug above: it called the helper directly
+and passed with the call site deleted. A unit test on a helper says nothing about whether anything calls
+it. There is now a test that goes through the entry path and checks the order that reaches the broker.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

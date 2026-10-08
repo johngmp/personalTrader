@@ -561,6 +561,9 @@ class Engine:
             report.actions.append(f"{sleeve_id} skipped {symbol}: {blocker} has a resting stop on it")
             report.wash_blocked.append(f"{symbol} (held by {blocker})")
             return
+        dollars = self._fit_to_risk(sleeve_id, symbol, dollars, price, stop, report)
+        if dollars <= 0:
+            return
         asset_class = self.settings.asset_class(symbol)
         step = self.broker.order_step(symbol, asset_class)  # type: ignore[arg-type]
         if step is not None:  # whole shares at Alpaca, whole units at OANDA
@@ -583,6 +586,37 @@ class Engine:
             order = OrderRequest(sleeve_id=sleeve_id, symbol=symbol, side=Side.BUY, notional=round(dollars, 2),
                                  stop_price=stop, reason=reason)
         self._submit(order, report)
+
+    def _fit_to_risk(self, sleeve_id: str, symbol: str, dollars: float, price: float,
+                     stop: float | None, report: RunReport) -> float:
+        """Shrink an entry until the stop costs no more than the per-trade budget.
+
+        The allocation comes from the strategy's target weight and the gate then judges it by how far the
+        stop is, with nothing connecting the two. When a wide stop meets a large weight the gate refused
+        the order OUTRIGHT, so the sleeve held nothing at all -- the same way a $544 allocation floored to
+        zero shares left S8 without SPY, QQQ and MDY. On 2026-10-08 S1 wanted $1,211 of ETH/USD behind a
+        stop 8.3% below, risking $100.67 against a $100 budget, and was refused over 67 cents.
+
+        The backtest applies no per-trade risk cap -- it sizes on weight alone -- so this check is a
+        live-only rule and it makes live differ from the test whichever way it goes. Holding 97% of the
+        tested position is a far smaller difference than holding none of it, which is the whole argument
+        for sizing down rather than refusing.
+        """
+        if stop is None or not (0 < stop < price):
+            return dollars                              # no stop to size against (the benchmark sleeve)
+        limits = self.settings.sleeve_limits(sleeve_id)
+        if not limits.require_stop:
+            return dollars
+        budget = self.settings.sleeves[sleeve_id].capital_usd * limits.risk_per_trade_pct / 100
+        # SIZING_MARGIN again because the gate re-prices on its own fresh quote a moment later, and a
+        # cap that only just fits here would fail there on any small move.
+        cap = (budget / (1 - stop / price)) * SIZING_MARGIN
+        if cap >= dollars:
+            return dollars
+        report.actions.append(
+            f"{sleeve_id} sized {symbol} down to ${cap:,.0f} from ${dollars:,.0f} to keep the stop "
+            f"inside {limits.risk_per_trade_pct}% of sleeve capital")
+        return cap
 
     def _exit(self, sleeve_id: str, symbol: str, reason: str, report: RunReport) -> None:
         state = self.journal.position_state(sleeve_id, symbol)
