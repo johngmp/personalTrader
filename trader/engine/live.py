@@ -431,7 +431,8 @@ class Engine:
                         if self.broker.name in HAND_EXECUTED and (not old_stop
                                                                   or new_stop > old_stop * (1 + STOP_MOVE_MIN)):
                             self.notifier.send(_stop_move_text(sleeve.id, symbol, old_stop, new_stop,
-                                                               self.settings.asset_class(symbol)))
+                                                               self.settings.asset_class(symbol),
+                                                               shadow=self._is_shadow()))
             prices = live
             current = {s: q * prices[s] / equity for s, q in held.items() if equity > 0}
             deferred: set[str] = set()
@@ -766,12 +767,23 @@ def _fill_text(fill: Fill, reason: str = "", asset_class: AssetClass | None = No
 
 
 def _stop_move_text(sleeve_id: str, symbol: str, old: float | None, new: float,
-                    asset_class: AssetClass) -> str:
+                    asset_class: AssetClass, shadow: bool = False) -> str:
     """Manual execution lives or dies on this one: a trailing stop that moves and isn't copied across
-    leaves the real position exposed exactly where the tested rules say it should have exited."""
+    leaves the real position exposed exactly where the tested rules say it should have exited.
+
+    Which is why the `shadow` caveat matters more here than on a fill. This is reached only for a
+    hand-executed broker, and the only one of those today is the FX shadow running rules that failed
+    Gate 1 -- so every message this has ever sent was for that strategy, and it ended with a flat
+    instruction to go and move a stop. Telling someone to adjust a real position on behalf of rules that
+    lost to T-bills is the most direct way this system could cost money.
+    """
     was = format_price(old, asset_class) if old else "none"
-    return (f"📈 {sleeve_id} · {symbol} stop moves {was} → {format_price(new, asset_class)}\n"
-            f"Move your stop if you are following this by hand.")
+    text = (f"{'👻' if shadow else '📈'} {sleeve_id} · {symbol} stop "
+            f"{'would move' if shadow else 'moves'} {was} → {format_price(new, asset_class)}")
+    if shadow:
+        return text + ("\n\n⚠️ Shadow test — there is no position behind this. These rules failed Gate 1 "
+                       "out of sample, so do not move a real stop for them.")
+    return text + "\nMove your stop if you are following this by hand."
 
 
 # --- shared across brokers --------------------------------------------------------------------------

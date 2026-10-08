@@ -850,3 +850,21 @@ def test_one_rule_decides_who_gets_messaged():
     code = "".join(line.split("#")[0] for line in inspect.getsource(live).splitlines())
     assert 'self.broker.name != "shadow"' not in code, "the exact-match test IS the bug; ask _should_notify"
     assert code.count("def _should_notify") == 1
+
+
+def test_a_shadow_stop_move_does_not_tell_you_to_move_a_real_stop():
+    """This path is reached only for a hand-executed broker, and the only one today is the FX shadow
+    running rules that failed Gate 1 -- so every message it has ever sent was for that strategy, and it
+    ended with a flat instruction to go and move a stop. Telling someone to adjust a real position on
+    behalf of rules that lost to T-bills is the most direct way this system could cost money."""
+    from trader.engine.live import _stop_move_text
+
+    shadow = _stop_move_text("S9", "EUR/USD", 1.11456, 1.11600, AssetClass.FOREX, shadow=True)
+    assert "Move your stop" not in shadow, "a simulated position must not be an instruction"
+    assert "would move" in shadow and "do not move a real stop" in shadow
+    assert "failed Gate 1" in shadow
+
+    # A real hand-executed broker, if one is ever configured, still gets the instruction it needs.
+    real = _stop_move_text("S4", "EUR/USD", 1.11456, 1.11600, AssetClass.FOREX)
+    assert "Move your stop if you are following this by hand." in real
+    assert "Shadow test" not in real
