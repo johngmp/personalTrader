@@ -514,3 +514,111 @@ def test_a_wash_blocked_market_is_reported_as_a_problem(settings, tmp_path):
     engine._report_wash_blocked(again)
     assert not again.problems, "the same conflict must not alert on every run"
     journal.close()
+
+
+def test_a_retiring_sleeve_sells_what_it_holds_through_the_normal_exit_path(settings, tmp_path):
+    """Winding a sleeve down must not mean abandoning it.
+
+    Flipping `enabled` straight to false simply stops the sleeve being managed: its positions would sit
+    at the broker with stops that never trail and nothing watching them. `retiring` makes it want
+    nothing and sell through the ordinary exit, so stops are cancelled and every close is journalled.
+    """
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+
+    def engine_now():
+        for s, df in bars.full.items():
+            broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+        return Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                      executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                      fill_wait_s=0)
+
+    engine_now().run_once()
+    assert journal.sleeve_holdings("S1"), "S1 should have taken positions on the first run"
+
+    # Retire it, move a day forward so there is a new bar to decide on, and run again.
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(update={"retiring": True})
+    clock.now += timedelta(hours=24)
+    bars.add_day({})
+    engine_now().run_once()
+
+    assert not journal.sleeve_holdings("S1"), "a retiring sleeve must end up flat"
+    stops = {o.symbol for o in broker.get_open_orders()
+             if o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)}
+    assert not (set(journal.sleeve_holdings("S1")) & stops), "no stop may outlive its position"
+    sells = [f for f in journal.fills("S1") if f["side"] == "sell"]
+    assert sells, "the closes must be journalled as ordinary fills"
+    assert any("retiring" in (f["reason"] or "") for f in sells), "and say why they happened"
+    journal.close()
+
+
+def test_a_sleeve_that_is_not_retiring_still_trades_normally(settings, tmp_path):
+    """The flag must do nothing at all when it is off."""
+    assert settings.sleeves["S1"].retiring is False
+    assert settings.sleeves["S8"].retiring is False
+
+
+def test_a_retiring_sleeve_does_not_raise_a_false_stop_alarm(settings, tmp_path):
+    """"Could not place stop" is this system's most alarming message. It must not fire when nothing
+    is wrong.
+
+    A retiring sleeve cancels its stop and places a market sell. The protective-stop step would then try
+    to add a stop back, which the duplicate-order guard refuses -- two sells of the same symbol inside a
+    minute -- and the refusal was reported as a problem. The exit order IS the protection at that point.
+    """
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+
+    def engine_now():
+        for s, df in bars.full.items():
+            broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+        return Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                      executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                      fill_wait_s=0)
+
+    engine_now().run_once()
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(update={"retiring": True})
+    clock.now += timedelta(hours=24)
+    bars.add_day({})
+    report = engine_now().run_once()
+
+    stop_alarms = [p for p in report.problems if "stop" in p.lower()]
+    assert not stop_alarms, f"a wind-down must not report a stop failure: {stop_alarms}"
+    journal.close()
+
+
+def test_retirement_does_not_wait_for_a_new_daily_bar(settings, tmp_path):
+    """Deciding once per daily bar is right for a strategy and wrong for a wind-down: having already
+    decided today would leave the positions open until tomorrow, when the point is to be out of them."""
+    from trader.journal.db import Journal
+
+    clock = Clock()
+    journal = Journal(tmp_path / "journal.db", clock=clock)
+    settings.sleeves["S8"] = settings.sleeves["S8"].model_copy(update={"enabled": False})
+    bars = FakeBars()
+    broker = SimBroker(cash=100_000, crypto_fee_bps=25, name="alpaca")
+
+    def engine_now():
+        for s, df in bars.full.items():
+            broker.set_price(s, float(df["close"].iloc[-1]), clock.now)
+        return Engine(settings, broker, journal, bars, notifier=NullNotifier(), clock=clock,
+                      executor=Executor(settings, broker, journal, clock=clock, sleep=lambda _: None),
+                      fill_wait_s=0)
+
+    engine_now().run_once()
+    assert journal.sleeve_holdings("S1")
+    # Retire and run again on the SAME bar it has already decided on.
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(update={"retiring": True})
+    engine_now().run_once()
+    assert not journal.sleeve_holdings("S1"), "it must exit on the same bar, not wait for tomorrow"
+    journal.close()

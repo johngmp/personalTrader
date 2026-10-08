@@ -79,6 +79,11 @@ class SleeveConfig(_Strict):
     # AI involvement (Phase 4): "analyst-team" = rule entries need an AI approve/veto verdict first;
     # "investor-panel" = target weights come from the weekly AI investor panel.
     ai: Literal["analyst-team", "investor-panel"] | None = None
+    # Wind the sleeve down: it stops entering and sells what it holds through the normal exit path, so
+    # stops are cancelled and every close is journalled like any other. Set this rather than flipping
+    # `enabled` straight to false -- a disabled sleeve is simply not managed, so its positions would sit
+    # at the broker with stops that never trail and nothing watching them. Disable it once it is flat.
+    retiring: bool = False
 
 
 class UniverseConfig(_Strict):

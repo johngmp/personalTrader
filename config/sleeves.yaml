@@ -25,7 +25,18 @@ sleeves:
 
   - id: S1
     name: Trend following
-    enabled: true            # approved 2026-09-18 after passing Gate 1
+    enabled: true
+    retiring: true           # winding down 2026-10-08, see below; disable once it is flat
+    # RETIRED INTO S8. S1 and S8 run the SAME strategy with the SAME parameters -- BroadTrend overrides
+    # only default_symbols, name and title, no rules at all -- and S1's four symbols are a strict subset
+    # of S8's forty. So this was the same bet placed twice on one account, and it was the only source of
+    # the wash-trade rejections: Alpaca refuses a buy while an opposite-side order rests on the symbol,
+    # so S1's protective stops on BTC, ETH, SPY and QQQ locked S8 out of four of its own markets.
+    # B0 creates none of those conflicts because it holds no stops (require_stop: false).
+    # Its live record was four buys on 2026-09-18 and one sell on 2026-10-07: one completed round trip
+    # in three weeks, against S8's fifteen a month. The comparison it might have offered -- concentrated
+    # versus diversified, same rules -- is the one S8's own Gate 1 already answered.
+    # Approved 2026-09-18 after passing Gate 1; retired 2026-10-08.
     broker: alpaca
     capital_usd: 10000
     symbols: [BTC/USD, ETH/USD, QQQ, SPY]

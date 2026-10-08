@@ -43,7 +43,7 @@ from trader.models import (
 from trader.notify.telegram import Notifier, NullNotifier
 from trader.risk.kill_switch import KillSwitch
 from trader.risk.sizing import plan_weights
-from trader.strategies import LIVE_REGISTRY
+from trader.strategies import LIVE_REGISTRY, Target
 from trader.strategies.base import Holding, Strategy
 
 SYDNEY = ZoneInfo("Australia/Sydney")
@@ -239,6 +239,12 @@ class Engine:
             sleeve_id, symbol, stop = state["sleeve_id"], state["symbol"], state["stop"]
             if stop is None or symbol in report.mismatched:
                 continue
+            if self.settings.sleeves[sleeve_id].retiring:
+                # It is on its way out and a market sell is already resting. Trying to add a stop here
+                # fails the duplicate-order guard -- two sells of the same symbol inside a minute -- and
+                # reports "could not place stop", which is this system's most alarming message, fired
+                # when nothing is wrong. The exit order IS the protection now.
+                continue
             asset_class = self.settings.asset_class(symbol)
             qty = self._round_qty(symbol, min(self.journal.sleeve_holdings(sleeve_id).get(symbol, 0.0),
                                               broker_qty.get(symbol, 0.0)))
@@ -348,7 +354,11 @@ class Engine:
                 continue
             latest = bars[symbol].index[-1]
             last = self.journal.last_decided_bar(sleeve.id, symbol)
-            if last is not None and latest <= pd.Timestamp(last) and new_weights is None:
+            already_decided = last is not None and latest <= pd.Timestamp(last)
+            # A retiring sleeve ignores that. Deciding once per daily bar is right for a strategy, and
+            # wrong for a wind-down: having already decided today would otherwise leave the positions
+            # open until tomorrow's bar, when the whole point is to be out of them.
+            if already_decided and new_weights is None and not sleeve.retiring:
                 continue
             self._advance_state(sleeve.id, symbol, bars[symbol], last)
             due.setdefault(latest, []).append(symbol)
@@ -365,7 +375,12 @@ class Engine:
             equity, _ = self.sleeve_value(sleeve)
             held = self.journal.sleeve_holdings(sleeve.id)
             holdings = self._holdings(sleeve.id, held)
-            targets = {s: t for s, t in strategy.on_bar(date, holdings).items() if s in symbols}
+            if sleeve.retiring:
+                # Wind-down: want nothing. Going through the ordinary exit path means stops are
+                # cancelled, fills are journalled and the P&L lands in the record like any other close.
+                targets = {s: Target(weight=0.0, reason="sleeve retiring") for s in held if s in symbols}
+            else:
+                targets = {s: t for s, t in strategy.on_bar(date, holdings).items() if s in symbols}
             for symbol, target in targets.items():  # trailing stops only ever move up
                 state = self.journal.position_state(sleeve.id, symbol)
                 if state is not None and target.weight > 0 and target.stop is not None:

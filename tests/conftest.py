@@ -16,8 +16,11 @@ def settings(tmp_path) -> Settings:
     """The real config/ files, with the kill switch and journal redirected to a temp folder."""
     s = load_settings(PROJECT_ROOT)
     s = s.model_copy(update={"root": tmp_path})
-    # Enable S1 so tests can exercise a normal strategy sleeve ($10k capital).
-    s.sleeves["S1"] = s.sleeves["S1"].model_copy(update={"enabled": True})
+    # Enable S1 so tests can exercise a normal strategy sleeve ($10k capital), and un-retire it: it was
+    # wound down into S8 on 2026-10-08, and a retiring sleeve sells instead of entering, which would
+    # silently turn every test that needs an ordinary trading sleeve into a test of the wind-down.
+    # Tests that want the retiring behaviour set the flag themselves.
+    s.sleeves["S1"] = s.sleeves["S1"].model_copy(update={"enabled": True, "retiring": False})
     return s
 
 
