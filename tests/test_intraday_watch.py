@@ -293,3 +293,71 @@ def test_the_sell_measures_from_what_the_buy_actually_quoted(journal):
     assert f"Bought {entry:.5f}" in message, f"the sell must name the entry it signalled: {message}"
     expected = round((plan.target - entry) / 1e-4)
     assert f"{expected:+.0f} pips" in message
+
+
+# --- what the sizing does on bad data --------------------------------------------------------------
+
+def test_an_impossible_position_size_is_never_sent():
+    """A tiny ATR used to produce a message saying to trade 3,333,333 units.
+
+    That is $3.7m of EUR/USD on a $10,000 account behind a 0.3 pip stop the spread alone would take out,
+    and nothing stands between that message and you acting on it -- the watcher sends no orders, so the
+    risk gate never sees any of this. Measured over 5,896 windows of 23 years the lowest 20-day ATR ever
+    seen is 15.8 pips, so an ATR of one pip is a data fault and the only safe plan is no plan.
+    """
+    assert build_plan(CFG, 1.1200, [0.0001] * 20, DAY) is None
+
+
+def test_the_quietest_market_ever_recorded_still_gets_a_plan():
+    """The floor must reject faults, not real markets, or it is just a different bug."""
+    p = build_plan(CFG, 1.1200, [0.00158] * 20, DAY)          # 15.8 pips, the historical minimum
+    assert p is not None
+    assert p.qty * p.trigger < CFG.capital_usd * 30, "within the retail leverage a position could hold"
+
+
+def test_size_is_capped_at_retail_leverage_and_says_what_it_then_risks():
+    """Risk-based sizing says nothing about whether the position can be held.
+
+    Capping it is safe -- a smaller size loses less -- but then quoting the nominal 1% would OVERSTATE
+    the loss, so the figure in the message is derived from the size actually being suggested.
+    """
+    p = build_plan(CFG, 1.1200, [0.00105] * 20, DAY)
+    assert p.qty * p.trigger == pytest.approx(CFG.capital_usd * 30, rel=1e-3)
+    assert p.risk_usd < CFG.capital_usd * CFG.risk_pct / 100
+    assert p.risk_usd == pytest.approx((p.trigger - p.stop) * p.qty)
+    assert f"${p.risk_usd:,.0f}" in plan_text(p, CFG)
+
+
+def test_a_partial_history_is_not_an_atr():
+    """The mean of three days is not the statistic the levels were chosen against, and one freak
+    300-pip day on its own would set a 90-pip stop and size the trade off it."""
+    assert build_plan(CFG, 1.1200, [0.0062, 0.0058], DAY) is None
+    assert build_plan(CFG, 1.1200, [0.0300], DAY) is None
+    assert build_plan(CFG, 1.1200, [0.0062] * CFG.atr_days, DAY) is not None
+
+
+def test_a_stale_quote_is_not_acted_on(journal, monkeypatch):
+    """The feed stamps the bar's own timestamp so a stale price LOOKS stale. This watcher was reading
+    .price and discarding .ts, and it is the one consumer with no risk gate in front of it."""
+    from datetime import timedelta
+
+    from trader.models import Quote
+
+    now = datetime.fromisoformat("2026-10-07T09:00+00:00")
+    s = load_settings().model_copy(update={"intraday": CFG})
+    limit = s.risk.guards.stale_forex_seconds
+
+    class Feed:
+        def __init__(self, age_s):
+            self.age_s = age_s
+
+        def get_quote(self, symbol, asset_class):
+            return Quote(symbol=symbol, price=1.11000, ts=now - timedelta(seconds=self.age_s))
+
+    def watcher(age_s):
+        import trader.data.fx_quotes as fq
+        monkeypatch.setattr(fq, "YahooFXFeed", lambda *a, **k: Feed(age_s))
+        return IntradayWatcher(s, journal, Spy(), clock=lambda: now, ranges=RANGES)
+
+    assert watcher(limit + 60)._rate() is None, "a quote past the forex staleness limit must not be used"
+    assert watcher(60)._rate() == pytest.approx(1.11000), "a fresh quote must still be used"
