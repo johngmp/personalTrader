@@ -593,6 +593,18 @@ awake and plugged in at 18:00 Sydney, and skips the day otherwise. A skipped day
 saying so**, because a feature whose purpose is to message you must not fail by going quiet. Making it
 sleep-proof needs a system power setting (`pmset`), which is yours to change, or a host that does not sleep.
 
+Verified live on 2026-10-08: the scheduled engine built the plan at **07:05 UTC** and sent it, three
+minutes after the open and inside the 30-minute window. That is the first time this has worked without
+being run by hand.
+
+The same sleep problem has a sharper edge at the other end of the day. `close_out` needs a run after
+16:00 UTC — 3am Sydney, the most likely moment for the Mac to be asleep. Slept through, the day keeps
+state `in` for ever: **you were told to buy and never told to sell**, and the next morning a fresh plan
+is built straight over the top. An alert that opens a trade and then goes quiet is worse than one that
+never fires, because you are the one holding the position. Every run now sweeps for a day left open and
+says so once, quoting no exit price — the rate at a close nothing was awake for is not a number to
+invent, so it points you at your broker instead.
+
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.
 - **Planned starting capital: ~US$100** (noted 2026-09-18). Needs a *small-account mode*: fractional/dollar-amount

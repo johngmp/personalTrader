@@ -18,6 +18,7 @@ from trader.journal.db import Journal
 CFG = IntradayConfig(enabled=True, symbol="EUR/USD", drop_atr=0.5, stop_atr=0.3, target_frac=1.0,
                      atr_days=20, capital_usd=10_000.0, risk_pct=1.0)
 DAY = date(2026, 10, 7)
+NEXT_DAY = datetime(2026, 10, 8, 7, 5, tzinfo=timezone.utc)
 RANGES = [0.0062] * 20
 
 
@@ -176,3 +177,42 @@ def test_a_day_whose_open_was_missed_is_skipped_not_improvised(journal):
 def test_a_plan_built_inside_the_window_is_still_allowed(journal):
     w = _watcher(journal, "07:25", 1.16420)
     assert w.run_once() and "BUY if it falls to" in w.notifier.sent[0]
+
+
+def test_a_trade_left_open_by_a_missed_close_is_raised_not_forgotten(journal):
+    """Being told to buy and never told to sell is the worst way this can fail.
+
+    `close_out` needs a run after 16:00 UTC. This Mac sleeps at 3am Sydney, which is exactly that. Slept
+    through, the day stays "in" forever and the next morning's plan is built over the top, so the trade
+    you are holding by hand is silently abandoned.
+    """
+    yesterday = _watcher(journal, "07:05", 1.11919)
+    yesterday.run_once()                                 # plan goes out
+    entered = _watcher(journal, "09:00", 1.11000)        # falls through the trigger
+    entered.run_once()
+    assert "BUY" in entered.notifier.sent[0]
+
+    # Nothing runs again until the next morning: the 16:00 close never happened.
+    later = _watcher(journal, "07:05", 1.12500)
+    later.clock = lambda: NEXT_DAY
+    actions = later.sweep_unfinished()
+    assert actions and "was left open" in actions[0]
+    assert len(later.notifier.sent) == 1
+    assert "never closed" in later.notifier.sent[0]
+    assert "close it now" in later.notifier.sent[0]
+
+    # Said once, not on every run for the rest of time.
+    again = _watcher(journal, "07:20", 1.12500)
+    again.clock = lambda: NEXT_DAY
+    assert again.sweep_unfinished() == [] and again.notifier.sent == []
+
+
+def test_the_sweep_leaves_today_alone(journal):
+    """Today still belongs to close_out, which knows the rate and can quote a real exit."""
+    w = _watcher(journal, "07:05", 1.11919)
+    w.run_once()
+    held = _watcher(journal, "09:00", 1.11000)
+    held.run_once()
+    mid = _watcher(journal, "12:00", 1.11500)
+    assert mid.sweep_unfinished() == [], "a live position must not be declared stranded"
+    assert mid.notifier.sent == []

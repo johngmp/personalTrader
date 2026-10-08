@@ -113,6 +113,19 @@ def buy_text(p: Plan, rate: float) -> str:
             f"You will pay the ask, a touch above this mid.")
 
 
+def stranded_text(p: Plan) -> str:
+    """For a day that ended with you holding something and nothing awake to say so."""
+    f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
+    return (f"⚠️ {p.symbol} from {p.day:%a %d %b} was never closed\n"
+            f"You were told to buy near {f(p.trigger)} and the session ended without a sell message, "
+            f"because nothing was running at 16:00 UTC — usually this Mac asleep.\n"
+            f"\n"
+            f"If you are still holding it, close it now. The tested rule is flat at the session end, so "
+            f"carrying it overnight is not the strategy any more.\n"
+            f"No exit price is quoted here on purpose: the rate at a close this missed is not something "
+            f"to invent. Check your broker for what you actually got.")
+
+
 def sell_text(p: Plan, rate: float, why: str) -> str:
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
     pips = (rate - p.trigger) / PIP
@@ -216,6 +229,38 @@ class IntradayWatcher:
         self._set(day, "state", "done")
         self.notifier.send(sell_text(plan, rate, why))
         return [f"intraday SELL {self.cfg.symbol} at {rate:.5f} ({why})"]
+
+    def sweep_unfinished(self) -> list[str]:
+        """Days that ended while you were still holding, and were never told to sell.
+
+        `close_out` only works if a run happens after 16:00 UTC, which is 3am in Sydney and exactly when
+        this Mac is most likely to be asleep. Slept through, the day keeps state "in" forever: you got a
+        buy message and no sell, and the next morning a fresh plan is built straight over the top of it.
+
+        Of everything that can go wrong here that is the worst, because you are the one holding the
+        position -- an alert that opens a trade and then goes quiet is worse than one that never fired.
+        So it is swept on EVERY run, inside the session or not, weekend or not, and said once.
+        """
+        if not self.cfg.enabled:
+            return []
+        today = self.clock().date()
+        out: list[str] = []
+        for key in self.journal.kv_keys("irv:%:state"):
+            if self.journal.kv_get(key) != "in":
+                continue
+            try:
+                day = date.fromisoformat(key.split(":")[1])
+            except ValueError:
+                continue
+            if day >= today:
+                continue                                # today is close_out's business, not this
+            plan = self._stored_plan(day)
+            if plan is None:
+                continue
+            self._set(day, "state", "done")
+            self.notifier.send(stranded_text(plan))
+            out.append(f"intraday: {self.cfg.symbol} from {day} was left open; told you to check it")
+        return out
 
     def close_out(self) -> list[str]:
         """Called after the session ends: anything still open gets closed at the rate, as tested."""

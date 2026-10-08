@@ -848,5 +848,8 @@ class Coordinator:
         if self.engines[0].kill_switch.active:
             return
         watcher = IntradayWatcher(self.settings, self.journal, self.notifier, clock=self.clock)
+        # Swept first and unconditionally: a trade stranded by a missed 16:00 close has to be raised
+        # whatever today is, including a weekend, and before a new day's plan is built over the top.
+        report.actions += watcher.sweep_unfinished()
         report.actions += watcher.run_once(report)
         report.actions += watcher.close_out()

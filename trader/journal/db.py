@@ -366,6 +366,10 @@ class Journal:
         row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
 
+    def kv_keys(self, like: str) -> list[str]:
+        """Keys matching a SQL LIKE pattern, in order. For sweeping state a caller cannot name upfront."""
+        return [r["key"] for r in self.conn.execute("SELECT key FROM kv WHERE key LIKE ? ORDER BY key", (like,))]
+
     def kv_set(self, key: str, value: str) -> None:
         with self.conn:
             self.conn.execute("INSERT INTO kv (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
