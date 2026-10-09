@@ -142,6 +142,12 @@ class Journal:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # Two processes write this file once the forex watcher runs on its own minute-by-minute
+        # schedule beside the fifteen-minute engine. Without these, the second writer gets an immediate
+        # "database is locked" rather than waiting its turn -- and the thing that would fail is whichever
+        # happened to be sending you a trade.
+        self.conn.execute("PRAGMA journal_mode = WAL")   # a reader no longer blocks a writer
+        self.conn.execute("PRAGMA busy_timeout = 10000")  # wait up to 10s for the lock instead of failing
         self.conn.executescript(SCHEMA)
         self._migrate()
 
@@ -376,6 +382,24 @@ class Journal:
             "SELECT asset_class FROM orders WHERE symbol=? AND asset_class IS NOT NULL "
             "ORDER BY created_at DESC LIMIT 1", (symbol,)).fetchone()
         return AssetClass(row["asset_class"]) if row else None
+
+    def kv_set_if(self, key: str, expect: str | None, value: str) -> bool:
+        """Set `key` to `value` only if it currently holds `expect`. True if this caller won.
+
+        Needed because the forex watcher now runs in two places: its own minute-by-minute agent and the
+        engine's fifteen-minute pass. Both read the day's state and both decide whether to message you,
+        so an ordinary read-then-write could have two processes see "waiting", both decide the level was
+        reached, and both send you the same buy. The write is the thing that has to be exclusive, so it
+        is the write that carries the condition.
+        """
+        with self.conn:
+            if expect is None:
+                cur = self.conn.execute(
+                    "INSERT INTO kv (key, value) VALUES (?,?) ON CONFLICT(key) DO NOTHING", (key, value))
+            else:
+                cur = self.conn.execute("UPDATE kv SET value=? WHERE key=? AND value=?",
+                                        (value, key, expect))
+            return cur.rowcount > 0
 
     def kv_keys(self, like: str) -> list[str]:
         """Keys matching a SQL LIKE pattern, in order. For sweeping state a caller cannot name upfront."""

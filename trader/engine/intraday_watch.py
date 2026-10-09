@@ -245,6 +245,17 @@ class IntradayWatcher:
         """
         return f"irv:{day:%Y-%m-%d}:{symbol.replace('/', '')}:{name}"
 
+    def _claim(self, day: date, symbol: str, expect: str | None, becomes: str) -> bool:
+        """Take ownership of the day's next step, or find that someone else already did.
+
+        The watcher runs in two places now: its own minute-by-minute agent and the engine's
+        fifteen-minute pass. Both read the state and both decide whether to message you, so a plain
+        read-then-write would let two processes see "waiting", both conclude the level was reached, and
+        both send the same buy. Every transition that sends a message goes through here, and only the
+        process that wins the write does the sending.
+        """
+        return self.journal.kv_set_if(self._key(day, "state", symbol), expect, becomes)
+
     def _get(self, day: date, name: str, symbol: str) -> str | None:
         return self.journal.kv_get(self._key(day, name, symbol))
 
@@ -292,8 +303,7 @@ class IntradayWatcher:
             # the one that was tested. Skip the day instead, and say so once.
             minutes_in = (now - datetime.combine(day, opens, tzinfo=timezone.utc)).total_seconds() / 60
             if minutes_in > self.cfg.plan_within_minutes:
-                if self._get(day, "state", symbol) != "missed":
-                    self._set(day, "state", "missed", symbol)
+                if self._claim(day, symbol, None, "missed"):
                     # Say so on the phone, not just in the run report. A feature whose entire purpose is
                     # to message you cannot fail by going quiet: a silent day is indistinguishable from
                     # a day the setup never appeared, and you would be left wondering which. The usual
@@ -309,7 +319,10 @@ class IntradayWatcher:
             plan = build_plan(self.cfg, rate, self._daily_ranges(symbol), day, symbol)
             if plan is None:
                 return []
-            self._store_plan(plan)
+            if not self.journal.kv_set_if(self._key(day, "plan", symbol), None,
+                                          f"{plan.session_open},{plan.atr},{plan.trigger},"
+                                          f"{plan.stop},{plan.target},{plan.qty}"):
+                return []                               # another process got there first
             self.notifier.send(plan_text(plan, self.cfg))
             return [f"intraday plan for {symbol}: buy {plan.trigger:.5f}"]
 
@@ -327,11 +340,13 @@ class IntradayWatcher:
                 # on the next run. The tested rule enters with a RESTING LIMIT at the trigger, so it is
                 # either already filled and already stopped, or it never happened -- and a fresh entry
                 # down here is simply a different trade from the one that was measured.
-                self._set(day, "state", "gapped", symbol)
+                if not self._claim(day, symbol, None, "gapped"):
+                    return []
                 self.notifier.send(gapped_text(plan, rate))
                 return [f"intraday: {symbol} gapped past the stop at {rate:.5f}; day skipped"]
             if rate <= plan.trigger:
-                self._set(day, "state", "in", symbol)
+                if not self._claim(day, symbol, None, "in"):
+                    return []
                 self._set(day, "entry", f"{rate}", symbol)       # what the message quoted, for the sell to measure from
                 self.notifier.send(buy_text(plan, rate))
                 return [f"intraday BUY {symbol} at {rate:.5f}"]
@@ -344,7 +359,8 @@ class IntradayWatcher:
             why = "stop"
         else:
             return []
-        self._set(day, "state", "done", symbol)
+        if not self._claim(day, symbol, "in", "done"):
+            return []
         self.notifier.send(sell_text(plan, rate, why, self._entry(day, symbol)))
         return [f"intraday SELL {symbol} at {rate:.5f} ({why})"]
 
@@ -380,7 +396,8 @@ class IntradayWatcher:
             plan = self._stored_plan(day, symbol)
             if plan is None:
                 continue
-            self._set(day, "state", "done", symbol)
+            if not self._claim(day, symbol, "in", "done"):
+                continue
             self.notifier.send(stranded_text(plan, self._entry(day, symbol)))
             out.append(f"intraday: {symbol} from {day} was left open; told you to check it")
         return out
@@ -410,14 +427,16 @@ class IntradayWatcher:
             # The day is over and the level was never reached. Said once, because you asked why no
             # messages were arriving and the honest answer was "the setup did not happen" -- which the
             # system knew and never told you. Silence should not need interpreting.
-            self._set(day, "state", "done", symbol)
+            if not self._claim(day, symbol, None, "done"):
+                return []
             self.notifier.send(no_setup_text(plan, self.cfg))
             return [f"intraday: no {symbol} setup today"]
 
         rate = self._rate(symbol)
         if rate is None:
             return []
-        self._set(day, "state", "done", symbol)
+        if not self._claim(day, symbol, "in", "done"):
+            return []
         self.notifier.send(sell_text(plan, rate, "session end", self._entry(day, symbol)))
         return [f"intraday SELL {symbol} at {rate:.5f} (session end)"]
 

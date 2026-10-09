@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: ops/install-fxwatch.sh fills in __ROOT__ and __UV__ and installs it to ~/Library/LaunchAgents.
+
+     The forex watcher on its own minute-by-minute beat, separate from the engine. Fifteen minutes is
+     too coarse for it: measured on 250 days of real bars, checking every 15 minutes instead of every 5
+     missed 18 setups rather than 12 and earned $1,160 rather than $1,638. The engine cannot simply run
+     more often -- it reconciles the broker, re-prices forty markets, rebuilds the dashboard and counts
+     against the daily order budget -- so the one part that has to be quick runs alone.
+
+     It places nothing. The heaviest thing it does is ask Yahoo for one rate, and that is cached for 60
+     seconds, which is why a minute is the beat rather than something faster. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.personaltrader.fxwatch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV__</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>__ROOT__</string>
+    <string>trader</string>
+    <string>watch-fx</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__ROOT__</string>
+  <!-- Every minute. The watcher returns immediately outside 07:00-16:00 UTC and at weekends, so most
+       of these cost one process start and nothing else. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__ROOT__/data/logs/fxwatch.log</string>
+  <key>StandardErrorPath</key>
+  <string>__ROOT__/data/logs/fxwatch.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

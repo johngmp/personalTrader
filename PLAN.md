@@ -901,6 +901,44 @@ that ignores it. It has now appeared as a clock the executor never passed, a ris
 applied, an alert count nothing read, a symbol list the prices did not match — and here, as most of a
 strategy's measured return. A test now asserts on real bars that no trade outlives its session.
 
+#### Watching every minute instead of every fifteen (2026-10-09)
+Asked for constant monitoring, the question was first measured rather than assumed. Simulating the
+watcher's own behaviour — a point-in-time mid checked every N minutes, not the backtest's intrabar
+high/low — over 250 days of real EUR/USD bars:
+
+| how the trade is taken | trades | P&L | setups never seen |
+|---|---|---|---|
+| **a resting limit AT the level** | 80 | **+$1,779** | 0 |
+| push message, checked every 5 min | 67 | +$1,638 | 12 |
+| push message, every 15 min *(before this)* | 61 | +$1,160 | 18 |
+
+So the fifteen-minute beat was costing **$478, 41% of the result**, and six setups it never saw. Worth
+fixing. Two honest limits on the finding: the bars are 5-minute, so this cannot distinguish 1-minute
+from 5-minute polling — the gain below five minutes is unmeasured, not proven — and **a resting limit
+order beats every polling frequency**, because it fills AT the level and misses nothing. The plan
+message already says to leave one sitting there; this makes the push quicker, it does not replace that.
+
+The engine cannot simply run every minute: it reconciles the broker, re-prices forty markets, rebuilds
+the dashboard and counts against the daily order budget. So the one part that has to be quick runs
+alone, as `trader watch-fx` on its own 60-second agent (`ops/install-fxwatch.sh`). It places nothing and
+the heaviest thing it does is ask for one rate, which is cached for 60 seconds — which is why a minute
+is the beat rather than something faster.
+
+**Two processes now write the journal**, and that needed real work rather than hope:
+* SQLite had neither WAL nor a busy timeout, so the second writer got an immediate "database is locked"
+  instead of waiting its turn — and the thing that would have failed is whichever process was in the
+  middle of sending a trade. Both are set now.
+* Both processes read the day's state and both decide whether to message, so a plain read-then-write
+  would let both see "waiting", both conclude the level was reached, and **both send the same buy**.
+  Every transition that sends a message now goes through a compare-and-set, and only the winner sends.
+
+Both tests for that were wrong first, in two different ways worth recording. The first called the two
+watchers in sequence, which cannot interleave — it passed with the compare-and-set removed, because the
+second watcher simply read what the first had written. The second scanned six lines above each send for
+a guard, and passed when the buy's guard was deleted because six lines up it found the *gapped* branch's
+guard instead. The race is now tested by having both processes read before either writes, and the wiring
+by counting: one exclusive claim per message, so removing a guard makes two numbers disagree.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

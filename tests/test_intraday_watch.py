@@ -578,3 +578,84 @@ def test_what_the_watcher_did_reaches_the_journal():
     src = inspect.getsource(live.Coordinator._intraday)
     assert "self.journal.log(what" in src, "the watcher's actions must be journalled"
     assert "for what in did:" in src
+
+
+# --- two processes watching at once -----------------------------------------------------------------
+
+def test_running_the_watcher_twice_over_sends_nothing_twice(journal):
+    """Idempotency: the second pass reads what the first wrote and stays quiet.
+
+    This is the easy half, and the half that was already true. It is NOT a test of the race -- two
+    sequential calls cannot interleave, which is exactly why the first version of this test passed with
+    the compare-and-set removed. The race itself is tested below.
+    """
+    _watcher(journal, "07:05", 1.11919).run_once()
+    plan = _watcher(journal, "07:05", 1.0)._stored_plan(DAY, "EUR/USD")
+
+    a = _watcher(journal, "09:00", plan.trigger)
+    b = _watcher(journal, "09:00", plan.trigger)
+    did_a, did_b = a.run_once(), b.run_once()
+    assert len(a.notifier.sent + b.notifier.sent) == 1
+    assert len([x for x in (did_a, did_b) if x]) == 1
+    assert journal.kv_get("irv:2026-10-07:EURUSD:state") == "in"
+
+
+def test_two_processes_that_both_read_waiting_still_send_one_buy(journal):
+    """The real race, written so it actually interleaves.
+
+    The watcher now runs in two places -- its own minute-by-minute agent and the engine's fifteen-minute
+    pass -- and they can read the day's state at the same instant. BOTH see "waiting", BOTH conclude the
+    level was reached, and with a plain read-then-write both would send you the same buy and you would
+    place the trade twice. The write is what has to be exclusive, so the write carries the condition.
+    """
+    _watcher(journal, "07:05", 1.11919).run_once()
+    a = _watcher(journal, "09:00", 1.11000)
+    b = _watcher(journal, "09:00", 1.11000)
+
+    # Both read first: neither has written yet, so both see an unclaimed day.
+    assert a._get(DAY, "state", "EUR/USD") is None
+    assert b._get(DAY, "state", "EUR/USD") is None
+
+    # Then both try to claim it. Exactly one may win.
+    won = [a._claim(DAY, "EUR/USD", None, "in"), b._claim(DAY, "EUR/USD", None, "in")]
+    assert won.count(True) == 1, f"both processes claimed the same transition: {won}"
+    assert journal.kv_get("irv:2026-10-07:EURUSD:state") == "in"
+
+
+def test_every_message_the_watcher_sends_is_behind_a_claim():
+    """One exclusive claim per message, counted.
+
+    A claim that nothing calls protects nothing, which is how three of today's bugs got in. The first
+    version of this test scanned the six lines above each send for a claim -- and passed when the buy's
+    claim was deleted, because six lines up it found the *gapped* branch's claim instead. Counting
+    cannot be fooled that way: remove a guard and the two numbers stop matching.
+    """
+    import inspect
+
+    from trader.engine.intraday_watch import IntradayWatcher
+
+    for method in (IntradayWatcher._run_symbol, IntradayWatcher._close_symbol,
+                   IntradayWatcher.sweep_unfinished):
+        src = inspect.getsource(method)
+        sends = src.count("self.notifier.send(")
+        guards = src.count("self._claim(") + src.count("self.journal.kv_set_if(")
+        assert sends > 0, f"{method.__name__} sends nothing; this test is watching the wrong place"
+        assert guards == sends, (
+            f"{method.__name__} has {sends} message(s) and {guards} exclusive claim(s): "
+            "every message must be behind one, or two processes can send the same alert")
+
+
+def test_the_quick_watcher_is_its_own_command_and_touches_no_broker():
+    """The engine cannot just run every minute: it reconciles the broker, re-prices forty markets,
+    rebuilds the dashboard and counts against the daily order budget. So the part that has to be quick
+    runs alone -- and must stay that way, or this becomes a minute-by-minute engine."""
+    import inspect
+
+    from trader import cli
+
+    src = inspect.getsource(cli.cmd_watch_fx)
+    assert "IntradayWatcher" in src
+    assert "kill_switch" in src.lower(), "a halted system must not keep texting trades"
+    for forbidden in ("configured_brokers", "Engine(", "write_dashboard", "Coordinator"):
+        assert forbidden not in src, f"the quick path must not do {forbidden}"
+    assert "watch-fx" in inspect.getsource(cli.main)
