@@ -866,6 +866,41 @@ Verified against live data before it goes out: both pairs build sane plans — E
 an 18 pip stop, GBP/USD buy 1.31991 behind 20 pips — and per-pair state was confirmed by having one pair
 trigger while the other stayed waiting, which a shared key would have broken silently.
 
+#### …and removed the same evening, because the number it was added on was wrong (2026-10-08)
+Asked whether more pairs would mean more trades, the first thing checked was the claim that this never
+holds overnight. It does not — but the check showed a **maximum hold of 13.8 hours inside a 9-hour
+session**, which is impossible. The harness built `after` from `session`, the whole UTC day, and scanned
+all of it. Both strategies had always computed an `exit_deadline` at 16:00 and **nothing had ever read
+it**, so a "session end" exit landed as late as **23:55** while the live watcher goes flat at 16:00.
+
+On EUR/USD that was **37 of 84 trades exiting at or after 16:00, carrying $1,193 of the $1,941 total —
+61% of the profit from a rule the live system does not run.** The rule being measured was not the rule
+being run, in the most consequential way yet found: the headline return itself.
+
+Re-measured with the close enforced, same procedure, same grid, chosen on the first 60% and read once:
+
+| | in-sample | out-of-sample | grid positive OOS | positive in BOTH halves |
+|---|---|---|---|---|
+| **EUR/USD** | +$1,469 (50 trades) | **+$164 = +4.0%/yr** (34) | 24/30 (80%) | **20/30 (67%)** |
+| **GBP/USD**, its own pick | +$1,036 (31) | **−$85 = −2.0%/yr** (22) | 21/30 (70%) | **10/30 (33%)** |
+
+So **EUR/USD survives and GBP/USD does not.** EUR/USD's in-sample half still picks exactly the setting
+that is shipped, two thirds of its neighbourhood is positive in both halves, and the edge is real but
+**+4.0%/yr, not +17.2%**. GBP/USD's own in-sample half picks a setting that *loses* out of sample; the
++10%/yr it shows on the shipped setting is a setting chosen on EUR/USD that is **negative in-sample on
+GBP**, which is evidence of nothing. Its 33% both-halves rate is the same instability that got the short
+side rejected.
+
+GBP/USD was therefore taken back out, hours after being added, and the user was told that the +3.0%
+figure the decision was made on had been measured with this bug. Every statement of +17.2% has been
+corrected to +4.0%, including the footer on the message itself.
+
+**The lesson is the one that keeps recurring, now at the level of the result rather than the code.** Two
+things that must agree, with nothing checking they do: a deadline the strategy publishes and a harness
+that ignores it. It has now appeared as a clock the executor never passed, a risk fit `_enter` never
+applied, an alert count nothing read, a symbol list the prices did not match — and here, as most of a
+strategy's measured return. A test now asserts on real bars that no trade outlives its session.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

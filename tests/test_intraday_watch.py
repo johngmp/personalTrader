@@ -510,14 +510,21 @@ def test_one_pair_triggering_leaves_the_other_alone():
     j.close()
 
 
-def test_the_pairs_are_the_two_that_survived_the_test():
-    """AUD/USD tested NEGATIVE at -1.3%/yr and 0.0% of its London bars are tight enough to rescue it."""
+def test_only_the_pair_that_passed_honest_selection_is_watched():
+    """EUR/USD alone, and the two exclusions are different failures.
+
+    AUD/USD tested NEGATIVE at -1.3%/yr, with 0.0% of its London bars tight enough for any filter.
+    GBP/USD was added on 2026-10-08 and removed the same evening: once the harness honoured the 16:00
+    close that the live watcher enforces, GBP's OWN in-sample pick scored -2.0%/yr out of sample and
+    only 10 of 30 grid settings were positive in both halves. The +10%/yr it showed on the shipped
+    setting is a setting chosen on EUR/USD that loses in-sample on GBP, which is evidence of nothing.
+    """
     from trader.config import load_settings as real
 
     cfg = real().intraday
-    assert cfg.symbols == ["EUR/USD", "GBP/USD"]
-    assert "AUD/USD" not in cfg.symbols
-    # Same parameters for both: admitting a pair must not be another pass at fitting the grid.
+    assert cfg.symbols == ["EUR/USD"]
+    assert "AUD/USD" not in cfg.symbols and "GBP/USD" not in cfg.symbols
+    # The setting shipped is the one EUR/USD's own in-sample half picks, with the close enforced.
     assert (cfg.drop_atr, cfg.stop_atr, cfg.target_frac) == (0.5, 0.3, 1.0)
 
 
@@ -539,10 +546,11 @@ def test_each_pair_carries_its_own_evidence_not_a_stale_footer():
                  stop=1.1952, target=1.2, qty=50_000)
         return plan_text(p, cfg).splitlines()[-1]
 
-    assert "EUR/USD only" not in footer("GBP/USD")
-    assert "+3.0%" in footer("GBP/USD") and "thin" in footer("GBP/USD")
-    assert "+17.2%" in footer("EUR/USD")
-    assert "Not advice." in footer("EUR/USD") and "Not advice." in footer("GBP/USD")
+    assert "EUR/USD only" not in footer("GBP/USD"), "the footer must not assert a pair it is not about"
+    assert "+4.0%" in footer("EUR/USD"), "the corrected figure, not the +17.2% a broken deadline produced"
+    assert "+17.2%" not in footer("EUR/USD")
+    assert "thin" in footer("EUR/USD")
+    assert "Not advice." in footer("EUR/USD")
 
 
 def test_a_pair_with_no_measured_result_says_so_rather_than_borrowing_one():

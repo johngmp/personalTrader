@@ -37,8 +37,11 @@ PIP = 1e-4
 # are not equally believed and a signal that hides that is misleading. Same parameters for both, chosen
 # once on EUR/USD's first 60% of history and applied unchanged.
 EVIDENCE = {
-    "EUR/USD": "tested +17.2%/yr out of sample",
-    "GBP/USD": "tested +3.0%/yr out of sample — positive but thin; spread takes 45% of the edge",
+    # +4.0%/yr, NOT the +17.2% quoted until 2026-10-08. That figure came from a harness that ignored the
+    # 16:00 close this watcher enforces and scanned to the end of the UTC day, so 44% of trades exited up
+    # to eight hours later than the live rule allows and carried 61% of the profit. This is the number
+    # for the rule actually being run.
+    "EUR/USD": "tested +4.0%/yr out of sample over 34 trades — thin, and the only pair that passed",
 }
 
 # Floors and caps that only ever bite on bad data, chosen by measuring 5,896 rolling windows of 23

@@ -16,17 +16,22 @@
 # fixes the others: 0.0% of AUD/USD's London bars are at or under 0.5 pips, so waiting for a tight
 # spread there means never trading at all.
 #
-# GBP/USD was added on 2026-10-08 at the user's explicit request, with the trade-off stated first: its
-# +3.0%/yr is positive but spread takes 45% of the gross, which is thin enough to be noise, and it
-# roughly doubles the number of messages for close to no extra expected return. It earns its place by
-# surviving EUR/USD's parameters UNCHANGED -- nothing was re-tuned to admit it, so this cannot be a
-# second pass at fitting the grid. AUD/USD stays out because it tested NEGATIVE.
+# GBP/USD was added on 2026-10-08 at the user's request and REMOVED the same evening, because the
+# number it was added on turned out to be measured wrong. The backtest harness ignored the 16:00 close
+# that the live watcher enforces and scanned to the end of the UTC day instead, so 44% of trades exited
+# up to eight hours later than the live rule allows. With the close enforced:
 #
-# So this is a two-pair strategy running in public to find out whether it is real. It is NOT advice.
+#     EUR/USD   in-sample pick is the setting shipped here; out-of-sample +4.0%/yr over 34 trades,
+#               24/30 of the grid positive out of sample and 20/30 positive in BOTH halves
+#     GBP/USD   its own in-sample pick scores -2.0%/yr out of sample, and only 10/30 of the grid is
+#               positive in both halves. The +10%/yr this setting shows on GBP is a setting chosen on
+#               EUR/USD that LOSES in-sample on GBP, which is not evidence of anything
+#
+# So one pair, on a much thinner edge than was first claimed: +4.0%/yr, not the +17.2% that the broken
+# deadline produced. It is NOT advice.
 enabled: true
 symbols:
   - EUR/USD
-  - GBP/USD
 
 # Chosen on EUR/USD's first 60% of history, then measured once on the rest. Do not tune these against
 # recent results: that is exactly how the opening-range breakout produced +$506 in-sample and -36%/yr

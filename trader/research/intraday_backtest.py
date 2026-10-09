@@ -64,7 +64,15 @@ def run(strategy, bars: pd.DataFrame, capital: float = 10_000.0,
             continue
 
         entry_ts, entry, stop = plan["entry_ts"], plan["entry"], plan["stop"]
+        # Stop at the plan's OWN deadline. `session` is the whole UTC day, so scanning it meant a
+        # "session end" exit landed at 23:55 while the live watcher closes at 16:00 -- the rule being
+        # run was not the rule being measured. On EUR/USD that was 37 of 84 trades exiting at or after
+        # 16:00, carrying $1,193 of the $1,941 total. Both strategies had always computed this field and
+        # nothing had ever read it.
+        deadline = plan.get("exit_deadline")
         after = session[session.index >= entry_ts]
+        if deadline is not None:
+            after = after[after.index <= deadline]
         short = plan.get("side", "long") == "short"
         risk_per_unit = (stop - entry) if short else (entry - stop)
         if after.empty or risk_per_unit <= 0:

@@ -149,3 +149,53 @@ def test_a_short_trade_sizes_off_its_own_stop_distance():
         day=None, entry_ts=None, exit_ts=None, entry=1.1200, exit=1.1180, qty=10_000,
         stop=1.1220, spread_cost=1.0, pnl=19.0, reason="target", side="short")
     assert trade.r_multiple == pytest.approx(19.0 / (10_000 * 0.0020), rel=1e-6)
+
+
+# --- the rule being measured must be the rule being run --------------------------------------------
+
+def test_the_backtest_stops_at_the_session_close_the_live_watcher_enforces():
+    """It did not, and that is where most of the measured edge came from.
+
+    `session` is the whole UTC day. The harness scanned all of it, so a "session end" exit landed as
+    late as 23:55 while the live watcher goes flat at 16:00. On EUR/USD that was 37 of 84 trades exiting
+    at or after 16:00, carrying $1,193 of the $1,941 total -- 61% of the profit from a rule the live
+    system does not run. Enforcing the close took the out-of-sample result from +17.2%/yr to +4.0%.
+
+    Both strategies had always computed `exit_deadline`. Nothing had ever read it.
+    """
+    import inspect
+
+    from trader.research import intraday_backtest
+    from trader.strategies.intraday import OpeningRangeBreakout
+    from trader.strategies.intraday_reversion import SessionReversion
+
+    src = inspect.getsource(intraday_backtest.run)
+    assert 'deadline = plan.get("exit_deadline")' in src
+    assert "after = after[after.index <= deadline]" in src
+
+    for strategy in (SessionReversion, OpeningRangeBreakout):
+        assert "exit_deadline" in inspect.getsource(strategy.plan), \
+            f"{strategy.__name__} must say when it has to be flat"
+
+
+def test_no_trade_outlives_its_own_session():
+    """The property that matters, checked on the real bars rather than on the source."""
+    import glob
+
+    import pandas as pd
+
+    from trader.research.intraday_backtest import run as intraday_run
+    from trader.strategies.intraday_reversion import SessionReversion
+
+    files = sorted(glob.glob("data/ticks/EURUSD_5m/*.csv"))
+    if not files:
+        pytest.skip("no tick data on this machine")
+    bars = pd.concat([pd.read_csv(f, parse_dates=[0], index_col=0) for f in files]).sort_index()
+    bars = bars[~bars.index.duplicated()]
+
+    result = intraday_run(SessionReversion(drop_atr=0.5, stop_atr=0.3, target_frac=1.0), bars)
+    trades = result["trades"]
+    assert trades, "no trades to check"
+    assert all(t.exit_ts.hour < 16 for t in trades), \
+        "a trade exited at or after 16:00, which the live watcher would already have closed"
+    assert all(t.entry_ts.date() == t.exit_ts.date() for t in trades), "nothing may be held overnight"
