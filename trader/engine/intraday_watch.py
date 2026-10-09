@@ -33,6 +33,14 @@ from trader.models import AssetClass, format_price, round_price
 
 PIP = 1e-4
 
+# What the out-of-sample test actually said about each pair, carried into the message because the two
+# are not equally believed and a signal that hides that is misleading. Same parameters for both, chosen
+# once on EUR/USD's first 60% of history and applied unchanged.
+EVIDENCE = {
+    "EUR/USD": "tested +17.2%/yr out of sample",
+    "GBP/USD": "tested +3.0%/yr out of sample — positive but thin; spread takes 45% of the edge",
+}
+
 # Floors and caps that only ever bite on bad data, chosen by measuring 5,896 rolling windows of 23
 # years of real EUR/USD history rather than by taste:
 #
@@ -89,7 +97,7 @@ class Plan:
 
 
 def build_plan(cfg: IntradayConfig, session_open: float, daily_ranges: list[float],
-               day: date) -> Plan | None:
+               day: date, symbol: str = "EUR/USD") -> Plan | None:
     """The day's three levels, or None when there is not enough history to size them.
 
     `daily_ranges` must be EARLIER days only. Letting today's own range set the scale would be choosing
@@ -118,7 +126,7 @@ def build_plan(cfg: IntradayConfig, session_open: float, daily_ranges: list[floa
     # actually carry rather than the one an unrounded distance would have had.
     qty = (cfg.capital_usd * cfg.risk_pct / 100) / (trigger - stop)
     qty = min(qty, cfg.capital_usd * MAX_LEVERAGE / trigger)    # see MAX_LEVERAGE
-    return Plan(day=day, symbol=cfg.symbol, session_open=session_open, atr=atr,
+    return Plan(day=day, symbol=symbol, session_open=session_open, atr=atr,
                 trigger=trigger, stop=stop, target=target, qty=qty)
 
 
@@ -135,13 +143,13 @@ def plan_text(p: Plan, cfg: IntradayConfig) -> str:
         f"\n"
         f"A resting limit buy at {f(p.trigger)} with a stop at {f(p.stop)} does this without you "
         f"watching. Flat by {cfg.close_utc} UTC either way.\n"
-        f"Shadow test, EUR/USD only. Not advice."
+        f"Shadow test — {EVIDENCE.get(p.symbol, 'not yet measured on this pair')}. Not advice."
     )
 
 
-def missed_text(cfg: IntradayConfig, day: date, minutes_in: float) -> str:
+def missed_text(cfg: IntradayConfig, day: date, minutes_in: float, symbol: str) -> str:
     """Told, rather than left to wonder. See the call site for why this is worth a message."""
-    return (f"😴 No {cfg.symbol} plan today ({day:%a %d %b})\n"
+    return (f"😴 No {symbol} plan today ({day:%a %d %b})\n"
             f"The {cfg.open_utc} UTC open was missed by {minutes_in:.0f} min, so the levels cannot be "
             f"measured from it.\n"
             f"Taking the setup from a later rate would be trading something other than what was "
@@ -227,41 +235,53 @@ class IntradayWatcher:
         self._ranges = ranges
 
     # --- journal-backed state, so a restart mid-session does not re-alert ---------------------------
-    def _key(self, day: date, name: str) -> str:
-        return f"irv:{day:%Y-%m-%d}:{name}"
+    def _key(self, day: date, name: str, symbol: str) -> str:
+        """One key per day PER PAIR. It used to be one per day, because there was only ever one pair.
 
-    def _get(self, day: date, name: str) -> str | None:
-        return self.journal.kv_get(self._key(day, name))
+        The slash is dropped so the key stays readable: irv:2026-10-08:EURUSD:state.
+        """
+        return f"irv:{day:%Y-%m-%d}:{symbol.replace('/', '')}:{name}"
 
-    def _set(self, day: date, name: str, value: str) -> None:
-        self.journal.kv_set(self._key(day, name), value)
+    def _get(self, day: date, name: str, symbol: str) -> str | None:
+        return self.journal.kv_get(self._key(day, name, symbol))
 
-    def _stored_plan(self, day: date) -> Plan | None:
-        raw = self._get(day, "plan")
+    def _set(self, day: date, name: str, value: str, symbol: str) -> None:
+        self.journal.kv_set(self._key(day, name, symbol), value)
+
+    def _stored_plan(self, day: date, symbol: str) -> Plan | None:
+        raw = self._get(day, "plan", symbol)
         if not raw:
             return None
         o, a, t, s, g, q = (float(x) for x in raw.split(","))
-        return Plan(day=day, symbol=self.cfg.symbol, session_open=o, atr=a, trigger=t, stop=s,
+        return Plan(day=day, symbol=symbol, session_open=o, atr=a, trigger=t, stop=s,
                     target=g, qty=q)
 
-    def _entry(self, day: date) -> float | None:
-        raw = self._get(day, "entry")
+    def _entry(self, day: date, symbol: str) -> float | None:
+        raw = self._get(day, "entry", symbol)
         return float(raw) if raw else None
 
     def _store_plan(self, p: Plan) -> None:
-        self._set(p.day, "plan", f"{p.session_open},{p.atr},{p.trigger},{p.stop},{p.target},{p.qty}")
+        self._set(p.day, "plan", f"{p.session_open},{p.atr},{p.trigger},{p.stop},{p.target},{p.qty}",
+                  p.symbol)
 
     def run_once(self, report=None) -> list[str]:
-        """One pass. Returns what it did, for the run report."""
+        """One pass over every pair. Returns what it did, for the run report."""
         if not self.cfg.enabled:
             return []
         now = self.clock()
-        day = now.date()
         opens, closes = _parse(self.cfg.open_utc), _parse(self.cfg.close_utc)
         if now.weekday() >= 5 or not (opens <= now.time() < closes):
             return []                                   # outside the London session, nothing to watch
+        out: list[str] = []
+        for symbol in self.cfg.symbols:
+            out += self._run_symbol(symbol, now)
+        return out
 
-        plan = self._stored_plan(day)
+    def _run_symbol(self, symbol: str, now: datetime) -> list[str]:
+        day = now.date()
+        opens = _parse(self.cfg.open_utc)
+
+        plan = self._stored_plan(day, symbol)
         if plan is None:
             # The levels are measured FROM the session open, so the opening rate has to BE the opening
             # rate. If the first run of the day lands at 11:20 -- a restart, an outage, a sleeping
@@ -269,31 +289,31 @@ class IntradayWatcher:
             # the one that was tested. Skip the day instead, and say so once.
             minutes_in = (now - datetime.combine(day, opens, tzinfo=timezone.utc)).total_seconds() / 60
             if minutes_in > self.cfg.plan_within_minutes:
-                if self._get(day, "state") != "missed":
-                    self._set(day, "state", "missed")
+                if self._get(day, "state", symbol) != "missed":
+                    self._set(day, "state", "missed", symbol)
                     # Say so on the phone, not just in the run report. A feature whose entire purpose is
                     # to message you cannot fail by going quiet: a silent day is indistinguishable from
                     # a day the setup never appeared, and you would be left wondering which. The usual
                     # cause is this Mac asleep -- caffeinate -s only holds sleep off on AC power, so a
                     # morning on battery skips the open (observed 2026-10-07, 06:24 to 08:18, no runs).
-                    self.notifier.send(missed_text(self.cfg, day, minutes_in))
+                    self.notifier.send(missed_text(self.cfg, day, minutes_in, symbol))
                     return [f"intraday: missed the {self.cfg.open_utc} open by "
                             f"{minutes_in:.0f} min; no plan today"]
                 return []
-            rate = self._rate()
+            rate = self._rate(symbol)
             if rate is None:
                 return []
-            plan = build_plan(self.cfg, rate, self._daily_ranges(), day)
+            plan = build_plan(self.cfg, rate, self._daily_ranges(symbol), day, symbol)
             if plan is None:
                 return []
             self._store_plan(plan)
             self.notifier.send(plan_text(plan, self.cfg))
-            return [f"intraday plan for {self.cfg.symbol}: buy {plan.trigger:.5f}"]
+            return [f"intraday plan for {symbol}: buy {plan.trigger:.5f}"]
 
-        state = self._get(day, "state") or "waiting"
+        state = self._get(day, "state", symbol) or "waiting"
         if state in ("done", "missed", "gapped"):
             return []
-        rate = self._rate()
+        rate = self._rate(symbol)
         if rate is None:
             return []
 
@@ -304,14 +324,14 @@ class IntradayWatcher:
                 # on the next run. The tested rule enters with a RESTING LIMIT at the trigger, so it is
                 # either already filled and already stopped, or it never happened -- and a fresh entry
                 # down here is simply a different trade from the one that was measured.
-                self._set(day, "state", "gapped")
+                self._set(day, "state", "gapped", symbol)
                 self.notifier.send(gapped_text(plan, rate))
-                return [f"intraday: {self.cfg.symbol} gapped past the stop at {rate:.5f}; day skipped"]
+                return [f"intraday: {symbol} gapped past the stop at {rate:.5f}; day skipped"]
             if rate <= plan.trigger:
-                self._set(day, "state", "in")
-                self._set(day, "entry", f"{rate}")       # what the message quoted, for the sell to measure from
+                self._set(day, "state", "in", symbol)
+                self._set(day, "entry", f"{rate}", symbol)       # what the message quoted, for the sell to measure from
                 self.notifier.send(buy_text(plan, rate))
-                return [f"intraday BUY {self.cfg.symbol} at {rate:.5f}"]
+                return [f"intraday BUY {symbol} at {rate:.5f}"]
             return []
 
         # state == "in"
@@ -321,9 +341,9 @@ class IntradayWatcher:
             why = "stop"
         else:
             return []
-        self._set(day, "state", "done")
-        self.notifier.send(sell_text(plan, rate, why, self._entry(day)))
-        return [f"intraday SELL {self.cfg.symbol} at {rate:.5f} ({why})"]
+        self._set(day, "state", "done", symbol)
+        self.notifier.send(sell_text(plan, rate, why, self._entry(day, symbol)))
+        return [f"intraday SELL {symbol} at {rate:.5f} ({why})"]
 
     def sweep_unfinished(self) -> list[str]:
         """Days that ended while you were still holding, and were never told to sell.
@@ -340,21 +360,26 @@ class IntradayWatcher:
             return []
         today = self.clock().date()
         out: list[str] = []
+        flat = {s.replace("/", ""): s for s in self.cfg.symbols}
         for key in self.journal.kv_keys("irv:%:state"):
             if self.journal.kv_get(key) != "in":
                 continue
+            parts = key.split(":")
+            if len(parts) != 4:
+                continue                                # a pre-multi-pair key; nothing left holding it
             try:
-                day = date.fromisoformat(key.split(":")[1])
+                day = date.fromisoformat(parts[1])
             except ValueError:
                 continue
-            if day >= today:
+            symbol = flat.get(parts[2])
+            if symbol is None or day >= today:
                 continue                                # today is close_out's business, not this
-            plan = self._stored_plan(day)
+            plan = self._stored_plan(day, symbol)
             if plan is None:
                 continue
-            self._set(day, "state", "done")
-            self.notifier.send(stranded_text(plan, self._entry(day)))
-            out.append(f"intraday: {self.cfg.symbol} from {day} was left open; told you to check it")
+            self._set(day, "state", "done", symbol)
+            self.notifier.send(stranded_text(plan, self._entry(day, symbol)))
+            out.append(f"intraday: {symbol} from {day} was left open; told you to check it")
         return out
 
     def close_out(self) -> list[str]:
@@ -362,13 +387,19 @@ class IntradayWatcher:
         if not self.cfg.enabled:
             return []
         now = self.clock()
-        day = now.date()
         if now.time() < _parse(self.cfg.close_utc):
             return []
-        state = self._get(day, "state") or "waiting"
+        out: list[str] = []
+        for symbol in self.cfg.symbols:
+            out += self._close_symbol(symbol, now)
+        return out
+
+    def _close_symbol(self, symbol: str, now: datetime) -> list[str]:
+        day = now.date()
+        state = self._get(day, "state", symbol) or "waiting"
         if state not in ("in", "waiting"):
             return []
-        plan = self._stored_plan(day)
+        plan = self._stored_plan(day, symbol)
         if plan is None:
             return []
 
@@ -376,19 +407,19 @@ class IntradayWatcher:
             # The day is over and the level was never reached. Said once, because you asked why no
             # messages were arriving and the honest answer was "the setup did not happen" -- which the
             # system knew and never told you. Silence should not need interpreting.
-            self._set(day, "state", "done")
+            self._set(day, "state", "done", symbol)
             self.notifier.send(no_setup_text(plan, self.cfg))
-            return [f"intraday: no {self.cfg.symbol} setup today"]
+            return [f"intraday: no {symbol} setup today"]
 
-        rate = self._rate()
+        rate = self._rate(symbol)
         if rate is None:
             return []
-        self._set(day, "state", "done")
-        self.notifier.send(sell_text(plan, rate, "session end", self._entry(day)))
-        return [f"intraday SELL {self.cfg.symbol} at {rate:.5f} (session end)"]
+        self._set(day, "state", "done", symbol)
+        self.notifier.send(sell_text(plan, rate, "session end", self._entry(day, symbol)))
+        return [f"intraday SELL {symbol} at {rate:.5f} (session end)"]
 
     # --- data ---------------------------------------------------------------------------------------
-    def _rate(self) -> float | None:
+    def _rate(self, symbol: str) -> float | None:
         """The live mid, or None when it is too old to act on.
 
         The feed stamps each quote with the BAR's own timestamp on purpose, so that "a stale feed must
@@ -398,23 +429,23 @@ class IntradayWatcher:
         that no longer existed. Same limit the gate uses for forex, from the same config.
         """
         if self._price is not None:
-            return self._price(self.cfg.symbol)
+            return self._price(symbol)
         try:
             from trader.data.fx_quotes import YahooFXFeed
 
-            quote = YahooFXFeed().get_quote(self.cfg.symbol, AssetClass.FOREX)
+            quote = YahooFXFeed().get_quote(symbol, AssetClass.FOREX)
         except Exception:
             return None
         if quote.price <= 0:
             return None
         age = (self.clock() - quote.ts).total_seconds()
         if age > self.settings.risk.guards.stale_forex_seconds:
-            self.journal.log(f"intraday: ignoring a {age / 60:.0f} min old {self.cfg.symbol} quote "
+            self.journal.log(f"intraday: ignoring a {age / 60:.0f} min old {symbol} quote "
                              f"from {quote.ts:%Y-%m-%d %H:%M} UTC", level="warning")
             return None
         return quote.price
 
-    def _daily_ranges(self) -> list[float]:
+    def _daily_ranges(self, symbol: str) -> list[float]:
         """Daily high-low for earlier days, used only as a scale for "how far is far".
 
         Built from HOURLY bars grouped into whole UTC days, because that is the window the backtest
@@ -440,7 +471,7 @@ class IntradayWatcher:
 
             from trader.data.history import YAHOO_TICKERS
 
-            ticker = YAHOO_TICKERS.get(self.cfg.symbol)
+            ticker = YAHOO_TICKERS.get(symbol)
             if ticker is None:
                 return []
             frame = yf.Ticker(ticker).history(period="2mo", interval="1h")

@@ -840,6 +840,32 @@ there is genuinely nothing, and from the outside "nothing happened" and "somethi
 identical. At the close, a day that never triggered now says so, once, and says how often to expect a
 trade. The alternative was the user having to ask.
 
+#### GBP/USD added, at the user's call and with the trade-off stated (2026-10-08)
+Asked for, after being told plainly what it buys: **+3.0%/yr** out of sample against EUR/USD's +17.2%,
+with spread taking **45% of the gross** — positive, but thin enough to be noise — and roughly **double**
+the number of messages for close to no extra expected return. AUD/USD stays out: it tested **negative**
+at −1.3%/yr, and 0.0% of its London bars are tight enough for any filter to rescue it.
+
+The one thing that makes a second pair defensible is that **nothing was re-tuned to admit it**. Both
+pairs run the parameters chosen once on EUR/USD's first 60% of history, so this cannot be a second pass
+at fitting the grid. A pair earns its place by surviving those settings unchanged.
+
+The watcher was single-pair throughout, so this was a real change rather than a config line: state keys
+are per pair now (`irv:2026-10-08:EURUSD:state`), and the plan, the rate, the ATR, the entry and the
+close all take a symbol. Two bugs came out of doing it:
+
+* Every message ended **"Shadow test, EUR/USD only"**, so the GBP/USD plan asserted a pair it was not
+  about — and implied GBP had EUR's result. Each pair now carries its own measured number, and a pair
+  with no measured result says "not yet measured on this pair" rather than borrowing one.
+* **Nothing the watcher did had ever been journalled.** It runs in the coordinator's post-run block,
+  after each engine has already logged its own "run finished" line, so every intraday action landed in a
+  report nobody persisted. That is why a search for intraday events this morning came back empty, and
+  why "why am I not getting messages" had no record to answer it with. The actions are logged now.
+
+Verified against live data before it goes out: both pairs build sane plans — EUR/USD buy 1.11896 behind
+an 18 pip stop, GBP/USD buy 1.31991 behind 20 pips — and per-pair state was confirmed by having one pair
+trigger while the other stayed waiting, which a shared key would have broken silently.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)

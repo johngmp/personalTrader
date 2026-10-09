@@ -2,9 +2,10 @@
 # This NEVER places an order. It is a watcher: it works out the day's levels, then tells you when the
 # rate reaches them.
 #
-# EUR/USD only, and that is the whole finding rather than a default nobody got round to changing.
-# Tested on 272 / 268 / 244 days of real tick data with the spread actually quoted, using the setting
-# chosen on EUR/USD's first 60% and applied unchanged to pairs it had never seen:
+# EUR/USD and GBP/USD. AUD/USD is deliberately absent, and the difference between them is the finding
+# rather than a default nobody got round to changing. Tested on 272 / 268 / 244 days of real tick data
+# with the spread actually quoted, using the setting chosen on EUR/USD's first 60% and applied unchanged
+# to pairs it had never seen:
 #
 #     EUR/USD   +17.2%/yr    gross +$792   spread  $113
 #     GBP/USD    +3.0%/yr    gross +$593   spread  $265
@@ -15,9 +16,17 @@
 # fixes the others: 0.0% of AUD/USD's London bars are at or under 0.5 pips, so waiting for a tight
 # spread there means never trading at all.
 #
-# So this is a one-pair strategy running in public to find out whether it is real. It is NOT advice.
+# GBP/USD was added on 2026-10-08 at the user's explicit request, with the trade-off stated first: its
+# +3.0%/yr is positive but spread takes 45% of the gross, which is thin enough to be noise, and it
+# roughly doubles the number of messages for close to no extra expected return. It earns its place by
+# surviving EUR/USD's parameters UNCHANGED -- nothing was re-tuned to admit it, so this cannot be a
+# second pass at fitting the grid. AUD/USD stays out because it tested NEGATIVE.
+#
+# So this is a two-pair strategy running in public to find out whether it is real. It is NOT advice.
 enabled: true
-symbol: EUR/USD
+symbols:
+  - EUR/USD
+  - GBP/USD
 
 # Chosen on EUR/USD's first 60% of history, then measured once on the rest. Do not tune these against
 # recent results: that is exactly how the opening-range breakout produced +$506 in-sample and -36%/yr

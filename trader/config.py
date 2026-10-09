@@ -124,7 +124,10 @@ class IntradayConfig(BaseModel):
     """
 
     enabled: bool = False
-    symbol: str = "EUR/USD"
+    # Every pair runs the SAME parameters, chosen once on EUR/USD's first 60% of history. That is the
+    # whole basis on which a second pair is allowed: it is not re-tuned, so adding one cannot be a way
+    # of fitting the grid again. A pair earns its place by surviving those settings unchanged.
+    symbols: list[str] = ["EUR/USD"]
     drop_atr: float = 0.5
     stop_atr: float = 0.3
     target_frac: float = 1.0

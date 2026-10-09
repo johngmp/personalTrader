@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 
 from trader.config import IntradayConfig, load_settings
-from trader.engine.intraday_watch import IntradayWatcher, build_plan, plan_text
+from trader.engine.intraday_watch import IntradayWatcher, Plan, build_plan, plan_text
 from trader.journal.db import Journal
 
-CFG = IntradayConfig(enabled=True, symbol="EUR/USD", drop_atr=0.5, stop_atr=0.3, target_frac=1.0,
+CFG = IntradayConfig(enabled=True, symbols=["EUR/USD"], drop_atr=0.5, stop_atr=0.3, target_frac=1.0,
                      atr_days=20, capital_usd=10_000.0, risk_pct=1.0)
 DAY = date(2026, 10, 7)
 NEXT_DAY = datetime(2026, 10, 8, 7, 5, tzinfo=timezone.utc)
@@ -241,7 +241,7 @@ def test_the_target_you_are_told_is_the_target_that_triggers_the_sell():
 def test_a_rate_at_the_printed_target_sells(journal):
     w = _watcher(journal, "07:05", 1.11894369125, ranges=ODD_RANGES)
     w.run_once()
-    plan = w._stored_plan(DAY)
+    plan = w._stored_plan(DAY, "EUR/USD")
     # Exactly the figures a message prints, not the floats behind them.
     trigger, target = float(f"{plan.trigger:.5f}"), float(f"{plan.target:.5f}")
     _watcher(journal, "09:00", trigger, ranges=ODD_RANGES).run_once()          # in
@@ -259,7 +259,7 @@ def test_a_setup_that_gapped_past_its_own_stop_is_not_a_buy(journal):
     """
     w = _watcher(journal, "07:05", 1.16420)
     w.run_once()
-    plan = w._stored_plan(DAY)
+    plan = w._stored_plan(DAY, "EUR/USD")
 
     gap = _watcher(journal, "09:00", plan.stop - 0.0020)
     actions = gap.run_once()
@@ -280,7 +280,7 @@ def test_the_sell_measures_from_what_the_buy_actually_quoted(journal):
     """
     w = _watcher(journal, "07:05", 1.16420)
     w.run_once()
-    plan = w._stored_plan(DAY)
+    plan = w._stored_plan(DAY, "EUR/USD")
     entry = plan.trigger - 0.0005                 # stepped straight past the trigger, still above the stop
     assert entry > plan.stop
 
@@ -357,8 +357,8 @@ def test_a_stale_quote_is_not_acted_on(journal, monkeypatch):
         monkeypatch.setattr(fq, "YahooFXFeed", lambda *a, **k: Feed(age_s))
         return IntradayWatcher(s, journal, Spy(), clock=lambda: now, ranges=RANGES)
 
-    assert watcher(limit + 60)._rate() is None, "a quote past the forex staleness limit must not be used"
-    assert watcher(60)._rate() == pytest.approx(1.11000), "a fresh quote must still be used"
+    assert watcher(limit + 60)._rate("EUR/USD") is None, "a quote past the forex staleness limit must not be used"
+    assert watcher(60)._rate("EUR/USD") == pytest.approx(1.11000), "a fresh quote must still be used"
 
 
 def test_the_atr_comes_from_whole_utc_days_of_hourly_bars(journal, monkeypatch):
@@ -395,7 +395,7 @@ def test_the_atr_comes_from_whole_utc_days_of_hourly_bars(journal, monkeypatch):
                         type("m", (), {"Ticker": Ticker, "__spec__": None}))
     s = load_settings().model_copy(update={"intraday": CFG})
     w = IntradayWatcher(s, journal, Spy(), clock=lambda: now)
-    got = w._daily_ranges()
+    got = w._daily_ranges("EUR/USD")
 
     # 8 October is today and is excluded; the two short days are not whole days.
     assert len(got) == len(want), f"expected {sorted(want)}, got {len(got)} ranges"
@@ -416,7 +416,7 @@ def test_no_price_history_means_no_plan_rather_than_a_guess(journal, monkeypatch
     w = IntradayWatcher(s, journal, Spy(), clock=lambda: datetime(2026, 10, 8, 7, 5, tzinfo=timezone.utc),
                         price=lambda _s: 1.11894)
     assert w.run_once() == [] and w.notifier.sent == []
-    assert w._stored_plan(date(2026, 10, 8)) is None
+    assert w._stored_plan(date(2026, 10, 8), "EUR/USD") is None
 
 
 def test_a_day_that_never_triggered_says_so_at_the_close(journal):
@@ -441,7 +441,7 @@ def test_a_day_that_never_triggered_says_so_at_the_close(journal):
 def test_a_day_that_did_trade_still_gets_a_sell_not_a_quiet_note(journal):
     """The quiet note must not swallow the session-end exit."""
     _watcher(journal, "07:05", 1.11919).run_once()
-    plan = _watcher(journal, "07:05", 1.0, )._stored_plan(DAY)
+    plan = _watcher(journal, "07:05", 1.0, )._stored_plan(DAY, "EUR/USD")
     _watcher(journal, "09:00", plan.trigger).run_once()   # in
     out = _watcher(journal, "16:05", plan.trigger + 0.0010)
     out.run_once()
@@ -449,3 +449,124 @@ def test_a_day_that_did_trade_still_gets_a_sell_not_a_quiet_note(journal):
     assert actions and "SELL" in actions[0]
     assert "SELL EUR/USD now" in out.notifier.sent[0] and "session end" in out.notifier.sent[0]
     assert "No EUR/USD trade today" not in "".join(out.notifier.sent)
+
+
+# --- two pairs -------------------------------------------------------------------------------------
+
+TWO = CFG.model_copy(update={"symbols": ["EUR/USD", "GBP/USD"]})
+
+
+def _two(journal, at: str, rates: dict, ranges=None):
+    now = datetime.fromisoformat(f"2026-10-07T{at}+00:00")
+    s = load_settings().model_copy(update={"intraday": TWO})
+    return IntradayWatcher(s, journal, Spy(), clock=lambda: now, price=lambda sym: rates[sym],
+                           ranges=RANGES if ranges is None else ranges)
+
+
+def test_both_pairs_get_their_own_plan():
+    """GBP/USD was added on the strength of surviving EUR/USD's parameters unchanged. If the loop ever
+    silently watched one pair, the other would simply never message and nothing would say so."""
+    from trader.journal.db import Journal
+    import tempfile
+
+    j = Journal(pathlib_tmp := __import__("pathlib").Path(tempfile.mkdtemp()) / "j.db")
+    w = _two(j, "07:05", {"EUR/USD": 1.11919, "GBP/USD": 1.34500})
+    actions = w.run_once()
+    assert len(actions) == 2, actions
+    assert any("EUR/USD" in a for a in actions) and any("GBP/USD" in a for a in actions)
+    assert len(w.notifier.sent) == 2
+    assert any("EUR/USD plan" in m for m in w.notifier.sent)
+    assert any("GBP/USD plan" in m for m in w.notifier.sent)
+
+    # The levels differ because the rates differ: one plan is not being reused for both.
+    eur = w._stored_plan(DAY, "EUR/USD")
+    gbp = w._stored_plan(DAY, "GBP/USD")
+    assert eur.trigger != gbp.trigger and gbp.session_open == pytest.approx(1.34500)
+    j.close()
+
+
+def test_one_pair_triggering_leaves_the_other_alone():
+    """Per-pair state. A shared key would have had GBP's buy mark EUR as "in", so EUR would never fire
+    again and a position you were never told to open would later be closed."""
+    from trader.journal.db import Journal
+    import tempfile
+
+    j = Journal(__import__("pathlib").Path(tempfile.mkdtemp()) / "j.db")
+    _two(j, "07:05", {"EUR/USD": 1.11919, "GBP/USD": 1.34500}).run_once()
+    gbp = j.kv_get("irv:2026-10-07:GBPUSD:plan")
+    assert gbp, "the key must carry the pair"
+
+    plan = IntradayWatcher(load_settings().model_copy(update={"intraday": TWO}), j, Spy(),
+                           clock=lambda: datetime.fromisoformat("2026-10-07T09:00+00:00"),
+                           price=lambda s: 1.0, ranges=RANGES)._stored_plan(DAY, "GBP/USD")
+
+    # GBP falls to its trigger; EUR does not move.
+    w = _two(j, "09:00", {"EUR/USD": 1.11919, "GBP/USD": plan.trigger})
+    actions = w.run_once()
+    assert len(actions) == 1 and "BUY GBP/USD" in actions[0]
+    assert j.kv_get("irv:2026-10-07:GBPUSD:state") == "in"
+    assert j.kv_get("irv:2026-10-07:EURUSD:state") is None, "EUR must still be waiting"
+    assert "GBP/USD" in w.notifier.sent[0] and "EUR/USD" not in w.notifier.sent[0]
+    j.close()
+
+
+def test_the_pairs_are_the_two_that_survived_the_test():
+    """AUD/USD tested NEGATIVE at -1.3%/yr and 0.0% of its London bars are tight enough to rescue it."""
+    from trader.config import load_settings as real
+
+    cfg = real().intraday
+    assert cfg.symbols == ["EUR/USD", "GBP/USD"]
+    assert "AUD/USD" not in cfg.symbols
+    # Same parameters for both: admitting a pair must not be another pass at fitting the grid.
+    assert (cfg.drop_atr, cfg.stop_atr, cfg.target_frac) == (0.5, 0.3, 1.0)
+
+
+def test_each_pair_carries_its_own_evidence_not_a_stale_footer():
+    """The footer said "Shadow test, EUR/USD only" on every message, so the GBP/USD plan asserted a pair
+    it was not about -- and, worse, implied GBP had EUR's result.
+
+    They are not equally believed: EUR/USD tested +17.2%/yr out of sample and GBP/USD +3.0%, with spread
+    taking 45% of the gross. A signal that hides that difference is misleading about its own strength.
+    """
+    from trader.engine.intraday_watch import EVIDENCE
+
+    cfg = load_settings().intraday
+    for symbol in cfg.symbols:
+        assert symbol in EVIDENCE, f"{symbol} is being sent with no stated evidence"
+
+    def footer(symbol):
+        p = Plan(day=DAY, symbol=symbol, session_open=1.2, atr=0.006, trigger=1.197,
+                 stop=1.1952, target=1.2, qty=50_000)
+        return plan_text(p, cfg).splitlines()[-1]
+
+    assert "EUR/USD only" not in footer("GBP/USD")
+    assert "+3.0%" in footer("GBP/USD") and "thin" in footer("GBP/USD")
+    assert "+17.2%" in footer("EUR/USD")
+    assert "Not advice." in footer("EUR/USD") and "Not advice." in footer("GBP/USD")
+
+
+def test_a_pair_with_no_measured_result_says_so_rather_than_borrowing_one():
+    """Adding a symbol to the config must not silently inherit another pair's number."""
+    from trader.engine.intraday_watch import plan_text as pt
+
+    cfg = load_settings().intraday
+    p = Plan(day=DAY, symbol="USD/JPY", session_open=150.0, atr=0.6, trigger=149.7,
+             stop=149.52, target=150.0, qty=1000)
+    assert "not yet measured on this pair" in pt(p, cfg).splitlines()[-1]
+
+
+def test_what_the_watcher_did_reaches_the_journal():
+    """It did not. The watcher runs in the coordinator's post-run block, AFTER each engine has logged
+    its own "run finished" line, so every intraday action landed in a report nobody persisted.
+
+    Asked why no currency messages were arriving, there was no record to check -- the kv state said a day
+    had finished and nothing said what had been sent. These are the only messages that are meant to be
+    acted on by hand, so they are the last thing that should go unlogged.
+    """
+    import inspect
+
+    from trader.engine import live
+
+    src = inspect.getsource(live.Coordinator._intraday)
+    assert "self.journal.log(what" in src, "the watcher's actions must be journalled"
+    assert "for what in did:" in src
