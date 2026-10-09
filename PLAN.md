@@ -962,6 +962,44 @@ So the order of work for USD/JPY, if it is ever wanted, is: make pip size a prop
 than a module constant, *then* finish the download, *then* test it the same way — in-sample pick, read
 once out of sample, and check both halves. Not the other way round.
 
+#### Research: when and how to trade this better — NOTHING SURVIVED (2026-10-09)
+Asked what else would improve the result, seven questions were put to the **in-sample period only**, so
+that at most one hypothesis would be carried to a single out-of-sample read.
+
+Five answered themselves and are recorded so they are not asked again:
+
+| question | in-sample answer | verdict |
+|---|---|---|
+| entry hour | 08:00 +$110/trade (n=5), 14:00 −$64 (n=5) | samples of five; noise |
+| London-only vs NY overlap | +$40.70 vs +$22.89 per trade | both positive, no discriminator |
+| day of week | Fri +$69, Thu −$11 (n=7–11) | the classic FX false positive |
+| spread at entry | tight <0.3p **+$15.86**, mid 0.3–0.5p **+$30.60** | the obvious filter is *backwards*; dropped |
+| time in trade | <1h +$19, 1–3h +$29, 3–6h +$54 | no usable pattern |
+
+The sixth looked real and had a mechanism to go with it: **quiet markets**. Session reversion is a
+range idea, so a large daily range should mean the drop is part of a move that *continues* rather than
+reverts. In-sample, average R rose monotonically as the ATR cutoff fell — +0.31 unfiltered, +0.52 under
+65 pips, +0.60 under 60, +0.64 under 50 — and monotonic is not what noise usually looks like. It is also
+not a sizing artifact: risk is $100 on every trade by construction, so the difference is **how often the
+target is reached**, 10/20 on quiet days against 5/25 on normal ones.
+
+**It did not reproduce.** The out-of-sample read: average R **+0.11**, against the +0.60 quiet days
+showed in-sample. And the filter itself was untestable — out-of-sample, only **7%** of days were above
+65 pips (ATR 42–73, median 54) against **52%** in-sample, so it removed 1 trade in 35. The period was
+almost entirely "quiet" by the hypothesis's own definition and should therefore have been excellent.
+It was mediocre, which falsifies the effect more cleanly than the filter test could have.
+
+**So no change is justified, and that is the finding.** Sixteen things were looked at (seven questions,
+nine thresholds); one looked good in-sample and failed to replicate. That is exactly the base rate to
+expect from sixteen looks at 45 trades, and shipping it would have repeated the breakout's mistake with
+better manners.
+
+One observation worth carrying forward, not acting on: out-of-sample only **6 of 35** trades reached the
+target (17%, against 33% in-sample) and **54% drifted to the session close**. The reversion is
+completing less often than it used to. If that persists it is a reason to retire the signal, not to
+re-tune it — the next move on this strategy should be **more out-of-sample data**, not more hypotheses
+against the 272 days already used.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
