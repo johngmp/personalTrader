@@ -46,3 +46,23 @@ def test_correlation_group_with_unknown_symbol_is_rejected(tmp_path):
     _write_config(tmp_path, universe={"symbols": {"SPY": "us_equity"}, "correlation_groups": {"g": ["SPY", "QQQ"]}})
     with pytest.raises(ValidationError, match="unknown symbols"):
         load_settings(tmp_path)
+
+
+def test_an_intraday_pair_whose_pip_is_not_one_ten_thousandth_is_refused():
+    """PIP in intraday_watch is the constant 1e-4. That is a pip on a 5-decimal major and is NOT one on
+    a JPY pair, where a pip is 0.01.
+
+    Adding USD/JPY produced a plan reading "typical day 6000 pips", a "1800 pips" stop and a 3000-pip
+    target -- prices and position size correct, every pip count wrong by a factor of a hundred -- and
+    rendered the MIN_ATR floor meaningless, since 0.001 is nothing beside a real JPY range of 0.6. A
+    wrong number on a message you act on by hand is worse than an unsupported pair, so this fails at
+    startup. Supporting one means making pip size a property of the pair, not a module constant.
+    """
+    import pytest
+
+    from trader.config import IntradayConfig
+
+    assert IntradayConfig(symbols=["EUR/USD", "GBP/USD"]).symbols == ["EUR/USD", "GBP/USD"]
+    for bad in (["USD/JPY"], ["EUR/USD", "USD/JPY"], ["XAU/USD"]):
+        with pytest.raises(ValueError, match="pip"):
+            IntradayConfig(symbols=bad)

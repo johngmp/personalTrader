@@ -8,7 +8,7 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from trader.models import AssetClass
 
@@ -140,6 +140,28 @@ class IntradayConfig(BaseModel):
     plan_within_minutes: int = 30
     capital_usd: float = 10_000.0
     risk_pct: float = 1.0
+
+    @field_validator("symbols")
+    @classmethod
+    def _only_pairs_whose_pips_this_code_understands(cls, symbols: list[str]) -> list[str]:
+        """Refuse a pair quoted to 3 decimals, because every pip figure would be 100x too large.
+
+        `PIP` in intraday_watch is the constant 1e-4, which is a pip on a 5-decimal major and is NOT one
+        on a JPY pair, where a pip is 0.01. Adding USD/JPY to this list produced a plan reading "typical
+        day 6000 pips", a "1800 pips" stop and a 3000-pip target -- prices and position size correct,
+        every pip count wrong by a factor of a hundred, and the MIN_ATR floor that exists to reject bad
+        data rendered meaningless because 0.001 is nothing next to a real JPY range of 0.6.
+
+        A wrong number on a message you act on by hand is worse than an unsupported pair, so this fails
+        at startup instead. Supporting one means making pip size a property of the pair rather than a
+        module constant, and that is a prerequisite for ever testing USD/JPY, not an afterthought.
+        """
+        bad = [s for s in symbols if s.split("/")[-1] == "JPY" or s.startswith("XAU")]
+        if bad:
+            raise ValueError(
+                f"intraday.symbols cannot include {bad}: a pip on these is not 1e-4, so every pip "
+                f"figure in the messages would be wrong by 100x. Make pip size per-pair first.")
+        return symbols
 
 
 class Settings(BaseModel):

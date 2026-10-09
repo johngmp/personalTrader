@@ -939,6 +939,29 @@ a guard, and passed when the buy's guard was deleted because six lines up it fou
 guard instead. The race is now tested by having both processes read before either writes, and the wiring
 by counting: one exclusive claim per message, so removing a guard makes two numbers disagree.
 
+#### USD/JPY: download stopped, and a reason not to hurry it (2026-10-09)
+USD/JPY was the one remaining candidate with a spread tight enough to possibly clear the bar, so a tick
+download was started. It was **stopped at its time limit with 52 of the ~250 days needed** — a 60/40
+split on 52 days leaves roughly seven out-of-sample trades, which is the same uselessness that sank the
+short side. Restarting it needs about four more hours of downloading.
+
+Checking what would happen if it were added anyway turned up a latent bug worth more than the data.
+`PIP` in `intraday_watch` is the constant `1e-4`. That is a pip on a 5-decimal major and is **not** one
+on a JPY pair, where a pip is `0.01`. Configuring USD/JPY produced:
+
+> 📋 USD/JPY plan · London opened at 150.000 · **typical day 6000 pips**
+> BUY if it falls to 149.700 · Stop 149.520 (**1800 pips**, $100) · Target 150.000 (**3000 pips**)
+
+Prices and position size correct; **every pip figure wrong by a factor of a hundred**. Worse, the
+`MIN_ATR` floor that exists to reject bad data becomes meaningless, because 0.001 is nothing beside a
+real JPY range of 0.6 — the one guard against a catastrophic position size would never fire on a JPY
+pair. A wrong number on a message to be acted on by hand is worse than an unsupported pair, so the
+config now **refuses** any pair quoted to 3 decimals at startup.
+
+So the order of work for USD/JPY, if it is ever wanted, is: make pip size a property of the pair rather
+than a module constant, *then* finish the download, *then* test it the same way — in-sample pick, read
+once out of sample, and check both halves. Not the other way round.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
