@@ -82,3 +82,73 @@ def test_chart_gridlines_stay_inside_the_plot():
     clamps = dash.FX_JS.count("if (v >= lo && v <= hi)") + dash.JS.count("if (v >= lo && v <= hi)")
     assert clamps == 2, f"expected both chart renderers to clamp their ticks, found {clamps}"
     assert "overflow:visible" in dash.CSS, "clamping matters because the SVG is not clipped"
+
+
+# --- the light theme --------------------------------------------------------------------------------
+
+def _contrast(a: str, b: str) -> float:
+    def lin(c: float) -> float:
+        c /= 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    def lum(h: str) -> float:
+        h = h.lstrip("#")
+        r, g, bl = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(bl)
+
+    la, lb = lum(a), lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def _tokens(scope: str) -> dict[str, str]:
+    """The custom properties declared in one theme block."""
+    body = re.search(re.escape(scope) + r"\{(.*?)\}", dash.CSS, re.S)
+    assert body, f"no {scope} block in the stylesheet"
+    return dict(re.findall(r"(--[a-z0-9-]+):\s*(#[0-9a-fA-F]{6})", body.group(1)))
+
+
+def test_the_light_theme_declares_every_token_the_dark_one_does():
+    """A token the light block forgets silently keeps its DARK value -- black text on a white card is
+    obvious, but a missed `--down-bg` is a dark red smear nobody notices until a loss renders."""
+    dark = _tokens(":root")
+    light = _tokens(':root[data-theme="light"]')
+    colour_tokens = {k for k in dark if not k.startswith(("--t-", "--radius", "--rail", "--panel"))}
+    missing = colour_tokens - set(light)
+    assert not missing, f"the light theme never redefines {sorted(missing)}, so they stay dark"
+
+
+def test_every_light_theme_text_colour_clears_wcag_aa():
+    """This file says contrast was checked rather than eyeballed. That has to stay true of both themes,
+    and light is where it is easiest to get wrong: the same green that reads on near-black is invisible
+    on white."""
+    light = _tokens(':root[data-theme="light"]')
+    for token in ("--ink", "--ink2", "--muted", "--up", "--down", "--warn", "--accent"):
+        for surface in ("--page", "--s1"):
+            ratio = _contrast(light[token], light[surface])
+            assert ratio >= 4.5, f"{token} on {surface} is {ratio:.2f}:1 in light mode, under AA's 4.5"
+
+
+def test_the_light_theme_is_written_once_and_used_twice():
+    """The OS-preference block and the explicit override need identical colours. Two hand-written
+    copies of a palette is the drift this file warns about -- and a palette that drifts gives you one
+    set of colours when you toggle and another when macOS does."""
+    assert dash.CSS.count('--page:#f7f7f8') == 2, "the light palette should appear twice, from one source"
+    media = re.search(r"@media \(prefers-color-scheme: light\)\{([^@]*?)\}\}", dash.CSS, re.S)
+    assert media and ':root:not([data-theme="dark"])' in media.group(1), (
+        "the OS preference must not override a reader who has explicitly chosen dark")
+
+
+def test_dark_is_still_the_default():
+    """Nobody who never touches the toggle should see the page change."""
+    assert dash.CSS.index(":root{") < dash.CSS.index("prefers-color-scheme")
+    assert _tokens(":root")["--page"] == "#0a0a0b"
+
+
+def test_charts_take_their_colours_from_the_theme_not_from_literals():
+    """An SVG stroke is an attribute, not a cascading property: a chart drawn with a literal keeps its
+    dark gridlines on a white page. Both renderers go through tok(), and both re-draw on a change."""
+    for name in ("JS", "FX_JS"):
+        source = getattr(dash, name)
+        for literal in ('stroke="#', 'fill="#'):
+            assert literal not in source, f"{name} draws with a hardcoded colour: {literal}"
+        assert "__ptRedrawCharts" in source, f"{name} never re-draws when the theme changes"

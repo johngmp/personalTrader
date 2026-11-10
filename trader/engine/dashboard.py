@@ -841,6 +841,8 @@ a few minutes.</p>
 <div class="spacer"></div>
 <div class="account"><div><b>Paper trading</b> <span class="pill {'bad' if d['kill_switch'] else 'ok'}">{'Halted' if d['kill_switch'] else 'Active'}</span>
 <span class="pill closed">Auto</span></div><div class="subtle">Last engine run {html.escape(last_run)} UTC · orders today {d['orders_today']}/{d['max_orders']}</div></div>
+<button id="theme-toggle" class="icon-btn" type="button" title="Switch between light and dark"
+ aria-label="Switch between light and dark"><span class="t-sun" aria-hidden="true">☀</span><span class="t-moon" aria-hidden="true">☾</span></button>
 <button id="claude-toggle" aria-expanded="false" aria-controls="claude-panel" title="Ask Claude (⌘J)">Ask Claude</button></header>
 <nav class="rail" role="tablist" aria-label="Sections">
 <div class="rail-top"><div class="rail-brand">PT</div><span class="rail-name">Personal Trader</span>
@@ -1009,6 +1011,7 @@ CSS = """
   /* State. Only these three carry meaning. */
   --up:#30d158; --down:#ff5a4e; --warn:#ffd60a;
   --up-bg:#0e2a18; --up-line:#1d5133; --down-bg:#2d1210; --down-line:#5e2420;
+  --warn-bg:#2a2109; --warn-line:#5a4410;
   /* Brand. Deliberately not green or red, so it can never be mistaken for a result. */
   --accent:#f0a830; --accent-ink:#17170f; --accent-bg:#2a1f0a; --accent-line:#4a360e;
   /* Type scale */
@@ -1031,7 +1034,7 @@ body{
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--s4);border-radius:6px;border:3px solid var(--page)}
-::-webkit-scrollbar-thumb:hover{background:#34343d}
+::-webkit-scrollbar-thumb:hover{background:var(--line2)}
 ::-webkit-scrollbar-track{background:transparent}
 
 /* --- type ---------------------------------------------------------------------------------------- */
@@ -1186,7 +1189,7 @@ dd{margin:3px 0 0;font-weight:600;font-size:var(--t-lg)}
 .pill{display:inline-block;font-size:var(--t-xs);padding:2px 8px;border-radius:999px;
   border:1px solid var(--line2);color:var(--ink2);font-weight:500;white-space:nowrap}
 .pill.ok{color:var(--up);border-color:var(--up-line);background:var(--up-bg)}
-.pill.warn{color:var(--warn);border-color:#5a4410;background:#2a2109}
+.pill.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
 .pill.bad{color:var(--down);border-color:var(--down-line);background:var(--down-bg)}
 .pill.buy{color:var(--up);background:var(--up-bg);border-color:var(--up-line)}
 .pill.sell{color:var(--down);background:var(--down-bg);border-color:var(--down-line)}
@@ -1366,6 +1369,50 @@ body.claude-open #claude-toggle{background:var(--accent);color:var(--accent-ink)
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 """
+
+# --- the light theme ------------------------------------------------------------------------------
+# One set of values, written once and used twice: the OS-preference block and the explicit override
+# need identical colours, and two copies of a palette is exactly the drift this file already warns
+# about elsewhere.
+#
+# The four rules above still hold. Surfaces are neutral steps of lightness (white card, grey page) so
+# elevation still comes from surface rather than shadow, and the state colours are darkened until they
+# carry on white: measured, every token clears WCAG AA against BOTH the page and the card, and --ink
+# and --ink2 clear AAA. Green against red is 1.05:1 here -- even worse than the dark theme's 1.52 --
+# which is the whole reason every figure carries its own + or - sign and every headline its glyph.
+_LIGHT = """
+  --page:#f7f7f8; --s1:#ffffff; --s2:#f2f2f4; --s3:#e9e9ec; --s4:#dededf;
+  --line:#e4e4e8; --line2:#d2d2d8;
+  --ink:#17171a; --ink2:#4a4a55; --muted:#6b6b78;
+  --up:#137a3a; --down:#c42a1e; --warn:#8a6200;
+  --up-bg:#eaf7ef; --up-line:#b5e2c6; --down-bg:#fdeeec; --down-line:#f6c4bf;
+  --warn-bg:#fdf6e3; --warn-line:#e8d08a;
+  --accent:#9a5b06; --accent-ink:#ffffff; --accent-bg:#fdf3e3; --accent-line:#edcf9a;
+"""
+
+# Dark stays the default in :root, so a page that never runs the toggle looks exactly as it did. The
+# OS preference is honoured only when the reader has not chosen for themselves -- an explicit
+# data-theme="dark" must win over a light Mac, or the toggle would appear not to work.
+CSS += (
+    "@media (prefers-color-scheme: light){:root:not([data-theme=\"dark\"]){" + _LIGHT + "}}\n"
+    ":root[data-theme=\"light\"]{" + _LIGHT + "}\n"
+    # Only the chrome fades; a number must never animate its colour, because a figure caught
+    # mid-transition is briefly the wrong colour for its sign.
+    "body,.card,.rail,.pill{transition:background-color .15s ease,border-color .15s ease}\n"
+    # The theme control. `Ask Claude` is deliberately a ghost button that turns accent only while the
+    # panel is open (body.claude-open), so it is left alone -- that is a state model, not an oversight.
+    ".icon-btn{display:inline-grid;place-items:center;width:30px;height:30px;padding:0;cursor:pointer;"
+    "background:var(--s2);color:var(--ink2);border:1px solid var(--line);border-radius:var(--radius-sm);"
+    "font-size:14px;line-height:1}\n"
+    ".icon-btn:hover{background:var(--s3);color:var(--ink);border-color:var(--line2)}\n"
+    # One glyph per theme, swapped by the attribute rather than by script, so the button is already
+    # correct on first paint instead of flickering to the right icon after load.
+    ".t-moon{display:none}.t-sun{display:block}\n"
+    "@media (prefers-color-scheme: light){:root:not([data-theme=\"dark\"]) .t-sun{display:none}"
+    ":root:not([data-theme=\"dark\"]) .t-moon{display:block}}\n"
+    ":root[data-theme=\"light\"] .t-sun{display:none}:root[data-theme=\"light\"] .t-moon{display:block}\n"
+    ":root[data-theme=\"dark\"] .t-sun{display:block}:root[data-theme=\"dark\"] .t-moon{display:none}\n"
+)
 
 FX_JS = r"""
 window.__ptCandlePanel = function (opts) {
@@ -1569,6 +1616,10 @@ window.__ptCandlePanel = function (opts) {
   var redraw; window.addEventListener('resize', function () {
     clearTimeout(redraw); redraw = setTimeout(function () { if (chart.offsetParent !== null && current) show(current); }, 150);
   });
+  /* Same for the theme. See the note on the balance charts. */
+  (window.__ptRedrawCharts = window.__ptRedrawCharts || []).push(function () {
+    if (chart.offsetParent !== null && current) show(current);
+  });
 };
 
 __ptCandlePanel({chart: 'fx-chart', list: '.pairlist', key: 'fx', title: 'fx-title', sub: 'fx-sub',
@@ -1710,6 +1761,50 @@ CHAT_JS = r"""
 """
 
 JS = r"""
+/* --- theme ------------------------------------------------------------------------------------
+   Dark is the default; the OS preference applies only when the reader has not chosen. A choice is
+   remembered per browser, and every read and write is wrapped because localStorage throws outright
+   in a private window rather than returning null -- and a thrown exception here would stop the rest
+   of this file running, taking the charts with it.
+
+   The charts read their colours from CSS variables through tok(), so they are REDRAWN on a change
+   rather than restyled: an SVG stroke is an attribute, not a cascading property, and will not follow
+   a token that moves underneath it. */
+(function () {
+  var KEY = 'pt-theme';
+  function stored() { try { return localStorage.getItem(KEY); } catch (e) { return null; } }
+  function apply(mode) {
+    if (mode) { document.documentElement.setAttribute('data-theme', mode); }
+    else { document.documentElement.removeAttribute('data-theme'); }
+  }
+  apply(stored());
+  function current() {
+    var set = document.documentElement.getAttribute('data-theme');
+    if (set) { return set; }
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  window.__ptRedrawCharts = window.__ptRedrawCharts || [];
+  function redraw() {
+    window.__ptRedrawCharts.forEach(function (fn) { try { fn(); } catch (e) {} });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    var btn = document.getElementById('theme-toggle');
+    if (!btn) { return; }
+    btn.addEventListener('click', function () {
+      var next = current() === 'light' ? 'dark' : 'light';
+      apply(next);
+      try { localStorage.setItem(KEY, next); } catch (e) {}
+      redraw();
+    });
+  });
+  /* Follow the Mac's own light/dark switch, but only for a reader who has not overridden it. */
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: light)');
+    var onChange = function () { if (!stored()) { redraw(); } };
+    if (mq.addEventListener) { mq.addEventListener('change', onChange); }
+    else if (mq.addListener) { mq.addListener(onChange); }
+  }
+})();
 (function () {
   var data = JSON.parse(document.getElementById('chart-data').textContent);
   var tip = document.getElementById('tip');
@@ -1794,8 +1889,8 @@ JS = r"""
         svg += '<text class="end" x="' + (W - R + 8) + '" y="' + (y + 4) + '">' + e.s.name + ' ' + fmt(e.v) + '</text>';
       });
     }
-    svg += '<line class="x" y1="' + T + '" y2="' + (H - B) + '" stroke="#898781" stroke-dasharray="3 3" style="display:none"/>';
-    ser.forEach(function (s) { svg += '<circle class="d" r="4" fill="' + s.color + '" stroke="#141413" stroke-width="2" style="display:none"/>'; });
+    svg += '<line class="x" y1="' + T + '" y2="' + (H - B) + '" stroke="' + tok('--muted', '#898781') + '" stroke-dasharray="3 3" style="display:none"/>';
+    ser.forEach(function (s) { svg += '<circle class="d" r="4" fill="' + s.color + '" stroke="' + tok('--s1', '#141413') + '" stroke-width="2" style="display:none"/>'; });
     svg += '<rect x="' + L + '" y="' + T + '" width="' + (W - L - R) + '" height="' + (H - T - B) + '" fill="transparent"/></svg>';
     el.innerHTML = svg;
     var node = el.querySelector('svg'), cross = node.querySelector('.x'), dots = node.querySelectorAll('.d');
@@ -1837,6 +1932,9 @@ JS = r"""
   });
   function redraw() { charts.account(current.account); charts.sleeves(current.sleeves); charts.shadow(current.shadow); }
   window.addEventListener('resize', redraw); redraw();
+  /* Re-stroked on a theme change: an SVG stroke is an attribute, not a cascading property, so it
+     will not follow a token that moves underneath it. */
+  (window.__ptRedrawCharts = window.__ptRedrawCharts || []).push(redraw);
   document.querySelectorAll('.tab').forEach(function (tab) {
     tab.addEventListener('click', function () {
       document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('active', t === tab); });
