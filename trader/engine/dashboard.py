@@ -884,7 +884,9 @@ def render(d: dict) -> str:
     n_trades = len([t for t in d["trips"] if not t.is_open])
     warn_dot = '<i class="dot-warn"></i>' if d["warnings"] else ""
     watch_items = "".join(
-        f'<div class="wrow"><span class="wsym">{html.escape(w["symbol"])}</span>'
+        f'<div class="wrow" data-sym="{html.escape(w["symbol"])}">'
+        f'<span class="wsym">{html.escape(w["symbol"])}</span>'
+        f'<span class="wspark" aria-hidden="true"></span>'
         f'<span class="wpx">{format_price(w["price"], w["asset_class"])}</span>'
         + (f'<span class="{"up" if w["change"] >= 0 else "down"}">{w["change"] * 100:+.2f}%</span>'
            if w["change"] is not None else '<span class="subtle">–</span>')
@@ -1575,6 +1577,18 @@ CSS += (
     # wash behind these figures is the gradient-under-a-number problem rule 3 exists to prevent.
     ".irv-in{border-left:3px solid var(--warn)}\n"
     ".irv-waiting{border-left:3px solid var(--line2)}\n"
+    # A month of shape beside each watchlist price. A row of figures says where a market IS; it takes
+    # a line to say where it has BEEN, and that is the thing you cannot get from a single number.
+    # aria-hidden: the price and the signed percent beside it already say this in text.
+    ".wspark{display:block;width:46px;height:16px;opacity:.75}\n"
+    ".wspark svg{display:block;overflow:visible}\n"
+    # The row was two columns with the percent wrapping under the price. The sparkline needs its own
+    # column and spans both rows, so it sits level with the pair rather than with either figure.
+    ".wrow{grid-template-columns:1fr auto auto}\n"
+    ".wsym{grid-column:1;grid-row:1}\n"
+    ".wspark{grid-column:2;grid-row:1/3;align-self:center}\n"
+    ".wpx{grid-column:3;grid-row:1}\n"
+    ".wrow>span:last-child{grid-column:3;grid-row:2;justify-self:end}\n"
     # One glyph per theme, swapped by the attribute rather than by script, so the button is already
     # correct on first paint instead of flickering to the right icon after load.
     ".t-moon{display:none}.t-sun{display:block}\n"
@@ -2151,7 +2165,38 @@ JS = r"""
       current[box.dataset.for] = b.dataset.r; charts[box.dataset.for](b.dataset.r);
     });
   });
-  function redraw() { charts.account(current.account); charts.sleeves(current.sleeves); charts.shadow(current.shadow); }
+  /* Sparklines in the watchlist, drawn from the same embedded candles the charts use -- so this
+     costs no request and cannot disagree with the panel you open by clicking through.
+     Deliberately NOT coloured by direction. The figure beside it is the move since YESTERDAY'S close,
+     while the line covers about a month -- so a symbol up today and down over the month would have
+     shown a red line against a green number, two signals disagreeing about the same row. The rules at
+     the top of this stylesheet give colour one job, and a reader cannot resolve a contradiction in it.
+     The line carries shape; the signed percent carries direction. */
+  function sparklines() {
+    var series = {};
+    Object.keys(data.fx || {}).forEach(function (k) { series[k] = data.fx[k]; });
+    Object.keys(data.equities || {}).forEach(function (k) { series[k] = data.equities[k]; });
+    document.querySelectorAll('.wrow[data-sym]').forEach(function (row) {
+      var slot = row.querySelector('.wspark');
+      var pts = series[row.getAttribute('data-sym')];
+      if (!slot || !pts || pts.length < 3) { return; }
+      pts = pts.slice(-22);                       /* about a month of trading days */
+      var W = 46, H = 16, lo = Infinity, hi = -Infinity;
+      pts.forEach(function (c) { lo = Math.min(lo, c[4]); hi = Math.max(hi, c[4]); });
+      if (!(hi > lo)) { return; }                 /* a flat line says nothing and would divide by zero */
+      var d = pts.map(function (c, i) {
+        var x = (i / (pts.length - 1)) * W;
+        var y = H - ((c[4] - lo) / (hi - lo)) * (H - 2) - 1;
+        return (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+      }).join(' ');
+      slot.innerHTML = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">' +
+        '<path d="' + d + '" fill="none" stroke="' + tok('--muted', '#8a8a96') +
+        '" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+    });
+  }
+  sparklines();
+
+  function redraw() { charts.account(current.account); charts.sleeves(current.sleeves); charts.shadow(current.shadow); sparklines(); }
   window.addEventListener('resize', redraw); redraw();
   /* Re-stroked on a theme change: an SVG stroke is an attribute, not a cascading property, so it
      will not follow a token that moves underneath it. */

@@ -152,3 +152,49 @@ def test_charts_take_their_colours_from_the_theme_not_from_literals():
         for literal in ('stroke="#', 'fill="#'):
             assert literal not in source, f"{name} draws with a hardcoded colour: {literal}"
         assert "__ptRedrawCharts" in source, f"{name} never re-draws when the theme changes"
+
+
+# --- the watchlist sparklines -----------------------------------------------------------------------
+
+def test_each_watchlist_row_has_a_place_for_its_shape(page):
+    """A row of figures says where a market IS. It takes a line to say where it has BEEN, and that is
+    the one thing a single number cannot carry."""
+    assert 'class="wspark"' in page
+    # Every row must name its symbol or the script cannot match it to a series. The first version of
+    # this test asserted `class="wrow"` appeared zero times, which is impossible: the string it was
+    # looking for is a prefix of the one it wanted.
+    rows = re.findall(r'class="wrow"(.{0,14})', page)
+    assert rows, "no watchlist rows on the page at all"
+    assert all(r.startswith(" data-sym=") for r in rows), "a watchlist row has no data-sym"
+
+
+def test_the_sparkline_is_drawn_from_data_already_on_the_page():
+    """The candles are embedded for the charts. Fetching them again per row would be dozens of requests
+    for something already in the document, and the two copies could disagree."""
+    spark = dash.JS[dash.JS.index("function sparklines"):]
+    spark = spark[:spark.index("\n  sparklines();")]
+    assert "data.fx" in spark and "data.equities" in spark
+    assert "fetch(" not in spark, "the sparkline must not make a request"
+
+
+def test_the_sparkline_carries_no_colour_of_its_own():
+    """The figure beside it is the move since YESTERDAY'S close; the line covers about a month. Colour
+    it by direction and a symbol up today but down over the month shows a red line against a green
+    number -- two signals disagreeing about one row, which a reader cannot resolve.
+
+    Rule 2 gives colour a single job. The line carries shape; the signed percent carries direction.
+    """
+    spark = dash.JS[dash.JS.index("function sparklines"):]
+    spark = spark[:spark.index("\n  sparklines();")]
+    for state in ("'--up'", "'--down'"):
+        assert state not in spark, f"the sparkline is coloured {state}, contradicting the figure beside it"
+    assert "tok('--muted'" in spark, "it should still follow the theme"
+
+
+def test_the_sparkline_follows_a_theme_change_like_the_charts():
+    """Same trap as every other stroke on this page."""
+    # The CHART redraw, not the theme script's own -- there are two functions with this name, and the
+    # first version of this test found the wrong one and failed on working code.
+    at = dash.JS.index("function redraw() { charts.account")
+    line = dash.JS[at:dash.JS.index("\n", at)]
+    assert "sparklines()" in line, f"a theme change leaves the sparklines dark: {line}"
