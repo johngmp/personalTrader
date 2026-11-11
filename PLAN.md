@@ -1000,6 +1000,48 @@ completing less often than it used to. If that persists it is a reason to retire
 re-tune it — the next move on this strategy should be **more out-of-sample data**, not more hypotheses
 against the 272 days already used.
 
+### Interface, third pass: 21st.dev and shadcn (2026-11-11)
+Asked to rebuild the UI from 21st.dev's components. They are React, TypeScript and Tailwind on shadcn
+primitives, and the component source needs an account — so using them literally means turning a
+1,857-line Python HTML generator into a React app with a Node toolchain, JSON APIs, a build step before
+the dashboard renders, and ~100 rewritten tests, on a machine whose engine has to keep running
+unattended. Offered as three options with that cost stated; the choice was to **port the design
+language and keep Python** — which is also the honest reading of what was already there, since the
+stylesheet had shadcn's architecture under different names and the page already looked like a shadcn
+admin template.
+
+**Light mode** was the real gap: the theme was dark-only and hardcoded. The palette is *measured*, as
+this file's header has always claimed — every text token clears WCAG AA against both the page and the
+card, and `--ink` and `--ink2` clear AAA. Green against red is **1.05:1** in light, worse than dark's
+1.52, which is the whole reason every figure carries its own sign and every headline its glyph. Written
+once and used twice (OS preference, explicit override), because two hand-written copies of a palette
+drift and a drifted palette gives one set of colours from the toggle and another from macOS.
+
+The charts needed more than a token swap: **an SVG stroke is an attribute, not a cascading property**,
+so it does not follow a variable that moves underneath it. Both renderers now redraw on a change.
+
+**The plan you are meant to act on was not on the dashboard at all.** The intraday watcher is the only
+part of this system whose output is a trade for the reader to place by hand, and the page had *zero*
+references to it — the Forex page showed S9, the sleeve that failed Gate 1 and sends nothing. There is
+now a card above S9 with the day's levels, the live distance to the buy and the state of the day; a
+live trade is the only state that raises its voice, per rule 4. It says when the next plan is due **in
+the reader's own clock** (07:00 UTC is 6pm in Sydney) and falls back to the last session, because the
+setup appears on about one day in three and an empty card teaches you not to look.
+
+**The candle chart had no hover readout**, while the balance chart has had a crosshair since it was
+written — and that renderer draws both the forex and the stocks panel, so the only way to read a candle
+was to guess against the axis. It now snaps to the nearest candle and writes O/H/L/C and the move into
+the panel's own subtitle rather than a floating box, so nothing can be orphaned when the pointer leaves.
+
+Four mistakes worth recording, because they are all one mistake: **a test that passes without the thing
+it guards.** `'O '` searched for in a file that writes `'  ·  O '`; a 400-character slice from the first
+crosshair that reached the *second* crosshair's `tok()`; the fix for that, which then matched
+`querySelector('.xh-v')`, which has no colour in it and never could. Each was caught by reintroducing
+the bug on purpose. The one real runtime bug — `MON` declared inside `draw()` where the sibling
+`hover()` could not see it — was found only by hovering the live page: the crosshair lines still moved,
+because they are set before the throw, and the readout silently never appeared. **A half-working
+feature looks like a working one until you read the console.**
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
