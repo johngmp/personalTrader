@@ -181,3 +181,68 @@ def test_short_windows_are_fetched_rather_than_embedded():
 
 def test_a_failed_intraday_fetch_says_so_instead_of_showing_an_empty_chart():
     assert "Could not load" in dash.FX_JS and "if (j.error)" in dash.FX_JS
+
+
+# --- reading a candle ------------------------------------------------------------------------------
+
+def test_the_candle_chart_has_a_crosshair_and_a_readout():
+    """The balance chart has had one since it was written. This renderer -- which draws BOTH the forex
+    and the stocks panel -- had none, so the only way to read a candle was to guess against the axis.
+    """
+    assert "xh-v" in dash.FX_JS and "xh-h" in dash.FX_JS, "no crosshair"
+    assert "mousemove" in dash.FX_JS and "mouseleave" in dash.FX_JS
+
+    # The readout line itself, rather than the whole file: the first version of this test searched the
+    # module for "'O '" and failed on a feature that worked, because the code writes "'  ·  O '".
+    line = dash.FX_JS[dash.FX_JS.index("sub.textContent = when"):]
+    line = line[:line.index(";")]
+    for field in ("O ", "H ", "L ", "C "):
+        assert field in line, f"the readout omits {field.strip()}"
+    for i in (1, 2, 3, 4):
+        assert f"rate(c[{i}])" in line, f"field {i} is not run through the price formatter"
+    assert "%" in line, "a candle without its move in percent is just four numbers"
+
+
+def test_the_crosshair_takes_its_colour_from_the_theme():
+    """Same trap as the gridlines: an SVG stroke is an attribute, so a literal stays dark on a white page.
+
+    Checked per line. The first version of this test took a 400-character slice from the first
+    crosshair and passed with that very line hardcoded, because the slice still reached the SECOND
+    crosshair's tok() further down.
+    """
+    import re
+
+    # Only the lines that DRAW a crosshair. A second wrong version of this test matched
+    # `querySelector('.xh-v')` in the hover handler, which has no colour in it and never could.
+    lines = [ln for ln in dash.FX_JS.splitlines()
+             if "<line class=\"xh-" in ln]
+    assert len(lines) == 2, f"expected both crosshair lines to be drawn, found {len(lines)}"
+    for line in lines:
+        assert not re.search(r'stroke="#[0-9a-fA-F]', line), f"hardcoded crosshair colour: {line.strip()}"
+        assert "tok(" in line, f"crosshair line does not read the theme: {line.strip()}"
+
+
+def test_the_readout_restores_the_subtitle_rather_than_leaving_a_box_behind():
+    """It writes into the panel's own subtitle instead of a floating tooltip, so nothing can be
+    orphaned on the page when the pointer leaves or the pair changes."""
+    assert "restore" in dash.FX_JS and "sub.textContent = restore" in dash.FX_JS
+
+
+def test_every_name_the_hover_handler_uses_is_declared_outside_draw():
+    """A real bug, caught only by hovering the live page.
+
+    `MON` was declared inside draw(), and the hover handler is a sibling function -- so the very first
+    hover threw `ReferenceError: MON is not defined`, the crosshair lines still moved (they are set
+    before the throw) and the readout silently never appeared. A half-working feature looks like a
+    working one until you check the console.
+    """
+    import re
+
+    panel = dash.FX_JS[dash.FX_JS.index("window.__ptCandlePanel = function"):]
+    draw_at, hover_at = panel.index("function draw(candles)"), panel.index("function hover(")
+    for name in ("MON", "rate", "tok"):
+        decl = re.search(r"\b(?:var|function)\s+" + name + r"\b", panel)
+        assert decl, f"{name} is never declared in the panel"
+        assert decl.start() < draw_at, f"{name} is declared inside or after draw(); hover() cannot see it"
+        assert decl.start() < hover_at, f"{name} is declared after hover()"
+    assert panel.count("var MON") == 1, "two copies of the month names will drift"

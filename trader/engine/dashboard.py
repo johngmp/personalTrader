@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -209,6 +209,8 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "orders": journal.recent_order_rows(25),
         "rate": stored_rate(journal),
         "fx": fx_snapshot(settings, journal, engines),
+        # Rendered here rather than in render(), which only ever sees this dict.
+        "intraday": intraday_card(settings, journal, now),
         "research": latest_research(settings),
         "blocked": blocked_orders(journal),
         "warnings": [e for e in journal.recent_events(60) if e["level"] in ("warning", "error", "critical")][:12],
@@ -537,6 +539,163 @@ def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> 
             "is_open": getattr(clock, "is_open", None), "series": fx_series(symbols, live)}
 
 
+PIP = 1e-4
+
+# What each state of the day means in a sentence, and how loudly to say it. The tone drives the pill
+# and the card's own emphasis: only a live trade is loud, because only a live trade is something you
+# are in the middle of and could still get wrong.
+_IRV_STATE = {
+    "none":    ("pending",  "closed", "No plan yet"),
+    "waiting": ("waiting",  "closed", "Waiting for the level"),
+    "in":      ("HOLDING",  "warn",   "You should be in this trade"),
+    "done":    ("finished", "ok",     "Finished for today"),
+    "missed":  ("skipped",  "closed", "No plan today — the open was missed"),
+    "gapped":  ("skipped",  "closed", "Skipped — it went through both levels at once"),
+}
+
+
+def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
+    """One pair's card. See intraday_today for why this exists at all."""
+    fx = AssetClass.FOREX
+    f = lambda v: format_price(v, fx)          # noqa: E731
+    sym, plan, state, rate = pair["symbol"], pair["plan"], pair["state"], pair["rate"]
+    word, tone, headline = _IRV_STATE.get(state, _IRV_STATE["none"])
+
+    if plan is None:
+        when = "The levels are measured from the session open and set just after it."
+        if state == "missed":
+            when = "The open was missed, so the levels cannot be measured from it. Skipped, by design."
+        return (f'<div class="plan irv"><div class="plan-head"><b>{html.escape(sym)}</b>'
+                f'<span class="pill {tone}">{word}</span></div>'
+                f'<p class="subtle">{html.escape(headline)}. {html.escape(when)}</p></div>')
+
+    rows = (
+        f'<div><dt>Buy at</dt><dd>{f(plan.trigger)}</dd></div>'
+        f'<div><dt>Stop</dt><dd>{f(plan.stop)}'
+        f'<span class="subtle"> {plan.risk_pips:.0f} pips · ${plan.risk_usd:,.0f}</span></dd></div>'
+        f'<div><dt>Target</dt><dd>{f(plan.target)}'
+        f'<span class="subtle"> {plan.reward_pips:.0f} pips</span></dd></div>'
+        f'<div><dt>Size</dt><dd>{plan.qty:,.0f}<span class="subtle"> units</span></dd></div>')
+
+    live = ""
+    if rate is not None:
+        if state == "waiting":
+            away = (rate - plan.trigger) / PIP
+            # Signed, not just coloured: green and red are 1.05:1 apart in the light theme.
+            live = (f'<p class="irv-now">Now <b>{f(rate)}</b> · '
+                    f'<span class="{"up" if away > 0 else "down"}">{away:+.1f} pips</span> from the buy level</p>')
+        elif state == "in" and pair["entry"]:
+            pips = (rate - pair["entry"]) / PIP
+            live = (f'<p class="irv-now">Now <b>{f(rate)}</b> · bought {f(pair["entry"])} · '
+                    f'<span class="{"up" if pips >= 0 else "down"}">{pips:+.1f} pips</span>, about '
+                    f'<span class="{"up" if pips >= 0 else "down"}">{pips * PIP * plan.qty:+,.0f} USD</span></p>')
+        else:
+            live = f'<p class="irv-now">Now <b>{f(rate)}</b></p>'
+
+    note = (f"Flat by {close_utc} UTC either way." if state in ("waiting", "in")
+            else "The session is over for today." if not in_session else "")
+    evidence = pair.get("evidence")
+    foot = (f'<p class="ap-note">{html.escape(note)} '
+            f'{("Shadow test — " + html.escape(evidence) + ". Not advice.") if evidence else ""}</p>')
+    return (f'<div class="plan irv irv-{html.escape(state)}"><div class="plan-head">'
+            f'<b>{html.escape(sym)}</b><span class="pill {tone}">{word}</span></div>'
+            f'<p class="irv-head">{html.escape(headline)}</p>'
+            f'<dl class="plan-rows">{rows}</dl>{live}{foot}</div>')
+
+
+def intraday_card(settings: Settings, journal: Journal, now: datetime | None = None) -> str:
+    """The hand-executed forex plan, rendered for the Forex page. Empty string when switched off."""
+    d = intraday_today(settings, journal, now)
+    if not d:
+        return ""
+    body = "".join(_irv_pair(p, d["close_utc"], d["in_session"]) for p in d["pairs"])
+    opens_at = f"{d['open_local']:%-I%p}".lower()
+    closes_at = f"{d['close_local']:%-I%p}".lower()
+    if d["weekend"]:
+        when = "The forex market is shut at the weekend. The next plan goes out on Monday."
+    elif d["in_session"]:
+        when = (f"The London session is open. Checked every minute until {d['close_utc']} UTC "
+                f"({closes_at} your time).")
+    else:
+        when = (f"Outside the session. The next plan goes out just after {d['open_utc']} UTC, "
+                f"which is {opens_at} where you are.")
+
+    # When today has nothing yet, the last session is more use than an empty card.
+    if all(p["plan"] is None for p in d["pairs"]) and d.get("previous"):
+        last = "".join(
+            f'<div class="plan irv"><div class="plan-head"><b>{html.escape(p["symbol"])}</b>'
+            f'<span class="pill closed">{p["day"]:%a %-d %b}</span></div>'
+            f'<p class="irv-head">{html.escape(_IRV_STATE.get(p["state"], _IRV_STATE["none"])[2])}</p>'
+            f'<dl class="plan-rows">'
+            f'<div><dt>Buy was</dt><dd>{format_price(p["plan"].trigger, AssetClass.FOREX)}</dd></div>'
+            f'<div><dt>Stop</dt><dd>{format_price(p["plan"].stop, AssetClass.FOREX)}</dd></div>'
+            f'<div><dt>Target</dt><dd>{format_price(p["plan"].target, AssetClass.FOREX)}</dd></div>'
+            f'</dl></div>' for p in d["previous"])
+        body += last
+    return (f'<h2>Today\'s plan <span class="pill closed">you place these</span></h2>'
+            f'<p class="subtle">These are the messages sent to your phone, shown here so the answer to '
+            f'&ldquo;what am I meant to be doing&rdquo; is not only in a notification. '
+            f'{html.escape(when)} Nothing here is sent to any broker.</p>'
+            f'<div class="irv-grid">{body}</div>')
+
+
+def intraday_today(settings: Settings, journal: Journal, now: datetime | None = None) -> dict:
+    """Today's hand-executed forex plan, as the watcher currently sees it.
+
+    This is the one thing on the whole dashboard that is meant to be ACTED ON, and until now it was the
+    only part of the system with no screen at all -- the plan went to Telegram and nowhere else, so the
+    answer to "what am I supposed to be doing right now" lived in a phone notification you might have
+    missed. The Forex page showed S9 instead, which is the sleeve that failed Gate 1 and sends nothing.
+
+    Returns {} when the watcher is switched off, so the card simply does not render.
+    """
+    from trader.engine.intraday_watch import EVIDENCE, IntradayWatcher, _parse
+
+    cfg = settings.intraday
+    if not cfg.enabled or not cfg.symbols:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    watcher = IntradayWatcher(settings, journal, notifier=None, clock=lambda: now)
+    day = now.date()
+    opens, closes = _parse(cfg.open_utc), _parse(cfg.close_utc)
+    pairs = []
+    for symbol in cfg.symbols:
+        plan = watcher._stored_plan(day, symbol)
+        state = watcher._get(day, "state", symbol) or ("waiting" if plan else "none")
+        rate = None
+        try:
+            rate = watcher._rate(symbol)
+        except Exception:
+            rate = None
+        entry = watcher._entry(day, symbol)
+        pairs.append({"symbol": symbol, "plan": plan, "state": state, "rate": rate, "entry": entry,
+                      "evidence": EVIDENCE.get(symbol)})
+    # The session is quoted in UTC everywhere else because that is what the watcher works in, but the
+    # person reading this is in Sydney, where 07:00 UTC is 6pm the same evening. A reader should not
+    # have to do that arithmetic to know when the next message is due.
+    local_open = datetime.combine(day, opens, tzinfo=timezone.utc).astimezone()
+    local_close = datetime.combine(day, closes, tzinfo=timezone.utc).astimezone()
+
+    # Most of the day there is no plan: before 07:00 UTC it has not been built, and the setup only
+    # appears on about one day in three. An empty card at those times says nothing useful, so it falls
+    # back to the last session that did something.
+    previous = []
+    for symbol in cfg.symbols:
+        for back in range(1, 8):
+            earlier = day - timedelta(days=back)
+            plan = watcher._stored_plan(earlier, symbol)
+            if plan is None:
+                continue
+            previous.append({"symbol": symbol, "day": earlier, "plan": plan,
+                             "state": watcher._get(earlier, "state", symbol) or "waiting",
+                             "entry": watcher._entry(earlier, symbol)})
+            break
+    return {"pairs": pairs, "open_utc": cfg.open_utc, "close_utc": cfg.close_utc,
+            "open_local": local_open, "close_local": local_close, "previous": previous,
+            "weekend": now.weekday() >= 5,
+            "in_session": now.weekday() < 5 and opens <= now.time() < closes, "now": now}
+
+
 def latest_research(settings: Settings) -> list[dict]:
     """The most recent Gate 1 verdict per strategy, newest first.
 
@@ -792,7 +951,8 @@ def render(d: dict) -> str:
             + ("" if v.get("verdict") == "PASS" else
                "A negative number means these rules lost to leaving the money in T-bills, so this sleeve "
                "sends nothing to any broker and its signals are not advice to act on.") + "</p>")
-        fx_card = f"""<h2>Forex {shut}</h2>
+        fx_card = f"""{d.get('intraday', '')}
+<h2>Forex {shut}</h2>
 <p class="subtle">{html.escape(", ".join(fx["sleeves"]))} trades these on live prices with
 <b>no orders sent anywhere</b>. Daily closes with the latest quote on the end; the feed is free and lags
 a few minutes.</p>
@@ -1405,6 +1565,16 @@ CSS += (
     "background:var(--s2);color:var(--ink2);border:1px solid var(--line);border-radius:var(--radius-sm);"
     "font-size:14px;line-height:1}\n"
     ".icon-btn:hover{background:var(--s3);color:var(--ink);border-color:var(--line2)}\n"
+    # The hand-executed plan. Laid out as cards because each pair is a separate decision.
+    ".irv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:var(--gap,14px);"
+    "margin:0 0 22px}\n"
+    ".irv .irv-head{margin:.1rem 0 .6rem;font-size:var(--t-md);color:var(--ink2)}\n"
+    ".irv .irv-now{margin:.55rem 0 0;font-size:var(--t-md);color:var(--ink2)}\n"
+    # Rule 4: space goes to what needs attention. A live trade is the only state you can still get
+    # wrong, so it is the only one that raises its voice -- a left edge, not a colour wash, because a
+    # wash behind these figures is the gradient-under-a-number problem rule 3 exists to prevent.
+    ".irv-in{border-left:3px solid var(--warn)}\n"
+    ".irv-waiting{border-left:3px solid var(--line2)}\n"
     # One glyph per theme, swapped by the attribute rather than by script, so the button is already
     # correct on first paint instead of flickering to the right icon after load.
     ".t-moon{display:none}.t-sun{display:block}\n"
@@ -1424,6 +1594,8 @@ window.__ptCandlePanel = function (opts) {
   var range = '3M', current = null;
   var UP = tok('--up', '#30d158'), DOWN = tok('--down', '#ff5a4e');
   var RANGE = { '1W': 7, '1M': 30, '3M': 91, '1Y': 365 };
+
+  var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
   function rate(v) {
     // Money is always cents: $769.710 is three decimals of false precision on a stock. FX rates pick
@@ -1507,7 +1679,6 @@ window.__ptCandlePanel = function (opts) {
     // Intraday candles need times: six labels all reading "2 Oct" tells you nothing about where you are
     // in the session.
     var spanDays = (Date.parse(candles[n - 1][0]) - Date.parse(candles[0][0])) / 864e5;
-    var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     // Label count from the available WIDTH, not a fixed six. At 1512px six dates fit; in a narrower
     // pane or with the Claude panel open they collide into "21 Jul5 Aug20 Aug". 64px is the widest
     // label this axis draws ("20 Aug", "12:00") plus breathing room.
@@ -1523,7 +1694,57 @@ window.__ptCandlePanel = function (opts) {
       }
       svg += '<text x="' + X(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + lab + '</text>';
     }
+    /* The crosshair, hidden until the pointer is over the plot. The balance chart has had one of
+       these since it was written; this renderer -- which draws BOTH the forex and the stocks panel --
+       never did, so the only way to read a candle was to guess against the axis. */
+    svg += '<line class="xh-v" y1="' + T + '" y2="' + (T + priceH) + '" stroke="' + tok('--muted', '#8a8a96') +
+           '" stroke-dasharray="3 3" style="display:none"/>';
+    svg += '<line class="xh-h" x1="' + L + '" x2="' + (W - R) + '" stroke="' + tok('--muted', '#8a8a96') +
+           '" stroke-dasharray="3 3" style="display:none"/>';
     chart.innerHTML = svg + '</svg>';
+    hover(candles, X, Y, L, R, T, W, priceH, slot, lo, hi);
+  }
+
+  /* Reading a candle off the axis is guesswork, so the pointer snaps to the nearest one and the
+     panel's own subtitle becomes the readout. Writing it there rather than into a floating box keeps
+     it in one place whether you are using a mouse or not, and means no element can be left behind on
+     the page when the pointer leaves. */
+  function hover(candles, X, Y, L, R, T, W, priceH, slot, lo, hi) {
+    var svgEl = chart.querySelector('svg');
+    if (!svgEl) { return; }
+    var vline = chart.querySelector('.xh-v'), hline = chart.querySelector('.xh-h');
+    var restore = sub ? sub.textContent : '';
+    function clear() {
+      if (vline) { vline.style.display = 'none'; }
+      if (hline) { hline.style.display = 'none'; }
+      if (sub) { sub.textContent = restore; }
+    }
+    svgEl.addEventListener('mousemove', function (ev) {
+      var box = svgEl.getBoundingClientRect();
+      var x = (ev.clientX - box.left) * (W / box.width);
+      var y = (ev.clientY - box.top) * ((T + priceH + 40) / box.height);
+      var i = Math.round((x - L - slot / 2) / slot);
+      if (i < 0) { i = 0; } if (i >= candles.length) { i = candles.length - 1; }
+      var c = candles[i];
+      if (!c) { return; }
+      if (vline) { vline.setAttribute('x1', X(i).toFixed(1)); vline.setAttribute('x2', X(i).toFixed(1));
+                   vline.style.display = ''; }
+      if (hline && y >= T && y <= T + priceH) {
+        hline.setAttribute('y1', y.toFixed(1)); hline.setAttribute('y2', y.toFixed(1));
+        hline.style.display = '';
+      } else if (hline) { hline.style.display = 'none'; }
+      if (!sub) { return; }
+      var dt = new Date(c[0]);
+      var when = dt.getDate() + ' ' + MON[dt.getMonth()] + ' ' + dt.getFullYear();
+      if ((candles[candles.length - 1][0] - candles[0][0]) / 86400000 <= 10) {
+        when += ' ' + String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+      }
+      var move = c[4] - c[1], pct = c[1] ? (move / c[1]) * 100 : 0;
+      sub.textContent = when + '  ·  O ' + rate(c[1]) + '  H ' + rate(c[2]) + '  L ' + rate(c[3]) +
+                        '  C ' + rate(c[4]) + '  ·  ' + (move >= 0 ? '+' : '') + pct.toFixed(2) + '%' +
+                        (c[5] > 0 ? '  ·  vol ' + Math.round(c[5]).toLocaleString() : '');
+    });
+    svgEl.addEventListener('mouseleave', clear);
   }
 
   var intraCache = {};

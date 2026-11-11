@@ -303,3 +303,108 @@ def test_the_fx_shadow_no_longer_reaches_your_phone():
 
     assert "shadow_fx" not in HAND_EXECUTED
     assert HAND_EXECUTED == set(), "anything in here goes straight to the phone"
+
+
+# --- today's hand-executed plan, on the page -------------------------------------------------------
+
+def _journal_with_plan(tmp_path, day, symbol="EUR/USD", state=None):
+    from trader.journal.db import Journal
+
+    j = Journal(tmp_path / "j.db")
+    key = f"irv:{day:%Y-%m-%d}:{symbol.replace('/', '')}"
+    j.kv_set(f"{key}:plan", "1.11894,0.005473,1.11621,1.11456,1.11894,60897.7")
+    if state:
+        j.kv_set(f"{key}:state", state)
+    return j
+
+
+def test_the_plan_you_are_meant_to_act_on_is_actually_on_the_page(settings, tmp_path):
+    """It was not. The intraday watcher is the only part of this system whose output is a trade for YOU
+    to place, and the dashboard had no reference to it at all -- the Forex page showed S9, the sleeve
+    that failed Gate 1 and sends nothing. The answer to "what am I meant to be doing" lived only in a
+    Telegram notification you might have missed.
+    """
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_card
+
+    now = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)
+    j = _journal_with_plan(tmp_path, now.date(), state="waiting")
+    card = intraday_card(settings, j, now)
+
+    assert "Today&#x27;s plan" in card or "Today's plan" in card
+    assert "1.11621" in card, "the buy level must be on the page"
+    assert "1.11456" in card and "1.11894" in card, "so must the stop and the target"
+    assert "you place these" in card, "it must be unmistakable that nothing is sent to a broker"
+    assert "Not advice" in card
+    j.close()
+
+
+def test_a_live_trade_is_the_only_state_that_raises_its_voice(settings, tmp_path):
+    """Rule 4: space goes to what needs attention. A trade you are holding is the only state you can
+    still get it wrong in, so it is the only one that gets an emphasis treatment."""
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_card
+
+    now = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)
+    held = _journal_with_plan(tmp_path / "a", now.date(), state="in")
+    (tmp_path / "a").mkdir(exist_ok=True)
+    waiting = _journal_with_plan(tmp_path / "b", now.date(), state="waiting")
+    (tmp_path / "b").mkdir(exist_ok=True)
+
+    assert "irv-in" in intraday_card(settings, held, now)
+    assert "HOLDING" in intraday_card(settings, held, now)
+    assert "irv-in" not in intraday_card(settings, waiting, now)
+    held.close()
+    waiting.close()
+
+
+def test_when_the_next_plan_is_due_is_said_in_the_readers_own_clock(settings, tmp_path):
+    """07:00 UTC is 6pm in Sydney. Quoting only UTC makes the reader do timezone arithmetic to find out
+    whether a message is overdue or simply not due yet."""
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_card, intraday_today
+    from trader.journal.db import Journal
+
+    now = datetime(2026, 10, 8, 2, 0, tzinfo=timezone.utc)      # well before the open
+    j = Journal(tmp_path / "j.db")
+    card = intraday_card(settings, j, now)
+    local = intraday_today(settings, j, now)["open_local"]
+
+    assert "07:00 UTC" in card, "the UTC time the watcher works in is still stated"
+    assert f"{local:%-I%p}".lower() in card, "and so is the same moment on the reader's own clock"
+    j.close()
+
+
+def test_an_empty_day_falls_back_to_the_last_session(settings, tmp_path):
+    """The setup appears on about one day in three, and before 07:00 UTC there is never a plan. An
+    empty card most of the time would teach you not to look at it."""
+    from datetime import datetime, timedelta, timezone
+
+    from trader.engine.dashboard import intraday_card
+
+    now = datetime(2026, 10, 8, 2, 0, tzinfo=timezone.utc)
+    j = _journal_with_plan(tmp_path, (now - timedelta(days=1)).date(), state="done")
+    card = intraday_card(settings, j, now)
+
+    assert "No plan yet" in card
+    assert "1.11621" in card, "yesterday's levels are more use than an empty card"
+    assert "Tue 7 Oct" in card or "7 Oct" in card
+    j.close()
+
+
+def test_the_card_disappears_entirely_when_the_watcher_is_off(settings, tmp_path):
+    from trader.journal.db import Journal
+
+    settings.intraday = settings.intraday.model_copy(update={"enabled": False})
+    j = Journal(tmp_path / "j.db")
+    assert intraday_card_of(settings, j) == ""
+    j.close()
+
+
+def intraday_card_of(settings, journal):
+    from trader.engine.dashboard import intraday_card
+
+    return intraday_card(settings, journal)
