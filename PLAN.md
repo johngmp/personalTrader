@@ -1042,6 +1042,20 @@ the bug on purpose. The one real runtime bug — `MON` declared inside `draw()` 
 because they are set before the throw, and the readout silently never appeared. **A half-working
 feature looks like a working one until you read the console.**
 
+**Polish, audited rather than eyeballed.** Collecting the computed styles off the live page found the
+overview already consistent — every card 18px padding and 14px radius, all sixteen labels identical —
+so there was nothing to fix there, and the variance the audit did find was `#fx-title` legitimately
+overriding `.label` for a chart title. The one real gap was the watchlist: a column of figures says
+where a market *is*, and it takes a line to say where it has *been*. Each row now carries a month of
+shape, drawn from the candles already embedded for the charts, so it costs no request and cannot
+disagree with the panel you reach by clicking the row.
+
+That sparkline deliberately carries **no colour of its own**, and the reason is the more interesting
+half. Coloured by its own direction, a symbol up today and down over the month showed a red line beside
+a green number — the figure next to it is the move since *yesterday's close*, the line covers a month.
+Two signals disagreeing about one row is worse than one signal, and rule 2 gives colour a single job.
+The line carries shape; the signed percent carries direction.
+
 
 
 ### Phase 6: Live readiness (separate plan, only if something passes)
