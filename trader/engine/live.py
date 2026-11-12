@@ -135,6 +135,7 @@ class Engine:
             ("sync fills", self._sync_fills),
             ("reconcile", self._reconcile),
             ("position state", self._refresh_states),
+            ("broker orders", self._reconcile_orders),
             ("protective stops", self._protect),
             ("decisions", self._decide),
             ("unaffordable markets", self._report_unaffordable),
@@ -239,6 +240,82 @@ class Engine:
                 else:
                     self.journal.log(msg, level="warning")
 
+    def _broker_stop_holding(self, symbol: str, sleeve_id: str) -> bool:
+        """Is one of OUR stops already resting on this symbol at the broker?
+
+        Deliberately not limited to this sleeve: the shares are held per account, not per sleeve, so
+        another sleeve's resting stop refuses this one's placement just the same. That is the wash
+        trade `_blocking_stop` already guards on the entry side.
+        """
+        return bool(getattr(self, "_broker_stops", {}).get(symbol))
+
+    def _reconcile_orders(self, report: RunReport) -> None:
+        """What orders does the BROKER actually have open? Nothing ever asked until now.
+
+        `_reconcile` compares positions. `broker.get_open_orders()` is implemented on all six adapters
+        and was called only from tests, so the engine's belief about its own resting stops came purely
+        from `positions_state.stop_order_id` and that row's journal status -- and when those drifted
+        from reality nothing noticed.
+
+        They drift because `_cancel_stop` clears the pointer while deliberately NOT marking the order
+        cancelled (Alpaca may refuse a cancel, or the stop may fill first). If the cancel is refused,
+        the order keeps holding the shares and the engine has forgotten it exists. `_protect` then
+        tries to place a replacement, Alpaca refuses it -- "insufficient qty available", with
+        `held_for_orders == existing_qty` proving the shares are already reserved -- and the engine
+        reports "could not place stop", which the code calls its most alarming message, while the
+        position is in fact protected.
+
+        That had fired 3,334 times, 222 of them on 2026-11-11 alone, each one a Telegram message. The
+        loudest alarm in the system was a permanent false positive, which is worse than no alarm:
+        a genuinely unprotected position would have been indistinguishable from the noise.
+        """
+        self._broker_stops = {}
+        live = self.broker.get_open_orders()
+        known = {o.client_order_id: o for o in live}
+        for order in live:
+            if order.side is Side.SELL and order.order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+                self._broker_stops.setdefault(order.symbol, []).append(order)
+
+        adopted, orphans = [], []
+        for state in self._my_states():
+            sleeve_id, symbol = state["sleeve_id"], state["symbol"]
+            pointer = state["stop_order_id"]
+            if pointer and pointer in known:
+                # The broker agrees this order is live. Heal a journal row that says otherwise, which
+                # is the `pending_cancel` case: we asked to cancel, the broker has not done it.
+                row = self.journal.order(pointer)
+                if row is not None and not OrderStatus(row["status"]).is_open:
+                    self.journal.mark_order(pointer, OrderStatus.SUBMITTED, "still open at the broker")
+                continue
+            for order in self._broker_stops.get(symbol, []):
+                row = self.journal.order(order.client_order_id)
+                if row is None or row["sleeve_id"] != sleeve_id:
+                    continue
+                # A stop this sleeve placed, still resting, that we had lost the pointer to.
+                self.journal.record_broker_order(self.broker.name, order)
+                self.journal.upsert_position_state(sleeve_id, symbol, stop_order_id=order.client_order_id)
+                adopted.append(f"{sleeve_id} {symbol}")
+                break
+
+        for order in live:
+            if self.journal.order(order.client_order_id) is None:
+                orphans.append(f"{order.symbol} ({order.order_type.value}, {order.broker_order_id[:8]})")
+
+        if adopted:
+            report.actions.append(f"re-adopted {len(adopted)} resting stop(s) the journal had lost: "
+                                  f"{', '.join(sorted(adopted))}")
+        if orphans:
+            # Once a day: a true orphan is a standing condition, not news every fifteen minutes.
+            key = f"orphan-orders:{self.broker.name}:{self.clock().date()}"
+            msg = (f"{len(orphans)} order(s) resting at {self.broker.name} that this system has no "
+                   f"record of: {', '.join(sorted(orphans)[:8])}. They hold shares, so a replacement "
+                   f"stop will be refused until they are cancelled or adopted.")
+            if self.journal.kv_get(key) is None:
+                self.journal.kv_set(key, str(len(orphans)))
+                report.problems.append(msg)
+            else:
+                self.journal.log(msg, level="warning")
+
     def _refresh_states(self, report: RunReport) -> None:
         holdings = self.journal.all_holdings()
         live_sleeves = {s.id for s in self._live_sleeves()}
@@ -285,6 +362,12 @@ class Engine:
             if resting and abs((order_row["qty"] or 0) - qty) > DUST_QTY:
                 self._cancel_stop(state)
                 resting = False
+            if not resting and self._broker_stop_holding(symbol, sleeve_id):
+                # Something of ours is already resting on this symbol at the broker and holding the
+                # shares. Placing another would be refused -- "insufficient qty available" -- and
+                # reported as a failure to protect a position that IS protected. See
+                # _reconcile_orders for how the pointer to it gets lost.
+                continue
             if not resting:
                 self._place_stop(sleeve_id, symbol, qty, stop, asset_class, report)  # type: ignore[arg-type]
             elif stop > (order_row["stop_price"] or 0) * (1 + STOP_MOVE_MIN):
@@ -775,6 +858,12 @@ class Engine:
             # said "pending_cancel" on both SPY and QQQ.
             self.journal.log(f"cancel requested for {state['symbol']} stop {row['client_order_id']}",
                              level="info")
+        # The pointer IS cleared: the sleeve stops counting on this stop, which is what the caller
+        # asked for. Keeping it was tried and reverted -- it contradicts
+        # test_a_cancelled_stop_is_still_tracked_until_the_broker_confirms, and it is not needed,
+        # because _reconcile_orders recovers a still-resting order from the broker on the next run
+        # and _protect refuses to place a duplicate while one is holding the shares. One mechanism
+        # (ask the broker) beats two (ask the broker AND hang on to a pointer that may be wrong).
         self.journal.upsert_position_state(state["sleeve_id"], state["symbol"], stop_order_id=None)
 
     def _create_state(self, sleeve_id: str, symbol: str) -> None:

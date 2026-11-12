@@ -1015,3 +1015,95 @@ def test_removing_a_held_symbol_from_a_sleeve_does_not_freeze_the_whole_sleeve(s
     assert "QQQ" not in journal.sleeve_holdings("S1"), "the frozen sleeve could never sell this"
     assert journal.sleeve_holdings("S1").get("SPY") == 2.0, "the orphan is kept, not liquidated"
     journal.close()
+
+
+# --- the orders the broker actually has open --------------------------------------------------------
+
+def _stop_state(world, sleeve="S1"):
+    """A held symbol whose protective stop is resting at the broker."""
+    journal = world["journal"]
+    def has_stop(sym):
+        state = journal.position_state(sleeve, sym)
+        return state is not None and state["stop_order_id"]       # sqlite3.Row has no .get
+
+    symbol = next(s for s in journal.sleeve_holdings(sleeve) if has_stop(s))
+    return symbol, journal.position_state(sleeve, symbol)
+
+
+def test_a_resting_stop_the_journal_lost_is_re_adopted_not_duplicated(world):
+    """The engine's belief about its own stops came only from `positions_state.stop_order_id`.
+
+    `_cancel_stop` clears that pointer while deliberately NOT marking the order cancelled, because a
+    cancel can be refused and the stop can fill first. When the cancel IS refused the order keeps
+    resting and keeps holding the shares, and the engine has forgotten it exists -- so it tries to
+    place a replacement, Alpaca answers "insufficient qty available" with
+    `held_for_orders == existing_qty`, and the run reports "could not place stop" about a position
+    that is protected. That had fired 3,334 times, 222 of them on one day, each a Telegram message.
+    """
+    world["engine"].run_once()
+    symbol, state = _stop_state(world)
+    stop_id = state["stop_order_id"]
+
+    # The pointer is lost but the order is still resting at the broker: the refused-cancel case.
+    world["journal"].upsert_position_state("S1", symbol, stop_order_id=None)
+    assert any(o.client_order_id == stop_id for o in world["broker"].get_open_orders())
+
+    before = len(world["broker"].submitted)
+    report = world["step"](None, hours=0.25)
+
+    assert world["journal"].position_state("S1", symbol)["stop_order_id"] == stop_id, \
+        "the resting stop should have been re-adopted from the broker"
+    assert not any("could not place" in p for p in report.problems), report.problems
+    new_stops = [o for o in world["broker"].submitted[before:]
+                 if o.symbol == symbol and o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)]
+    assert not new_stops, f"placed a duplicate stop that the broker would refuse: {new_stops}"
+
+
+def test_no_replacement_stop_is_sent_while_one_is_holding_the_shares(world):
+    """Even when the resting order cannot be matched back to a journal row, placing another is
+    pointless: the shares are reserved account-wide, so the broker refuses it. Reporting that refusal
+    as a failure to protect the position is what destroyed the alert channel."""
+    world["engine"].run_once()
+    symbol, state = _stop_state(world)
+
+    world["journal"].upsert_position_state("S1", symbol, stop_order_id=None)
+    world["engine"]._broker_stops = {symbol: [object()]}      # the broker says something is resting
+    report = RunReport(started=datetime(2026, 10, 8, tzinfo=timezone.utc))
+    before = len(world["broker"].submitted)
+    world["engine"]._protect(report)
+
+    assert len(world["broker"].submitted) == before, "sent an order the broker would certainly refuse"
+    assert not any("could not place" in p for p in report.problems)
+
+
+def test_a_stop_the_broker_has_really_lost_is_replaced(world):
+    """The guard must not become a reason never to protect a position. With nothing resting, the
+    replacement has to go out."""
+    world["engine"].run_once()
+    symbol, state = _stop_state(world)
+    broker_id = world["journal"].order(state["stop_order_id"])["broker_order_id"]
+
+    world["broker"].cancel_order(broker_id)                   # genuinely gone
+    world["journal"].upsert_position_state("S1", symbol, stop_order_id=None)
+    before = len(world["broker"].submitted)
+    world["step"](None, hours=0.25)
+
+    sent = [o for o in world["broker"].submitted[before:]
+            if o.symbol == symbol and o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)]
+    assert sent, "a position with no resting stop must get one"
+
+
+def test_an_order_the_system_has_no_record_of_is_reported_once(world):
+    """A true orphan holds shares and will keep refusing replacements, so it has to be said -- but it
+    is a standing condition, not news every fifteen minutes."""
+    world["engine"].run_once()
+    broker = world["broker"]
+    stray = next(iter(broker.get_open_orders()))
+    stray = stray.model_copy(update={"client_order_id": "not-ours-at-all",
+                                     "broker_order_id": "beefbeefbeefbeef"})
+    broker.orders["beefbeefbeefbeef"] = stray
+
+    first = world["step"](None, hours=0.25)
+    assert any("no record of" in p for p in first.problems), first.problems
+    second = world["step"](None, hours=0.25)
+    assert not any("no record of" in p for p in second.problems), "reported twice in one day"

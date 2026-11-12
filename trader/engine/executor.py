@@ -129,7 +129,16 @@ class Executor:
         """Pick up fills for this broker's open orders (e.g. stock orders placed while the market was shut)."""
         fills: list[Fill] = []
         for row in self.journal.open_orders(self.broker.name):
-            bo = self.broker.get_order(row["broker_order_id"])
+            try:
+                bo = self.broker.get_order(row["broker_order_id"])
+            except Exception as exc:
+                # One bad order id must not stop the rest. Without this the FIRST failure aborted fill
+                # sync for every remaining order, so the journal would stop learning that stops had
+                # filled while every other part of the system kept trusting it -- the most dangerous
+                # kind of divergence, from a single stale id.
+                self.journal.log(f"could not sync order {row['client_order_id']}: "
+                                 f"{type(exc).__name__}: {exc}", level="warning")
+                continue
             fill = self.journal.record_fill_progress(bo, row["sleeve_id"], self._cost_model(bo.symbol))
             if fill:
                 fills.append(fill)
