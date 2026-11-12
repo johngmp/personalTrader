@@ -1058,6 +1058,64 @@ The line carries shape; the signed percent carries direction.
 
 
 
+### A2 — the alert channel: 5,000 messages sent, 17 arrived (2026-11-12)
+The system's entire job is to tell you things, and for weeks it told you almost nothing while reporting
+clean runs. Roughly 5,000 notifications were generated — 171 fills plus 4,910 problems — and the chat
+holds **17 messages**. No send failure was ever logged, and a probe with the same credentials worked.
+
+**The cause was a four-line ordering mistake.** `cmd_run` built the notifier with `from_env()` on its
+first line and called `load_secrets()` — the only thing that loads `.env` — several lines later, inside
+the broker setup. `from_env()` read `os.environ` and nothing else. Under launchd the environment is
+bare, so every engine run for seven weeks built a `NullNotifier`, appended every fill, stop and warning
+to a list, and threw the list away at the end of the run. Nothing failed, from the engine's point of
+view, so nothing was reported. `trader watch-fx` had the identical defect, which is why the forex buy
+and sell the watcher fired on 10 and 11 November never reached a phone either. The 17 that did arrive
+came from `trader notify`, the one path that happened to load `.env` on the line before.
+
+Reproduced before being believed: in a scrubbed environment, `cmd_run`'s own sequence returns
+`NullNotifier`. **This is the same shape as every other bug this week — two things that must agree,
+with nothing checking that they do.** The fix is not to add `load_secrets()` to two call sites, which
+leaves the trap set for the third. `from_env()` now loads `.env` itself, so the order cannot be got
+wrong again.
+
+**And the check that was missing.** A `NullNotifier` built because nothing was configured now carries
+`misconfigured=True`, and `_check_alerts_got_through` reports a run that discarded its own alerts. The
+flag defaults to False, so dry runs and tests — the only other places one is built by hand — stay
+quiet. Every run also writes `alert_channel` to the journal, healthy or not: a clean run and a run
+whose every message vanished used to leave *identical* journals, which is precisely why seven weeks
+went by. Verified in the real bare environment: a supervised `trader run` recorded
+`Telegram ok 2026-11-12T08:45:05+00:00`, and a message sent through the engine's own notifier path
+arrived.
+
+**Then the volume, because a working channel would have been worse.** The 4,910 problems are mostly one
+flapping Alpaca connection: `protective stops failed: ConnectTimeout` **337 times**, `vault failed` 133,
+`dashboard failed` 131, every one its own message. The engine runs every fifteen minutes, so a problem
+that lasts a day is 96 messages, and 96 messages train you to ignore all of them. `worth_sending` now
+rations two different failure shapes: a problem already raised today is counted and not re-sent, and at
+most five *new* problems go out per run with one line standing in for the rest. Both counts live in the
+journal, because the engine is a fresh process every fifteen minutes and anything held in memory resets
+before it can suppress a thing.
+
+The dedup key is the first two colon-separated parts of the message — `"<what failed>: <exception
+type>"`. That collapses the 337 timeouts, whose tails differ by host and retry count, while keeping
+`S8 decisions failed` apart from `S9 decisions failed` and `could not place S8 stop for XLK` apart from
+`XLE`. **Collapsing too hard is the opposite failure:** you would hear about S8 and never about S9.
+Both directions are tested.
+
+Rationing messages is only honest if the number still reaches you, or the fix for too much silence is
+more silence. The daily digest now closes with the problems it told you about once and how many times
+they actually happened. One flapping connection breaks three separate steps, so it still sends three
+messages, not one — they are different problems, and collapsing across steps would hide a genuine
+single-step failure. What it no longer does is send those three every fifteen minutes.
+
+**Nine reintroduced bugs, nine caught by the right test.** The habit is now paying for itself: the
+first pass of the wiring test asserted *one* message where the correct answer is three, and the first
+pass of the whole suite failed `test_two_brokers_each_trade_only_their_own_sleeves` — not a broken
+test, but my new check firing on every harness that builds a `NullNotifier` on purpose. That is what
+inverted the flag. 584 tests pass.
+
+---
+
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.
 - **Planned starting capital: ~US$100** (noted 2026-09-18). Needs a *small-account mode*: fractional/dollar-amount

@@ -10,6 +10,9 @@ import os
 from typing import Protocol
 
 import httpx
+from dotenv import load_dotenv
+
+from trader.config import PROJECT_ROOT
 
 log = logging.getLogger(__name__)
 MAX_LEN = 3900  # Telegram's limit is 4096 characters
@@ -26,10 +29,20 @@ class Notifier(Protocol):
 
 
 class NullNotifier:
-    """Used when Telegram isn't set up. Messages are kept so tests (and `trader run`) can show them."""
+    """Used when Telegram isn't set up. Messages are kept so tests (and `trader run`) can show them.
 
-    def __init__(self) -> None:
+    `misconfigured` is the difference between the two reasons to be silent. A dry run or a test wants a
+    notifier that discards, and that is fine. An engine that discards because it could not find the
+    credentials is a silent failure and must be reported -- that is what happened for weeks. The flag
+    defaults to False because `from_env` is the only caller that can produce the accidental kind, and
+    it sets the flag itself; everyone else building one by hand is doing it on purpose.
+    `Coordinator._check_alerts_got_through` reads it.
+    """
+
+    def __init__(self, reason: str = "Telegram is not set up", misconfigured: bool = False) -> None:
         self.sent: list[str] = []
+        self.reason = reason
+        self.misconfigured = misconfigured
 
     def send(self, text: str) -> None:
         self.sent.append(text)
@@ -93,9 +106,26 @@ class Telegram:
 
 
 def from_env() -> Notifier:
+    """The notifier the credentials in .env describe -- loading .env here, not trusting a caller to.
+
+    This function used to read os.environ and nothing more, which made it correct only for a caller
+    that had already loaded .env. `trader run` had not: it called this on line one and `load_secrets()`
+    (the only thing that loads .env) several lines later, inside the broker setup. Under launchd the
+    environment is bare, so every engine run for weeks built a NullNotifier and then "sent" thousands
+    of fills, stops and warnings into a list that was thrown away at the end of the run. No failure was
+    logged, because from the engine's point of view nothing failed. `trader watch-fx` -- the forex
+    messages you asked for -- had the same defect. The seventeen messages that did arrive came from
+    `trader notify`, the one path that happened to load .env on the line before.
+
+    Loading it here means the order cannot be got wrong again, by this caller or the next one.
+    """
+    load_dotenv(PROJECT_ROOT / ".env")
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    return Telegram(token, chat_id) if token and chat_id else NullNotifier()
+    if token and chat_id:
+        return Telegram(token, chat_id)
+    missing = " / ".join(n for n, v in (("TELEGRAM_BOT_TOKEN", token), ("TELEGRAM_CHAT_ID", chat_id)) if not v)
+    return NullNotifier(reason=f"{missing} not found in {PROJECT_ROOT / '.env'}", misconfigured=True)
 
 
 def find_chat(token: str, client: httpx.Client | None = None) -> tuple[str, dict | None]:

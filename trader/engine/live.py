@@ -17,8 +17,8 @@ from __future__ import annotations
 import fcntl
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Callable
+from datetime import date, datetime, timedelta, timezone
+from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -67,6 +67,71 @@ AI_VERDICT_WAIT = timedelta(hours=8)  # analyst-team entries skip if the AI hasn
 #
 # Anything added here goes straight to the phone, so add a broker only once its rules have earned it.
 HAND_EXECUTED: set[str] = set()
+
+ALERTS_PER_RUN = 5              # one bad run can raise many problems; it may not send many messages
+
+
+def _alert_shape(msg: str) -> str:
+    """The stable shape of a problem, so one problem recurring is one alert and not ninety-six.
+
+    Keeps the first two colon-separated parts. For every message this engine produces that is
+    "<what failed>: <exception type>" -- which still tells S8's decisions apart from S9's, and keeps
+    "could not place S8 stop for XLK" separate per symbol, while dropping the volatile tail (a host,
+    a port, a URL) that made ninety-six identical connection timeouts look like ninety-six problems.
+
+    Measured on this journal: 337 `protective stops failed: ConnectTimeout` events collapse to one,
+    and so do 133 `vault failed` and 131 `dashboard failed`.
+    """
+    return ": ".join(msg.split(": ")[:2])
+
+
+def worth_sending(journal: Journal, scope: str, day: date, problems: Iterable[str],
+                  cap: int = ALERTS_PER_RUN) -> list[str]:
+    """Which of this run's problems to actually put on the phone, and what to say instead.
+
+    Two limits, for two different failure shapes. REPETITION: a problem already raised today is
+    counted and not re-sent -- a flapping network connection that fails every fifteen minutes is one
+    thing you need to know, not ninety-six. The running count is kept in the journal so the dashboard
+    and the digest can say how many times, which a stream of identical messages never told you anyway.
+    VOLUME: at most `cap` distinct new problems per run, then a single line saying how many more there
+    were, so one catastrophic run cannot bury the phone.
+
+    Both counts live in the journal rather than in memory: the engine is a fresh process every fifteen
+    minutes, so anything held in memory resets before it can suppress a thing.
+    """
+    sent: list[str] = []
+    held = 0
+    for msg in problems:
+        key = f"alerted:{scope}:{day.isoformat()}:{_alert_shape(msg)}"
+        seen = int(journal.kv_get(key, "0") or 0)
+        journal.kv_set(key, str(seen + 1))
+        if seen:
+            continue                     # said once today; the count is on the dashboard
+        if len(sent) >= cap:
+            held += 1
+            continue
+        sent.append(msg)
+    if held:
+        sent.append(f"and {held} more new problem(s) this run -- see the dashboard")
+    return sent
+
+
+def alert_counts(journal: Journal, days: Iterable[date]) -> list[tuple[str, int]]:
+    """Every distinct problem alerted on those days and how many times it happened, worst first.
+
+    This is the other half of rationing the messages. Sending one alert instead of ninety-six is only
+    honest if the ninety-six is still readable somewhere -- otherwise the fix for too much silence is
+    more silence. Summed across scopes, so a failure hitting both brokers reads as one problem twice.
+    """
+    prefix = "alerted:"
+    wanted = {d.isoformat() for d in days}
+    totals: dict[str, int] = {}
+    for key in journal.kv_keys(prefix + "%"):
+        scope_day_shape = key[len(prefix):].split(":", 2)
+        if len(scope_day_shape) == 3 and scope_day_shape[1] in wanted:
+            shape = scope_day_shape[2]
+            totals[shape] = totals.get(shape, 0) + int(journal.kv_get(key, "0") or 0)
+    return sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 @dataclass
@@ -154,7 +219,7 @@ class Engine:
                 msg = f"{name} failed: {type(exc).__name__}: {exc}"
                 report.problems.append(msg)
                 self.journal.log(msg, level="error")
-        for msg in report.problems:
+        for msg in worth_sending(self.journal, self.broker.name, self.clock().date(), report.problems):
             self.notifier.send(f"⚠️ {self.broker.name}: {msg}")
         self.journal.kv_set("last_run_summary", report.summary())
         self.journal.log(f"run finished: {report.summary()}")
@@ -1012,7 +1077,17 @@ def send_digest(notifier: Notifier, journal: Journal, engines: list[Engine], now
     if local.hour < DIGEST_HOUR or journal.kv_get("last_digest") == str(local.date()):
         return
     journal.kv_set("last_digest", str(local.date()))
-    notifier.send("☀️ Daily summary\n" + status_text(engines))
+    # The problems that were raised once and then counted quietly. Without this the rationing in
+    # `worth_sending` would be the old silence wearing a different hat: you would see the first
+    # connection timeout and never learn it then happened another three hundred and thirty-six times.
+    since = [(now - timedelta(days=d)).date() for d in (1, 0)]
+    repeats = [(shape, n) for shape, n in alert_counts(journal, since) if n > 1]
+    tail = ""
+    if repeats:
+        lines = "\n".join(f"  {n}x {shape}" for shape, n in repeats[:8])
+        more = f"\n  and {len(repeats) - 8} more" if len(repeats) > 8 else ""
+        tail = f"\n\nRepeated problems, told you once:\n{lines}{more}"
+    notifier.send("☀️ Daily summary\n" + status_text(engines) + tail)
 
 
 class Coordinator:
@@ -1044,6 +1119,7 @@ class Coordinator:
             # Once per cycle, not once per broker: it is a watcher over one symbol, and running it per
             # engine would message you twice for the same signal.
             self._check_alerts_got_through(reports[0])
+            failed: list[str] = []
             for name, fn in (("intraday watch", lambda: self._intraday(reports[0])),
                              ("vault", lambda: write_vault(self.settings, self.journal, self.engines)),
                              ("dashboard", lambda: write_dashboard(self.settings, self.journal, self.engines)),
@@ -1051,9 +1127,13 @@ class Coordinator:
                 try:
                     fn()
                 except Exception as exc:
-                    reports[0].problems.append(f"{name} failed: {type(exc).__name__}: {exc}")
+                    failed.append(f"{name} failed: {type(exc).__name__}: {exc}")
                     self.journal.log(f"{name} failed: {exc}", level="error")
-                    self.notifier.send(f"⚠️ {name} failed: {exc}")
+            reports[0].problems.extend(failed)
+            # Through the same budget as the engine's own problems: `vault failed` had been sent 133
+            # times and `dashboard failed` 131, every one of them the same flapping Alpaca connection.
+            for msg in worth_sending(self.journal, "outputs", self.clock().date(), failed):
+                self.notifier.send(f"⚠️ {msg}")
             return reports
 
     def _check_alerts_got_through(self, report: RunReport) -> None:
@@ -1065,10 +1145,27 @@ class Coordinator:
         for a system whose entire job is to tell you things, that is indistinguishable from a quiet
         market. You would sit waiting for a signal that had already been sent into nothing.
         """
+        discarded = getattr(self.notifier, "sent", None)
+        if discarded is not None and getattr(self.notifier, "misconfigured", False):
+            # A NullNotifier that is not a dry run: the run has just "sent" every one of these into a
+            # list and is about to drop it. This is what had been happening for weeks -- see
+            # telegram.from_env -- and the only reason nobody could tell is that nothing looked.
+            reason = getattr(self.notifier, "reason", "Telegram is not set up")
+            self.journal.kv_set("alert_channel", f"DISCARDING {reason}")
+            self.journal.log(f"alerts going nowhere: {len(discarded)} message(s) discarded, {reason}",
+                             level="error")
+            report.problems.append(f"{len(discarded)} alert(s) went nowhere: {reason}")
+            return
         failures = getattr(self.notifier, "failures", 0)
         if not failures:
+            # Record the healthy case too, so "the alerts are working" is something you can check
+            # rather than assume. The whole A2 failure was invisible because nothing wrote this down:
+            # a clean run and a run whose every message vanished produced identical journals.
+            self.journal.kv_set("alert_channel", f"{type(self.notifier).__name__} ok "
+                                                 f"{self.clock().isoformat(timespec='seconds')}")
             return
         detail = getattr(self.notifier, "last_error", None) or "unknown error"
+        self.journal.kv_set("alert_channel", f"FAILING {failures} consecutive: {detail}")
         report.problems.append(f"{failures} alert(s) did not reach Telegram: {detail}")
         self.journal.log(f"telegram delivery failing: {failures} consecutive, last error {detail}",
                          level="error")

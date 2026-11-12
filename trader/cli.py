@@ -249,7 +249,7 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
         if settings.kill_switch_path.exists():
             shutil.copy(settings.kill_switch_path, tmp / settings.risk.guards.kill_switch_file)
         settings = settings.model_copy(update={"root": tmp})
-        notifier = NullNotifier()
+        notifier = NullNotifier(reason="dry run")
     journal = Journal(settings.journal_path)
     try:
         brokers = configured_brokers(settings, journal)
