@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: ops/install-backup.sh fills in __ROOT__ and installs it to ~/Library/LaunchAgents.
+
+     A nightly copy of data/journal.db, which is the only record of what this system has done and had
+     no backup of any kind until 2026-11-12. StartCalendarInterval rather than StartInterval so it
+     runs at a predictable hour; launchd fires it on the next wake if the Mac was asleep at 03:10.
+
+     Invoked through uv, like every other agent here, because launchd cannot execute a file inside
+     ~/Documents -- macOS refuses with "Operation not permitted" (exit 126, seen on the first
+     attempt at this). The uv binary lives outside that folder. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.personaltrader.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV__</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>__ROOT__</string>
+    <string>trader</string>
+    <string>backup</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__ROOT__</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>10</integer></dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__ROOT__/data/logs/backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>__ROOT__/data/logs/backup.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

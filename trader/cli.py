@@ -722,6 +722,66 @@ def cmd_resume(settings: Settings, _: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backup(settings: Settings, args: argparse.Namespace) -> int:
+    """A verified copy of the journal, which is the only record of what this system has done.
+
+    Until 2026-11-12 there was no backup of any kind: Time Machine was off, `data/` is gitignored, and
+    the newest hand-made copy was 34 days old and sat in the same folder as the original. Gate 2 needs
+    90 days of history that existed in exactly one file on one disk.
+
+    Runs through the CLI rather than as a shell script because a launchd agent cannot execute a file
+    inside ~/Documents -- macOS refuses with "Operation not permitted". Every other agent here works by
+    invoking `uv` from outside that folder, so this uses the same proven path instead of a second one.
+    """
+    import gzip
+    import shutil
+    import sqlite3
+
+    db = settings.journal_path
+    if not db.exists():
+        print(f"no journal at {db}", file=sys.stderr)
+        return 1
+    # Outside data/ on purpose: a backup in the folder it protects is lost to the same rm or disk.
+    dest = Path(args.dest) if args.dest else (
+        Path.home() / "Library" / "Application Support" / "PersonalTrader" / "backups")
+    dest.mkdir(parents=True, exist_ok=True)
+    out = dest / f"journal-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.db"
+
+    # sqlite3's own backup API, not a file copy: the engine writes every 15 minutes and the forex
+    # watcher every minute, so a plain copy can catch the file mid-transaction and produce something
+    # that opens cleanly and is quietly wrong.
+    src = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        with sqlite3.connect(out) as copy:
+            src.backup(copy)
+    finally:
+        src.close()
+
+    checked = sqlite3.connect(out)
+    try:
+        verdict = checked.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        checked.close()
+    if verdict != "ok":
+        # Kept, not deleted: a corrupt copy is evidence about the original.
+        print(f"backup failed integrity_check ({verdict}); kept for inspection: {out}", file=sys.stderr)
+        return 1
+
+    with out.open("rb") as raw, gzip.open(f"{out}.gz", "wb") as gz:
+        shutil.copyfileobj(raw, gz)
+    out.unlink()
+
+    # Pruned only after a verified good backup exists, so a run of failures cannot erode the history.
+    keep = args.keep
+    old = sorted(dest.glob("journal-*.db.gz"), key=lambda f: f.stat().st_mtime, reverse=True)[keep:]
+    for f in old:
+        f.unlink()
+    size = (dest / f"{out.name}.gz").stat().st_size / 1e6
+    print(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} backup ok: {out}.gz "
+          f"({size:.1f} MB), pruned {len(old)}, keeping {keep}")
+    return 0
+
+
 def cmd_watch_fx(settings, args) -> int:
     """One pass of the forex watcher and nothing else. Meant to run every minute.
 
@@ -818,6 +878,9 @@ def main(argv: list[str] | None = None) -> int:
     p_note.add_argument("--digest", action="store_true", help="this is today's digest (engine skips its own)")
     p_note.add_argument("text", nargs="*")
     sub.add_parser("watch-fx", help="one pass of the forex watcher (meant to run every minute)")
+    p_bk = sub.add_parser("backup", help="verified copy of the journal, gzipped, outside data/")
+    p_bk.add_argument("--dest", help="where to write (default: ~/Library/Application Support/PersonalTrader/backups)")
+    p_bk.add_argument("--keep", type=int, default=30, help="how many to retain (default 30)")
     p_run = sub.add_parser("run", help="one engine cycle")
     p_run.add_argument("--dry-run", action="store_true", help="show what would happen; send nothing")
 
@@ -829,7 +892,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
                 "menubar": cmd_menubar, "excursions": cmd_excursions, "app": cmd_app,
                 "candidates": cmd_candidates, "technicals": cmd_technicals, "signal": cmd_signal, "notify": cmd_notify,
-                "watch-fx": cmd_watch_fx}
+                "watch-fx": cmd_watch_fx, "backup": cmd_backup}
     try:
         return handlers[args.command](load_settings(), args)
     except LiveTradingRefused as exc:
