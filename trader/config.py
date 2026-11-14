@@ -140,6 +140,10 @@ class IntradayConfig(BaseModel):
     plan_within_minutes: int = 30
     capital_usd: float = 10_000.0
     risk_pct: float = 1.0
+    # The broker's smallest tradable volume, in lots. On an account too small for risk-based sizing to
+    # clear it, THIS sets the position size and the risk per trade -- so a wrong value here is wrong on
+    # every single trade, in the direction of risking more than intended.
+    min_lot: float = 0.01
 
     @field_validator("symbols")
     @classmethod

@@ -57,3 +57,10 @@ close_utc: "16:00"     # flat before the thin late session
 # plan message says so when it happens rather than quoting a 1% it is not delivering.
 capital_usd: 175
 risk_pct: 1.0
+
+# The smallest volume the broker will accept, in lots. UNCONFIRMED: asked on 2026-11-14 the answer was
+# "0.01 I think", and the only ticket we have a picture of had 0.02 in the volume box. It matters more
+# than any other number in this file, because at $175 it is what sets the position size on every trade
+# -- at 0.02 the risk doubles, to 2.8% of the account on a typical day and 6.2% on a wide one.
+# Check it by holding the "-0.01" stepper down until the volume stops falling.
+min_lot: 0.01

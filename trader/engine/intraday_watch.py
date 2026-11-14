@@ -65,6 +65,10 @@ MAX_LEVERAGE = 30.0
 # you are left converting in your head at the moment you can least afford to. One standard lot is
 # 100,000 units of the base currency, and retail tickets step in hundredths of one.
 LOT = 100_000.0
+# The usual retail minimum, and only a DEFAULT -- brokers differ, and on a small account this number
+# decides every trade, because 1% of the account buys less than one step. Asked to confirm it, the
+# answer was "0.01 I think", and the one ticket we have a picture of showed 0.02 in the volume box. So
+# it is config, where a wrong guess is one line to fix and is written down as a guess.
 MIN_LOT = 0.01
 # Hourly bars needed before a UTC day counts as a whole day. Forex runs ~24h on a weekday, so a day with
 # fewer than this is a weekend, a holiday or a partial feed -- all of which understate the range.
@@ -90,6 +94,9 @@ class Plan:
     # is bigger than the risk budget -- see `floored`. Zero means "not stated", and the percentage is
     # then left out rather than invented.
     capital_usd: float = 0.0
+    # The smallest volume this broker accepts. See MIN_LOT -- on this account it, not the rule, is
+    # what sets the position, so it travels with the plan rather than being assumed at the far end.
+    min_lot: float = MIN_LOT
 
     @property
     def risk_pips(self) -> float:
@@ -108,7 +115,8 @@ class Plan:
         take. Everything quoted in dollars is then measured on THIS, not on `qty`, because this is the
         trade you would actually place.
         """
-        return max(MIN_LOT, math.floor(self.qty / LOT * 100) / 100)
+        step = self.min_lot
+        return max(step, math.floor(self.qty / LOT / step) * step)
 
     @property
     def floored(self) -> bool:
@@ -120,7 +128,7 @@ class Plan:
         day is several times the budget. Config says 1%; the ticket does something else. Nothing
         checked that before, so the message says it now.
         """
-        return self.qty / LOT < MIN_LOT
+        return self.qty / LOT < self.min_lot
 
     @property
     def risk_pct_actual(self) -> float:
@@ -173,7 +181,8 @@ def build_plan(cfg: IntradayConfig, session_open: float, daily_ranges: list[floa
     qty = (cfg.capital_usd * cfg.risk_pct / 100) / (trigger - stop)
     qty = min(qty, cfg.capital_usd * MAX_LEVERAGE / trigger)    # see MAX_LEVERAGE
     return Plan(day=day, symbol=symbol, session_open=session_open, atr=atr, trigger=trigger,
-                stop=stop, target=target, qty=qty, capital_usd=cfg.capital_usd)
+                stop=stop, target=target, qty=qty, capital_usd=cfg.capital_usd,
+                min_lot=cfg.min_lot)
 
 
 def _floor_note(p: Plan) -> str:
@@ -181,7 +190,8 @@ def _floor_note(p: Plan) -> str:
     if not p.floored:
         return ""
     pct = f", which is {p.risk_pct_actual:.1f}% of your account" if p.capital_usd > 0 else ""
-    return (f"NOTE: 0.01 lots is the smallest trade your broker takes, and it is BIGGER than this "
+    return (f"NOTE: {p.min_lot:.2f} lots is the smallest trade your broker takes, and it is BIGGER "
+            f"than this "
             f"account can risk at 1%. So the minimum is setting the size{pct} -- not the rule. "
             f"A wider day makes that worse, not better.\n")
 
@@ -358,7 +368,8 @@ class IntradayWatcher:
         # message -- which is built from the stored plan, not the fresh one -- loses the warning that
         # the plan it came from carried.
         return Plan(day=day, symbol=symbol, session_open=o, atr=a, trigger=t, stop=s,
-                    target=g, qty=q, capital_usd=self.cfg.capital_usd)
+                    target=g, qty=q, capital_usd=self.cfg.capital_usd,
+                    min_lot=self.cfg.min_lot)
 
     def _entry(self, day: date, symbol: str) -> float | None:
         raw = self._get(day, "entry", symbol)

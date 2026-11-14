@@ -828,3 +828,65 @@ def test_a_plan_with_no_stated_capital_omits_the_percentage_rather_than_inventin
     text = plan_text(p, SMALL)
     assert "smallest trade your broker takes" in text
     assert "of your account" not in text
+
+
+# --- the broker's minimum is a guess, so it has to be a setting -------------------------------------
+#
+# Asked to confirm it, the answer was "0.01 I think" -- and the one ticket we have a picture of showed
+# 0.02 in the volume box. On a $175 account this number sets the position on every trade, so a wrong
+# one is wrong every single time, always in the direction of more risk than intended. Hardcoded, that
+# costs a code change to fix; as config it is one line, and it is written down as unconfirmed.
+
+def test_the_broker_minimum_comes_from_config_not_from_a_constant():
+    two = SMALL.model_copy(update={"min_lot": 0.02})
+    p = build_plan(two, 1.16420, [0.00806] * 20, DAY)
+    assert p.lots == 0.02 and p.sized_qty == 2_000
+    assert "0.02 lots is the smallest trade" in plan_text(p, two), "the note quotes the real step"
+    assert "0.01" not in plan_text(p, two).split("NOTE:")[1]
+
+
+def test_a_bigger_minimum_doubles_the_risk_and_the_message_says_the_bigger_number():
+    one = build_plan(SMALL, 1.16420, [0.00806] * 20, DAY)
+    two = build_plan(SMALL.model_copy(update={"min_lot": 0.02}), 1.16420, [0.00806] * 20, DAY)
+    assert two.risk_usd == pytest.approx(2 * one.risk_usd)
+    assert two.risk_pct_actual == pytest.approx(2.8, abs=0.1)
+    assert f"${two.risk_usd:,.2f}" in plan_text(two, SMALL)
+
+
+def test_rounding_steps_down_to_the_brokers_own_step_not_always_to_a_hundredth():
+    """A 0.1-lot broker must not be told to type 0.37. That volume would be rejected, or worse,
+    silently rounded by the broker to something the message never quoted."""
+    cfg = CFG.model_copy(update={"min_lot": 0.1, "capital_usd": 100_000.0})
+    p = build_plan(cfg, 1.16420, [0.00806] * 20, DAY)
+    assert p.lots == pytest.approx(round(p.lots / 0.1) * 0.1), "a whole number of steps"
+    assert p.sized_qty <= p.qty, "and still never rounded up"
+
+
+def test_the_brokers_step_survives_the_journal_into_the_buy_message(journal):
+    """Same trap as capital: the BUY message is rebuilt from the stored row, which has no step in it."""
+    two = SMALL.model_copy(update={"min_lot": 0.02})
+    w = _watcher(journal, "07:05", 1.16420, cfg=two)
+    w.run_once()
+    stored = w._stored_plan(DAY, "EUR/USD")
+    assert stored.min_lot == 0.02 and stored.lots == 0.02
+
+    hit = _watcher(journal, "09:00", stored.trigger, cfg=two)
+    hit.run_once()
+    assert "Volume       0.02" in hit.notifier.sent[0], "the buy quotes this broker's step, not 0.01"
+
+
+def test_the_floor_is_judged_against_the_brokers_step_not_a_hardcoded_one():
+    """Whether the warning fires has to be asked about THIS broker's minimum.
+
+    The doubling test above does not pin this down: at $175 the wanted size is under 0.01 lots, so a
+    `floored` check left hardcoded at 0.01 still says True and the note still appears, by luck. This
+    is the case that tells them apart -- an account that wants 0.03 lots, at a broker whose smallest
+    trade is 0.05. Against 0.01 that reads as comfortably above the floor; against the real step the
+    minimum is still choosing the size, and the reader still needs telling.
+    """
+    cfg = CFG.model_copy(update={"capital_usd": 726.0, "min_lot": 0.05})
+    p = build_plan(cfg, 1.16420, [0.00806] * 20, DAY)
+    assert 0.01 < p.qty / LOT < 0.05, "above a hundredth, below this broker's step"
+    assert p.floored, "the step that matters is the broker's, not 0.01"
+    assert p.lots == 0.05
+    assert "smallest trade your broker takes" in plan_text(p, cfg)
