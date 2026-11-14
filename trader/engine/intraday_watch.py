@@ -86,6 +86,10 @@ class Plan:
     stop: float
     target: float
     qty: float
+    # What the size was worked out from. Carried so the plan can say when the broker's minimum trade
+    # is bigger than the risk budget -- see `floored`. Zero means "not stated", and the percentage is
+    # then left out rather than invented.
+    capital_usd: float = 0.0
 
     @property
     def risk_pips(self) -> float:
@@ -105,6 +109,23 @@ class Plan:
         trade you would actually place.
         """
         return max(MIN_LOT, math.floor(self.qty / LOT * 100) / 100)
+
+    @property
+    def floored(self) -> bool:
+        """True when the broker's smallest trade is LARGER than 1% of capital bought.
+
+        Below roughly $240 this is the normal case on EUR/USD, and it quietly inverts the sizing: the
+        rule stops choosing the position and the broker's 0.01 minimum chooses it instead. Risk per
+        trade is then whatever that minimum happens to cost at today's stop distance, which on a wide
+        day is several times the budget. Config says 1%; the ticket does something else. Nothing
+        checked that before, so the message says it now.
+        """
+        return self.qty / LOT < MIN_LOT
+
+    @property
+    def risk_pct_actual(self) -> float:
+        """What the stop really costs as a share of capital, or 0.0 when capital was not stated."""
+        return 100 * self.risk_usd / self.capital_usd if self.capital_usd > 0 else 0.0
 
     @property
     def sized_qty(self) -> float:
@@ -151,8 +172,18 @@ def build_plan(cfg: IntradayConfig, session_open: float, daily_ranges: list[floa
     # actually carry rather than the one an unrounded distance would have had.
     qty = (cfg.capital_usd * cfg.risk_pct / 100) / (trigger - stop)
     qty = min(qty, cfg.capital_usd * MAX_LEVERAGE / trigger)    # see MAX_LEVERAGE
-    return Plan(day=day, symbol=symbol, session_open=session_open, atr=atr,
-                trigger=trigger, stop=stop, target=target, qty=qty)
+    return Plan(day=day, symbol=symbol, session_open=session_open, atr=atr, trigger=trigger,
+                stop=stop, target=target, qty=qty, capital_usd=cfg.capital_usd)
+
+
+def _floor_note(p: Plan) -> str:
+    """One line when the broker's minimum trade, not the rule, is setting the risk. See `Plan.floored`."""
+    if not p.floored:
+        return ""
+    pct = f", which is {p.risk_pct_actual:.1f}% of your account" if p.capital_usd > 0 else ""
+    return (f"NOTE: 0.01 lots is the smallest trade your broker takes, and it is BIGGER than this "
+            f"account can risk at 1%. So the minimum is setting the size{pct} -- not the rule. "
+            f"A wider day makes that worse, not better.\n")
 
 
 def plan_text(p: Plan, cfg: IntradayConfig) -> str:
@@ -167,8 +198,9 @@ def plan_text(p: Plan, cfg: IntradayConfig) -> str:
         f"   Stop Loss    {f(p.stop)}\n"
         f"   Take Profit  {f(p.target)}\n"
         f"\n"
-        f"Risks ${p.risk_usd:,.0f} ({p.risk_pips:.0f} pips) to make {p.reward_pips:.0f} pips, if it "
+        f"Risks ${p.risk_usd:,.2f} ({p.risk_pips:.0f} pips) to make {p.reward_pips:.0f} pips, if it "
         f"fills at all -- most days it will not.\n"
+        f"{_floor_note(p)}"
         f"Those two levels are the point of doing it this way: with them set, your broker closes the "
         f"trade at whichever comes first and you need not watch anything. Cancel whatever is left of "
         f"the order at {cfg.close_utc} UTC -- the tested rule holds nothing overnight.\n"
@@ -195,7 +227,8 @@ def buy_text(p: Plan, rate: float) -> str:
             f"   Stop Loss    {f(p.stop)}\n"
             f"   Take Profit  {f(p.target)}\n"
             f"\n"
-            f"Risks ${p.risk_usd:,.0f} ({p.risk_pips:.0f} pips) to make {p.reward_pips:.0f} pips.\n"
+            f"Risks ${p.risk_usd:,.2f} ({p.risk_pips:.0f} pips) to make {p.reward_pips:.0f} pips.\n"
+            f"{_floor_note(p)}"
             f"Set both before you walk away: this message needed a phone to reach you, and those two "
             f"levels sit at the broker whether the next one arrives or not.\n"
             f"You will pay the ask, a touch above this mid.")
@@ -320,8 +353,12 @@ class IntradayWatcher:
         if not raw:
             return None
         o, a, t, s, g, q = (float(x) for x in raw.split(","))
+        # Capital comes from the config rather than the stored row: it is a setting, not something
+        # measured about that day, so reading it back is how it stays current. Without this the BUY
+        # message -- which is built from the stored plan, not the fresh one -- loses the warning that
+        # the plan it came from carried.
         return Plan(day=day, symbol=symbol, session_open=o, atr=a, trigger=t, stop=s,
-                    target=g, qty=q)
+                    target=g, qty=q, capital_usd=self.cfg.capital_usd)
 
     def _entry(self, day: date, symbol: str) -> float | None:
         raw = self._get(day, "entry", symbol)

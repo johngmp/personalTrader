@@ -45,5 +45,15 @@ open_utc: "07:00"      # London open
 close_utc: "16:00"     # flat before the thin late session
 
 # Used only to state a position size in the message. No money is allocated and no order is sent.
-capital_usd: 10000
+#
+# 175 is the real balance of the Fusion account these messages are typed into, set 2026-11-14. It was
+# 10000 before, which was a placeholder nobody had a reason to change while this was paper -- and a
+# message sized for $10,000 says 0.41 lots, which on $175 is 27x the account in EUR/USD and would be
+# refused or ruin it.
+#
+# At this balance the sizing arithmetic no longer binds: 1% of $175 over a median 24 pip stop is 723
+# units, and the smallest trade a broker accepts is 1,000. So every plan is 0.01 lots and the risk is
+# whatever that costs -- $1.20 on a quiet day, $5.40 on a wide one, 0.7% to 3.1% of the account. The
+# plan message says so when it happens rather than quoting a 1% it is not delivering.
+capital_usd: 175
 risk_pct: 1.0

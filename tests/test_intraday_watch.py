@@ -772,3 +772,59 @@ def test_a_day_that_never_triggered_tells_you_to_cancel_the_resting_order():
     text = no_setup_text(_plan(), CFG)
     assert "cancel it" in text.lower()
     assert "1.16110" in text, "say which order"
+
+
+# --- when the broker's minimum is bigger than the risk budget ---------------------------------------
+#
+# The account these messages are typed into holds $175. One percent of that, over a median 24 pip stop,
+# buys 723 units -- and the smallest trade a broker accepts is 1,000. So the sizing arithmetic stops
+# choosing the position and the broker's floor chooses it instead, at whatever that costs on the day.
+# Config still says 1%. The ticket does something else. That is this project's recurring bug -- two
+# things that must agree, with nothing checking -- so the message has to say it out loud.
+
+SMALL = CFG.model_copy(update={"capital_usd": 175.0})
+
+
+def test_a_small_account_is_told_the_minimum_is_setting_the_size_not_the_rule():
+    p = build_plan(SMALL, 1.16420, [0.00806] * 20, DAY)
+    assert p.floored and p.lots == MIN_LOT
+    text = plan_text(p, SMALL)
+    assert "smallest trade your broker takes" in text
+    assert "1.4% of your account" in text, "the real figure, not the 1% the config asks for"
+    assert p.risk_pct_actual > SMALL.risk_pct, "the floor can only push risk UP"
+
+
+def test_an_account_big_enough_is_not_warned_about_a_floor_that_is_not_binding():
+    """Or the note is decoration, and the next reader learns to skip it."""
+    p = build_plan(CFG, 1.16420, [0.00806] * 20, DAY)
+    assert not p.floored
+    assert "smallest trade your broker takes" not in plan_text(p, CFG)
+
+
+def test_the_warning_survives_the_journal_into_the_buy_message(journal):
+    """The BUY message is built from the STORED plan, not the fresh one.
+
+    Capital is not in the stored row -- it is a setting, not something measured about that day -- so a
+    plan read back out of the journal had no capital and silently dropped the warning. The one message
+    sent at the moment money is about to move is exactly the one that must not lose it.
+    """
+    w = _watcher(journal, "07:05", 1.16420, cfg=SMALL)
+    w.run_once()
+    assert "smallest trade your broker takes" in w.notifier.sent[0], "the plan says it"
+
+    stored = w._stored_plan(DAY, "EUR/USD")
+    assert stored.capital_usd == SMALL.capital_usd, "capital came back from the config, not from zero"
+
+    hit = _watcher(journal, "09:00", stored.trigger, cfg=SMALL)
+    hit.run_once()
+    assert "BUY EUR/USD now" in hit.notifier.sent[0]
+    assert "smallest trade your broker takes" in hit.notifier.sent[0], "and so does the buy"
+
+
+def test_a_plan_with_no_stated_capital_omits_the_percentage_rather_than_inventing_one():
+    p = Plan(day=DAY, symbol="EUR/USD", session_open=1.16420, atr=0.00806,
+             trigger=1.16017, stop=1.15775, target=1.16420, qty=723.0)
+    assert p.floored and p.risk_pct_actual == 0.0
+    text = plan_text(p, SMALL)
+    assert "smallest trade your broker takes" in text
+    assert "of your account" not in text
