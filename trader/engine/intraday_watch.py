@@ -25,6 +25,7 @@ charged the real spread from tick data; the alert cannot know the live one. On E
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 
@@ -60,6 +61,11 @@ MIN_ATR = 10 * PIP
 # is the most a position could be. At the median ATR the size is 4.6x capital and at the lowest ATR ever
 # seen it is 23.7x, so this cap never binds on a real market either.
 MAX_LEVERAGE = 30.0
+# A broker ticket asks for VOLUME IN LOTS, not units of currency, so the message has to speak lots or
+# you are left converting in your head at the moment you can least afford to. One standard lot is
+# 100,000 units of the base currency, and retail tickets step in hundredths of one.
+LOT = 100_000.0
+MIN_LOT = 0.01
 # Hourly bars needed before a UTC day counts as a whole day. Forex runs ~24h on a weekday, so a day with
 # fewer than this is a weekend, a holiday or a partial feed -- all of which understate the range.
 HOURS_FOR_A_FULL_DAY = 20
@@ -90,13 +96,29 @@ class Plan:
         return (self.target - self.trigger) / PIP
 
     @property
+    def lots(self) -> float:
+        """`qty` as the volume box on a broker ticket wants it.
+
+        Rounded DOWN to the 0.01 step a retail ticket accepts, so the number you are told to type is
+        never larger than the number that was sized, and floored at the smallest volume a ticket will
+        take. Everything quoted in dollars is then measured on THIS, not on `qty`, because this is the
+        trade you would actually place.
+        """
+        return max(MIN_LOT, math.floor(self.qty / LOT * 100) / 100)
+
+    @property
+    def sized_qty(self) -> float:
+        """The units `lots` really buys. The gap to `qty` is the rounding, and it is never silent."""
+        return self.lots * LOT
+
+    @property
     def risk_usd(self) -> float:
         """What the stop actually costs at this size, which is not always 1% of capital.
 
         The leverage cap can cut the size below what risk-based sizing asked for, and then quoting the
-        nominal 1% would overstate the loss. Derived from the two numbers in the message so it cannot
-        disagree with them."""
-        return (self.trigger - self.stop) * self.qty
+        nominal 1% would overstate the loss. Derived from the lot size the message tells you to type,
+        so the dollars and the volume box cannot disagree."""
+        return (self.trigger - self.stop) * self.sized_qty
 
 
 def build_plan(cfg: IntradayConfig, session_open: float, daily_ranges: list[float],
@@ -139,13 +161,17 @@ def plan_text(p: Plan, cfg: IntradayConfig) -> str:
         f"📋 {p.symbol} plan · {p.day:%a %d %b}\n"
         f"London opened at {f(p.session_open)} · typical day {p.atr / PIP:.0f} pips\n"
         f"\n"
-        f"BUY if it falls to {f(p.trigger)}\n"
-        f"   Stop   {f(p.stop)}  ({p.risk_pips:.0f} pips, ${p.risk_usd:,.0f})\n"
-        f"   Target {f(p.target)}  ({p.reward_pips:.0f} pips)\n"
-        f"   Size   {p.qty:,.0f} units\n"
+        f"Open a BUY LIMIT ticket and fill it in exactly like this:\n"
+        f"   Volume       {p.lots:.2f}        ({p.sized_qty:,.0f} units)\n"
+        f"   Price        {f(p.trigger)}\n"
+        f"   Stop Loss    {f(p.stop)}\n"
+        f"   Take Profit  {f(p.target)}\n"
         f"\n"
-        f"A resting limit buy at {f(p.trigger)} with a stop at {f(p.stop)} does this without you "
-        f"watching. Flat by {cfg.close_utc} UTC either way.\n"
+        f"Risks ${p.risk_usd:,.0f} ({p.risk_pips:.0f} pips) to make {p.reward_pips:.0f} pips, if it "
+        f"fills at all -- most days it will not.\n"
+        f"Those two levels are the point of doing it this way: with them set, your broker closes the "
+        f"trade at whichever comes first and you need not watch anything. Cancel whatever is left of "
+        f"the order at {cfg.close_utc} UTC -- the tested rule holds nothing overnight.\n"
         f"Shadow test — {EVIDENCE.get(p.symbol, 'not yet measured on this pair')}. Not advice."
     )
 
@@ -164,7 +190,14 @@ def missed_text(cfg: IntradayConfig, day: date, minutes_in: float, symbol: str) 
 def buy_text(p: Plan, rate: float) -> str:
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
     return (f"🟢 BUY {p.symbol} now — {f(rate)}\n"
-            f"Stop {f(p.stop)} · Target {f(p.target)} · {p.qty:,.0f} units\n"
+            f"Buy by Market, then set both levels on the position:\n"
+            f"   Volume       {p.lots:.2f}        ({p.sized_qty:,.0f} units)\n"
+            f"   Stop Loss    {f(p.stop)}\n"
+            f"   Take Profit  {f(p.target)}\n"
+            f"\n"
+            f"Risks ${p.risk_usd:,.0f} ({p.risk_pips:.0f} pips) to make {p.reward_pips:.0f} pips.\n"
+            f"Set both before you walk away: this message needed a phone to reach you, and those two "
+            f"levels sit at the broker whether the next one arrives or not.\n"
             f"You will pay the ask, a touch above this mid.")
 
 
@@ -191,6 +224,10 @@ def no_setup_text(p: Plan, cfg: IntradayConfig) -> str:
     return (f"😐 No {p.symbol} trade today ({p.day:%a %d %b})\n"
             f"It needed to fall to {f(p.trigger)} and never got there, so there was nothing to take.\n"
             f"\n"
+            f"If you left a BUY LIMIT resting at {f(p.trigger)}, cancel it now. It did not fill today "
+            f"and tomorrow's levels will be different ones, so an order left there is a trade nobody "
+            f"planned.\n"
+            f"\n"
             f"This is the normal case: the setup appears on roughly one day in three. Nothing is wrong, "
             f"and no news is the same as this message.")
 
@@ -203,8 +240,10 @@ def stranded_text(p: Plan, entry: float | None = None) -> str:
             f"without a sell message, "
             f"because nothing was running at 16:00 UTC — usually this Mac asleep.\n"
             f"\n"
-            f"If you are still holding it, close it now. The tested rule is flat at the session end, so "
-            f"carrying it overnight is not the strategy any more.\n"
+            f"If you are still holding it, close it now, from your positions list rather than with a "
+            f"Sell order -- a Sell opens a second trade the other way instead of ending this one. The "
+            f"tested rule is flat at the session end, so carrying it overnight is not the strategy any "
+            f"more.\n"
             f"No exit price is quoted here on purpose: the rate at a close this missed is not something "
             f"to invent. Check your broker for what you actually got.")
 
@@ -220,8 +259,22 @@ def sell_text(p: Plan, rate: float, why: str, entry: float | None = None) -> str
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
     entry = p.trigger if entry is None else entry
     pips = (rate - entry) / PIP
-    return (f"🔴 SELL {p.symbol} now — {f(rate)} ({why})\n"
-            f"Bought {f(entry)} · {pips:+.0f} pips · about {pips * PIP * p.qty:+,.0f} USD\n"
+    level = {"target": "Take Profit", "stop": "Stop Loss"}.get(why)
+    if level:
+        # The two exits the ticket already carries. Telling you to go and do by hand something the
+        # broker has done for you is how a position gets closed twice -- and on a ticket, the second
+        # close is a new trade in the opposite direction.
+        instruction = (f"Nothing to do if you set the {level}: your broker closed this at that price "
+                       f"without you. This message is the record, not an instruction.\n")
+    else:
+        instruction = ("Close the open position from your positions list -- the X, or Close, on the "
+                       "trade itself.\n"
+                       "Do NOT use Sell by Market: on a ticket that opens a SECOND trade the other "
+                       "way instead of ending this one, and leaves you holding both.\n")
+    return (f"🔴 CLOSE {p.symbol} now — {f(rate)} ({why})\n"
+            f"{instruction}"
+            f"\n"
+            f"Bought {f(entry)} · {pips:+.0f} pips · about {pips * PIP * p.sized_qty:+,.0f} USD\n"
             f"At the mid, before the spread you actually paid on the way in.")
 
 

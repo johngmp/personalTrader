@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 from trader.config import IntradayConfig, load_settings
-from trader.engine.intraday_watch import IntradayWatcher, Plan, build_plan, plan_text
+from trader.engine.intraday_watch import (LOT, MIN_LOT, IntradayWatcher, Plan, build_plan,
+                                          plan_text)
 from trader.journal.db import Journal
 
 CFG = IntradayConfig(enabled=True, symbols=["EUR/USD"], drop_atr=0.5, stop_atr=0.3, target_frac=1.0,
@@ -72,7 +73,7 @@ def test_the_scale_never_uses_todays_own_range():
 def test_a_plan_goes_out_once_at_the_open_and_is_not_repeated(journal):
     w = _watcher(journal, "07:05", 1.16420)
     assert w.run_once() and len(w.notifier.sent) == 1
-    assert "BUY if it falls to" in w.notifier.sent[0]
+    assert "Open a BUY LIMIT ticket" in w.notifier.sent[0]
     w2 = _watcher(journal, "07:20", 1.16420)
     w2.run_once()
     assert w2.notifier.sent == [], "the plan must not be re-sent every fifteen minutes"
@@ -95,7 +96,7 @@ def test_it_says_sell_at_the_target(journal):
     out = _watcher(journal, "11:00", 1.16430)
     out.run_once()
     assert len(out.notifier.sent) == 1
-    assert "SELL" in out.notifier.sent[0] and "target" in out.notifier.sent[0]
+    assert "CLOSE" in out.notifier.sent[0] and "target" in out.notifier.sent[0]
 
 
 def test_it_says_sell_at_the_stop(journal):
@@ -103,7 +104,7 @@ def test_it_says_sell_at_the_stop(journal):
     _watcher(journal, "08:15", 1.16100).run_once()
     out = _watcher(journal, "11:00", 1.15900)
     out.run_once()
-    assert "SELL" in out.notifier.sent[0] and "stop" in out.notifier.sent[0]
+    assert "CLOSE" in out.notifier.sent[0] and "stop" in out.notifier.sent[0]
 
 
 def test_one_buy_and_one_sell_per_day_however_often_it_runs(journal):
@@ -131,7 +132,7 @@ def test_an_open_position_is_closed_when_the_session_ends(journal):
     _watcher(journal, "08:15", 1.16100).run_once()
     end = _watcher(journal, "16:00", 1.16250)
     end.close_out()
-    assert "SELL" in end.notifier.sent[0] and "session end" in end.notifier.sent[0]
+    assert "CLOSE" in end.notifier.sent[0] and "session end" in end.notifier.sent[0]
 
 
 def test_a_disabled_watcher_is_silent(journal):
@@ -168,7 +169,7 @@ def test_a_day_whose_open_was_missed_is_skipped_not_improvised(journal):
     # dressed up as the open -- that would look identical to a real one and be a different trade.
     assert len(late.notifier.sent) == 1
     assert "No EUR/USD plan today" in late.notifier.sent[0]
-    assert "BUY if it falls to" not in late.notifier.sent[0]
+    assert "Open a BUY LIMIT ticket" not in late.notifier.sent[0]
 
     # And it stays skipped for the rest of that day, however many times the engine runs. The notice is
     # sent once: one message explaining the day, not one every fifteen minutes until midnight.
@@ -179,7 +180,7 @@ def test_a_day_whose_open_was_missed_is_skipped_not_improvised(journal):
 
 def test_a_plan_built_inside_the_window_is_still_allowed(journal):
     w = _watcher(journal, "07:25", 1.16420)
-    assert w.run_once() and "BUY if it falls to" in w.notifier.sent[0]
+    assert w.run_once() and "Open a BUY LIMIT ticket" in w.notifier.sent[0]
 
 
 def test_a_trade_left_open_by_a_missed_close_is_raised_not_forgotten(journal):
@@ -247,7 +248,7 @@ def test_a_rate_at_the_printed_target_sells(journal):
     _watcher(journal, "09:00", trigger, ranges=ODD_RANGES).run_once()          # in
     out = _watcher(journal, "12:00", target, ranges=ODD_RANGES)
     assert out.run_once(), "the rate reached the stated target and nothing was sent"
-    assert "SELL" in out.notifier.sent[0] and "target" in out.notifier.sent[0]
+    assert "CLOSE" in out.notifier.sent[0] and "target" in out.notifier.sent[0]
 
 
 def test_a_setup_that_gapped_past_its_own_stop_is_not_a_buy(journal):
@@ -322,7 +323,8 @@ def test_size_is_capped_at_retail_leverage_and_says_what_it_then_risks():
     p = build_plan(CFG, 1.1200, [0.00105] * 20, DAY)
     assert p.qty * p.trigger == pytest.approx(CFG.capital_usd * 30, rel=1e-3)
     assert p.risk_usd < CFG.capital_usd * CFG.risk_pct / 100
-    assert p.risk_usd == pytest.approx((p.trigger - p.stop) * p.qty)
+    assert p.risk_usd == pytest.approx((p.trigger - p.stop) * p.sized_qty), \
+        "derived from the volume the message tells you to type, not from the unrounded quantity"
     assert f"${p.risk_usd:,.0f}" in plan_text(p, CFG)
 
 
@@ -424,7 +426,7 @@ def test_a_day_that_never_triggered_says_so_at_the_close(journal):
     the system knew all day and never said. Silence should not need interpreting."""
     w = _watcher(journal, "07:05", 1.11919)
     w.run_once()
-    assert "BUY if it falls to" in w.notifier.sent[0]
+    assert "Open a BUY LIMIT ticket" in w.notifier.sent[0]
 
     quiet = _watcher(journal, "16:05", 1.12100)          # drifted up all day, never near the trigger
     actions = quiet.run_once() + quiet.close_out()
@@ -447,7 +449,7 @@ def test_a_day_that_did_trade_still_gets_a_sell_not_a_quiet_note(journal):
     out.run_once()
     actions = out.close_out()
     assert actions and "SELL" in actions[0]
-    assert "SELL EUR/USD now" in out.notifier.sent[0] and "session end" in out.notifier.sent[0]
+    assert "CLOSE EUR/USD now" in out.notifier.sent[0] and "session end" in out.notifier.sent[0]
     assert "No EUR/USD trade today" not in "".join(out.notifier.sent)
 
 
@@ -659,3 +661,114 @@ def test_the_quick_watcher_is_its_own_command_and_touches_no_broker():
     for forbidden in ("configured_brokers", "Engine(", "write_dashboard", "Coordinator"):
         assert forbidden not in src, f"the quick path must not do {forbidden}"
     assert "watch-fx" in inspect.getsource(cli.main)
+
+
+# --- the message has to fit the ticket you are actually looking at ---------------------------------
+#
+# These are the only messages in the system that a human executes by hand, and they were written as a
+# summary of a trade rather than as instructions for a broker ticket. The two are not the same thing:
+# a ticket asks for Volume in LOTS, a Price, a Stop Loss and a Take Profit, and the message quoted raw
+# units with no field names at all. Being handed "51,282 units" in front of a box that wants 0.51 is a
+# conversion done in a hurry, at the one moment a wrong number costs money.
+
+def _plan(qty: float = 41_152.0) -> Plan:
+    return Plan(day=DAY, symbol="EUR/USD", session_open=1.16420, atr=0.0062,
+                trigger=1.16110, stop=1.15924, target=1.16420, qty=qty)
+
+
+def test_the_size_is_quoted_in_lots_because_that_is_what_the_volume_box_takes():
+    from trader.engine.intraday_watch import buy_text
+
+    p = _plan()
+    for text in (plan_text(p, CFG), buy_text(p, p.trigger)):
+        assert "Volume" in text, "the number needs the name of the box it goes in"
+        assert f"{p.lots:.2f}" in text
+    assert p.lots == pytest.approx(0.41)
+
+
+def test_rounding_the_volume_can_only_ever_make_the_trade_smaller():
+    """A ticket steps in 0.01 lots, so the sized quantity has to be rounded to reach the box.
+
+    Rounding to nearest would round UP half the time, and then the message tells you to take more risk
+    than it just quoted. Down is the only direction that cannot do that.
+    """
+    for qty in (41_152.0, 41_999.0, 150_001.0, 99_999.0):
+        p = _plan(qty)
+        assert p.sized_qty <= qty, f"{qty} was rounded up to {p.sized_qty}"
+        assert qty - p.sized_qty < LOT * MIN_LOT, "rounded away more than one step"
+
+
+def test_a_size_below_one_step_still_names_a_volume_a_ticket_would_accept():
+    """0.00 in the volume box is not an order. Floor it and let the dollar figures follow."""
+    p = _plan(400.0)
+    assert p.lots == MIN_LOT
+    assert "0.00" not in plan_text(p, CFG).split("Risks")[0]
+
+
+def test_the_dollars_are_measured_on_the_volume_you_were_told_to_type():
+    """Not on the unrounded quantity. The two differ by the rounding, and the message shows only one
+    of them -- so the figure that is NOT shown must not be the one the dollars came from."""
+    p = _plan(41_999.0)
+    assert p.sized_qty == 41_000.0, "0.41 lots, not 0.42"
+    assert p.risk_usd == pytest.approx((p.trigger - p.stop) * p.sized_qty)
+    assert p.risk_usd != pytest.approx((p.trigger - p.stop) * p.qty)
+
+
+def test_every_level_in_the_plan_is_labelled_with_its_box_on_the_ticket():
+    text = plan_text(_plan(), CFG)
+    for field in ("Volume", "Price", "Stop Loss", "Take Profit"):
+        assert field in text, f"nothing tells you which box {field} belongs in"
+
+
+def test_the_buy_message_names_the_two_levels_rather_than_just_the_prices():
+    from trader.engine.intraday_watch import buy_text
+
+    text = buy_text(_plan(), 1.16110)
+    assert "Stop Loss" in text and "Take Profit" in text
+
+
+# --- the exit message must not read as an order to place -------------------------------------------
+
+def test_the_exit_never_tells_you_to_press_sell():
+    """On a broker ticket SELL is not the opposite of BUY -- it is a NEW trade the other way.
+
+    "SELL EUR/USD now" in front of the screen in the user's own screenshots reads as the big red Sell
+    by Market button, which on a hedging account leaves two open positions instead of none, and the
+    session-end exit the rule depends on never happens.
+    """
+    from trader.engine.intraday_watch import sell_text, stranded_text
+
+    text = sell_text(_plan(), 1.16300, "session end", 1.16110)
+    assert text.startswith("🔴 CLOSE"), "the verb is close, not sell"
+    assert "positions list" in text
+    assert "Do NOT use Sell by Market" in text
+    assert "Do NOT use Sell by Market" not in text.replace("Do NOT use Sell by Market", "", 1), \
+        "said once, not twice"
+    assert "Sell order" in stranded_text(_plan(), 1.16110), "the stranded day has the same trap"
+
+
+def test_an_exit_the_broker_already_made_says_there_is_nothing_to_do():
+    """If the Stop Loss and Take Profit went on the ticket, the broker has closed the trade itself.
+
+    Sending "CLOSE now" for a position that is already flat is how a trade gets closed twice, and the
+    second close is a fresh position in the opposite direction.
+    """
+    from trader.engine.intraday_watch import sell_text
+
+    for why, level in (("target", "Take Profit"), ("stop", "Stop Loss")):
+        text = sell_text(_plan(), 1.16420, why, 1.16110)
+        assert "Nothing to do" in text and level in text, why
+        assert "positions list" not in text, "it is not asking you to do anything"
+
+
+def test_a_day_that_never_triggered_tells_you_to_cancel_the_resting_order():
+    """The plan message now has you leave a limit order sitting at the broker.
+
+    Nothing cancelled it. Left there it is live tomorrow, against levels measured for today, which is a
+    trade nobody planned and nothing in this system is watching.
+    """
+    from trader.engine.intraday_watch import no_setup_text
+
+    text = no_setup_text(_plan(), CFG)
+    assert "cancel it" in text.lower()
+    assert "1.16110" in text, "say which order"
