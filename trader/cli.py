@@ -231,6 +231,45 @@ def cmd_gate1(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gate2(settings: Settings, args: argparse.Namespace) -> int:
+    """Exit 0 even on FAIL. A non-zero exit makes a scheduled task look broken, and a sleeve failing
+    its forward test is a result, not an error -- arguably the most useful result this prints."""
+    from trader.journal.db import Journal
+    from trader.research.gate2 import evaluate_gate2, log_gate2
+
+    journal = Journal(settings.root / "data" / "journal.db")
+    try:
+        if args.sleeve == "all":
+            live = {r["sleeve_id"] for r in journal.sleeve_equity_history()}
+            sleeves = [s for s in settings.sleeves if s in live]
+        else:
+            sleeves = [args.sleeve]
+        for sleeve_id in sleeves:
+            if sleeve_id not in settings.sleeves:
+                print(f"Unknown sleeve {sleeve_id}. Choose from {list(settings.sleeves)} or 'all'.")
+                return 2
+            result = evaluate_gate2(sleeve_id, settings, journal)
+            rec = result.record
+            print(f"\n{sleeve_id} {settings.sleeves[sleeve_id].name}: {result.headline}")
+            if rec.metrics:
+                print(f"  {rec.days_live} days live · Sharpe {rec.metrics.sharpe:+.2f} · "
+                      f"return {rec.metrics.total_return:+.2%} · worst drop {rec.metrics.max_drawdown:.1%}")
+            for c in result.checks:
+                print(f"  {c.mark:<5} {c.name}: {c.detail}")
+            if result.shape.n:
+                sh = result.shape
+                print(f"  shape: {sh.n} closed · win {sh.win_rate:.0%} · median hold {sh.median_hold_days:.1f}d "
+                      f"· payoff {sh.payoff:.2f} (avg win ${sh.avg_win:,.0f} vs avg loss ${sh.avg_loss:,.0f})")
+                if sh.payoff and sh.win_rate:
+                    breakeven = 1 / (1 + sh.payoff)
+                    print(f"  at that payoff it needs a {breakeven:.0%} win rate to break even, and gets {sh.win_rate:.0%}")
+                print(f"  exits: {', '.join(f'{k} x{v}' for k, v in sh.exit_reasons.items())}")
+            log_gate2(result)
+    finally:
+        journal.close()
+    return 0
+
+
 def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     import shutil
     import tempfile
@@ -844,6 +883,8 @@ def main(argv: list[str] | None = None) -> int:
     p_g1 = sub.add_parser("gate1", help="full Gate 1 evaluation with HTML report")
     p_g1.add_argument("strategy", choices=["S1", "S2", "S3", "S4", "S8", "all"])
     p_g1.add_argument("--refresh", action="store_true", help="re-download price history first")
+    p_g2 = sub.add_parser("gate2", help="forward test: is the live sleeve reproducing its backtest?")
+    p_g2.add_argument("sleeve", help="a sleeve id, or 'all' for every sleeve with a live record")
     p_news = sub.add_parser("news", help="latest headlines for enabled symbols (or --symbols)")
     p_news.add_argument("--symbols", help="comma-separated, e.g. SPY,BTC/USD")
     p_news.add_argument("--hours", type=float, default=48)
@@ -887,7 +928,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
-                "gate1": cmd_gate1, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
+                "gate1": cmd_gate1, "gate2": cmd_gate2, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
                 "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
                 "menubar": cmd_menubar, "excursions": cmd_excursions, "app": cmd_app,
