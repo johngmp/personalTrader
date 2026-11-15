@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from trader.config import CostModel, SleeveLimits
+from trader.research.ledger import record_trial, source_fingerprint
 from trader.risk.sizing import plan_weights
 from trader.strategies.base import Holding, Strategy
 
@@ -171,12 +172,36 @@ def run_backtest(
     index = pd.DatetimeIndex(calendar)
     symbol_pnl = {s: book.symbol_cash[s] + (book.positions[s].holding.qty * last_close[s] if s in book.positions else 0.0)
                   for s in strategy.symbols}
+    equity = pd.Series(equity_curve, index=index, name="equity")
+    # Every backtest is a look at the data, and the Deflated Sharpe can only charge for the looks it is
+    # told about. Recording it HERE rather than in `trader gate1` is the whole point: this is the one
+    # function every daily backtest goes through, so an unrecorded trial is unreachable rather than
+    # merely discouraged. See `trader/research/ledger.py`.
+    if len(index):
+        record_trial(strategy=strategy.name, params=dict(strategy.params), symbols=list(strategy.symbols),
+                     costs=costs, span=(index[0], index[-1]),
+                     source=source_fingerprint(type(strategy)), sharpe=_plain_sharpe(equity))
     return BacktestResult(
         strategy=strategy.name, params=dict(strategy.params), symbols=list(strategy.symbols),
-        equity=pd.Series(equity_curve, index=index, name="equity"),
+        equity=equity,
         exposure=pd.Series(exposure_curve, index=index, name="exposure"),
         trades=book.trades, symbol_pnl=symbol_pnl, n_orders=book.n_orders, total_costs=book.total_costs,
     )
+
+
+def _plain_sharpe(equity: pd.Series) -> float | None:
+    """Annualised Sharpe, NOT in excess of cash, and that is deliberate.
+
+    The ledger only ever uses the SPREAD of these numbers, to ask how far a search of this kind can move
+    a result. The cash rate is common to every trial, so subtracting it shifts them all together and
+    leaves the spread alone -- while loading this module with `risk_free_returns` would make the
+    backtester depend on reading BIL's price history to run at all.
+    """
+    r = equity.pct_change().dropna()
+    if len(r) < 2 or r.std() == 0:
+        return None
+    years = max((equity.index[-1] - equity.index[0]).days / 365.25, 1e-9)
+    return float(r.mean() / r.std() * math.sqrt(len(r) / years))
 
 
 def _plan_orders(strategy: Strategy, date: pd.Timestamp, today: dict, book: _Book, values: dict[str, float],

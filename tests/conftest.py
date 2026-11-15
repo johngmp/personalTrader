@@ -68,3 +68,19 @@ def live_page() -> str:
         return dashboard_html(settings, journal, engines)
     finally:
         journal.close()
+
+
+@pytest.fixture(autouse=True)
+def trial_ledger(tmp_path, monkeypatch):
+    """Point the trial ledger at a temp file for every test.
+
+    `run_backtest` records a trial on every call -- that is the point of it -- so without this the suite
+    would append thousands of rows to the real ledger and inflate the Deflated Sharpe's N for every
+    strategy. Autouse rather than opt-in: a test that forgot it would silently corrupt the real
+    research record, which is exactly the kind of "by diligence" failure the ledger exists to stop.
+    """
+    from trader.research import ledger
+
+    path = tmp_path / "trials.jsonl"
+    monkeypatch.setattr(ledger, "TRIAL_LEDGER", path)
+    return path

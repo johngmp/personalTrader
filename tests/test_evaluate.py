@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import numpy as np
 import pandas as pd
 
@@ -16,14 +14,27 @@ def test_neighbours_step_one_setting_at_a_time():
     assert _neighbours({"a": 1, "b": "y"}, grid) == [{"a": 2, "b": "y"}, {"a": 1, "b": "x"}]
 
 
-def test_rerunning_the_same_grid_does_not_inflate_trials(tmp_path):
-    log = tmp_path / "log.jsonl"
-    grid = [{"a": 1}, {"a": 2}]
-    log.write_text(json.dumps({"strategy": "S1", "symbols": ["X"], "grid": grid}) + "\n")
-    assert distinct_trials("S1", grid, ["X"], log) == 2          # same settings again
-    assert distinct_trials("S1", [{"a": 3}], ["X"], log) == 3    # one new setting
-    assert distinct_trials("S1", grid, ["X", "Y"], log) == 4     # new symbols = new trials
-    assert distinct_trials("S2", grid, ["X"], log) == 2          # other strategies don't count
+def test_rerunning_the_same_grid_does_not_inflate_trials():
+    """The counter now reads the trial ledger instead of research_log.jsonl, but what it must mean is
+    unchanged: re-running the same test is not more searching, and trying something new is."""
+    from trader.research.ledger import record_trial
+
+    def seen(strategy, params, symbols, **kw):
+        record_trial(strategy=strategy, params=params, symbols=symbols, costs={}, span=("", ""),
+                     source="t", sharpe=None, **kw)
+
+    for params in ({"a": 1}, {"a": 2}):
+        seen("S1", params, ["X"])
+    assert distinct_trials("S1") == 2
+    seen("S1", {"a": 1}, ["X"])
+    assert distinct_trials("S1") == 2, "the same settings again is the same trial"
+    seen("S1", {"a": 3}, ["X"])
+    assert distinct_trials("S1") == 3, "one new setting is one new trial"
+    seen("S1", {"a": 1}, ["X", "Y"])
+    assert distinct_trials("S1") == 4, "the same settings on a wider basket is a new trial"
+    seen("S2", {"a": 1}, ["X"])
+    assert distinct_trials("S1") == 4, "another strategy's searching is not this one's"
+    assert distinct_trials("S2") == 1
 
 
 def _trending_bars(seed: int, n: int = 3000) -> pd.DataFrame:

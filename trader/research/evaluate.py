@@ -22,6 +22,7 @@ import pandas as pd
 from trader.config import PROJECT_ROOT, CostModel, Settings, SleeveLimits
 from trader.research.backtest import BacktestResult, run_backtest
 from trader.research.deflated import DSR_THRESHOLD, deflated_sharpe
+from trader.research.ledger import trial_count, trial_sharpes, verify_chain
 from trader.research.metrics import Metrics, buy_and_hold, compute_metrics, risk_free_returns
 from trader.strategies import REGISTRY
 from trader.strategies.base import Strategy
@@ -128,6 +129,15 @@ def symbol_costs(symbols: list[str], settings: Settings) -> dict[str, CostModel]
 
 def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_fraction: float = 0.3,
              wf_train_years: int = 4, wf_test_years: int = 1, max_drawdown_pct: float | None = None) -> Gate1Result:
+    # Before anything is measured. Every number below is deflated by how hard we have looked, so a
+    # ledger that has been edited makes the whole verdict a fiction -- and the tidying always removes
+    # trials, never adds them. Refusing is the only honest response; see `ledger.py`.
+    ok, why = verify_chain()
+    if not ok:
+        raise RuntimeError(
+            f"the trial ledger has been altered: {why}. Gate 1 will not score against it -- its "
+            f"confidence is built on the count of past searches, and that count can no longer be "
+            f"trusted. Restore reports/trials.jsonl from git, or start a new chain deliberately.")
     cls, symbols, capital, limits = strategy_setup(code, settings)
     costs = symbol_costs(symbols, settings)
     grid = _grid(cls)
@@ -189,12 +199,13 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
     # N is every distinct setting ever tried for this strategy, not just this run's grid -- searching
     # across sessions is still searching. Measured on the chosen strategy's full evaluated track record,
     # in excess of cash, like every other Sharpe here.
-    ever = distinct_trials(code, grid, symbols)
+    ever = trial_count(code)
     chosen_equity = res.equity.loc[eval_start:end]
     chosen_returns = chosen_equity.pct_change().dropna()
     chosen_returns = chosen_returns - risk_free_returns(chosen_returns.index).reindex(chosen_returns.index).fillna(0.0)
     years = max((chosen_equity.index[-1] - chosen_equity.index[0]).days / 365.25, 1e-9)
-    dsr = deflated_sharpe(chosen_returns, ever, [row["is_sharpe"] for row in grid_table],
+    spread_sharpes, spread_source = _spread_population(code, grid_table)
+    dsr = deflated_sharpe(chosen_returns, ever, spread_sharpes,
                           periods_per_year=len(chosen_returns) / years)
 
     dd_limit = max_drawdown_pct if max_drawdown_pct is not None else limits.max_drawdown_disable_pct
@@ -211,8 +222,8 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
         GateCheck("Not a lucky parameter choice", robustness >= 0.7,
                   f"neighbouring settings keep {robustness:.0%} of the Sharpe (need 70%)"),
         GateCheck("Survives how hard we looked", dsr >= DSR_THRESHOLD,
-                  f"deflated Sharpe {dsr:.1%} confident after {ever} distinct settings tried "
-                  f"(need {DSR_THRESHOLD:.0%})"),
+                  f"deflated Sharpe {dsr:.1%} confident after {ever} distinct looks at the data "
+                  f"(need {DSR_THRESHOLD:.0%}); luck bar set from {spread_source}"),
     ]
     if cls.per_symbol_check:
         traded = {s: v for s, v in oos_symbol_pnl.items() if v != 0}
@@ -247,20 +258,42 @@ def _safe_sharpe(equity: pd.Series) -> float:
         return float("-inf")
 
 
-def distinct_trials(code: str, current: list[dict], symbols: list[str], log: Path | None = None) -> int:
-    """Distinct (settings, symbols) combinations ever tested for a strategy, including this run.
+MIN_SPREAD_SAMPLE = 20
 
-    Re-running the same test doesn't add trials; trying new settings or symbols does.
+
+def _spread_population(code: str, grid_table: list[dict]) -> tuple[list[float], str]:
+    """The trial Sharpes whose SPREAD sets the luck bar, and where they came from.
+
+    This argument used to be `[row["is_sharpe"] for row in grid_table]` -- the current run's own grid.
+    Those are eighteen moving-average pairs over the same prices, and they agree with each other almost
+    by construction: measured on S8 their spread is 0.076. A small spread means a small luck bar no
+    matter how large N is, which is why the check only ever caught S4, and caught it for having a Sharpe
+    near zero rather than for the searching.
+
+    The population has to be the same one N counts. The ledger's trials span different symbol baskets,
+    cost models and versions of the strategy, so their spread is a far better estimate of how much a
+    search of this kind can move a result. The grid is used only when the ledger cannot answer, and the
+    report says so, because a luck bar derived from eighteen near-identical cells should not be read as
+    though it meant something.
     """
-    log = log if log is not None else RESEARCH_LOG   # read at CALL time: a default binds at import
-    seen = {_key({**p, "_symbols": sorted(symbols)}) for p in current}
-    if log.exists():
-        for line in log.read_text().splitlines():
-            entry = json.loads(line)
-            if entry.get("strategy") == code:
-                for p in entry.get("grid", []):
-                    seen.add(_key({**p, "_symbols": sorted(entry.get("symbols", []))}))
-    return len(seen)
+    history = [s for s in trial_sharpes(code) if s is not None]
+    if len(history) >= MIN_SPREAD_SAMPLE:
+        return history, f"{len(history)} past trials of {code}"
+    grid = [row["is_sharpe"] for row in grid_table]
+    return history + grid, (f"only {len(history)} past trials recorded, so this run's own grid is "
+                            f"included -- treat the deflated Sharpe as weak")
+
+
+def distinct_trials(code: str, current: list[dict] | None = None, symbols: list[str] | None = None,
+                    log: Path | None = None) -> int:
+    """How many distinct looks this strategy has ever taken at the data.
+
+    Now a thin read of the trial ledger, which `run_backtest` writes on every single backtest. The old
+    version counted (settings, symbols) pairs out of `research_log.jsonl`, and so saw only the runs that
+    went through `trader gate1`: 216 against roughly 427 real ones. The arguments are kept so existing
+    callers and tests still work, and are ignored.
+    """
+    return trial_count(code)
 
 
 def _git_commit() -> str:
