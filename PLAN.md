@@ -1116,6 +1116,63 @@ inverted the flag. 584 tests pass.
 
 ---
 
+### The evidence engine, part 1: counting the looks (2026-11-15)
+
+Asked for a system that keeps improving the trader, the research came back with an uncomfortable
+answer. Two 2026 papers evaluate exactly this idea. [What survives honest
+evaluation?](https://arxiv.org/html/2608.27734v1) ran LLM-driven strategy discovery under leakage-safe,
+search-aware scoring: **not one discovered strategy was certified, while passive buy-and-hold benchmarks
+were.** The best find deflated to 0.86, under the bar, and its evaluation Sharpe fell to 0.18. [Hard to
+Fool](https://arxiv.org/abs/2611.06607) puts it plainly: an agentic loop that keeps whatever improves
+the metric **is a machine for producing false discoveries**.
+
+So the loop being built improves the quality of the evidence, not the number of strategies. Its main
+output is a reliable *no*. Both papers converge on the design principle: controls must be **structural,
+not procedural** — a rule saying "don't peek" is weak, code that cannot load the data is strong.
+
+**The trial ledger (`trader/research/ledger.py`).** Every confidence here is deflated by how hard we
+looked, and `log_result` was reachable only through `trader gate1`. Everything else searched for free:
+all the intraday research, the earnings study, volatility targeting, the calendar blackout, every
+`trader backtest` run. **216 counted against 427 real** — 201 of the uncounted being intraday work.
+Recording moved into `run_backtest`, the one function every daily backtest already goes through, so an
+unrecorded trial is now unreachable rather than discouraged.
+
+A trial's identity gained the **cost model** and the **strategy's own source** (from the parsed syntax
+tree, docstrings stripped, so rewording prose is not an experiment but changing one operator is). That
+closes the hole the old log recorded in plain sight: rows 8–10 are three S4 runs inside three minutes,
+same grid, same symbols, benchmark 0.0 → 10.521 → −0.088, PASS → FAIL → FAIL, counter stuck at 36.
+
+The file is hash-chained; edit, delete or reorder a row and **Gate 1 refuses to produce a verdict** at
+all. Tamper-evident, not tamper-proof — the realistic failure is one edited line, and this catches it.
+`reports/` is tracked, so git is a free second layer.
+
+The deflated Sharpe's spread input was also wrong: it was fed the current run's eighteen grid cells,
+eighteen moving-average pairs over the same prices agreeing almost by construction (spread 0.076 on S8).
+A small spread means a small luck bar however large N is, which is why the check only ever caught S4 —
+and caught it for having a Sharpe near zero rather than for the searching. It now reads the ledger, and
+says in the report when it has too little history to mean anything.
+
+**The leakage check (`trader/research/leakage.py`).** `GateCheck("Realistic backtest", True, ...)` was
+hardcoded to pass and has rendered as a green tick in every report ever produced. Replaced with a real
+test: recompute the indicators from bars that stop at a sampled date, compare against the full-history
+row, and name the symbol, date and column if anything moved. Deleting the *future* is the only safe
+direction — Wilder's ATR is recursive, so truncating the start would change it for an honest reason.
+
+This slot matters more than it looks, because the papers' sharpest finding is that a planted look-ahead
+oracle scored **DSR = 1.00**. Deflation cannot catch leakage and never could: it asks whether a result
+is too good for the searching, and a strategy that sees tomorrow is not lucky, it is right every time.
+`tests/test_leakage_oracle.py` reproduces that failure here rather than taking it on trust — it asserts
+that deflation *passes* a look-ahead oracle at fifty thousand trials. All five registered strategies
+come back clean, checked on every Gate 1 run.
+
+**Still to do:** the sealed holdout with an open-once receipt; PBO via CSCV; Gate 2 and the
+live-vs-backtest divergence monitor; turning the weekly review on. Full plan in
+`~/.claude/plans/twinkly-skipping-candy.md`.
+
+**Honest expectation, recorded before it happens:** the likely outcome of all this is that S1 and S8
+stop passing, and that Gate 2 reports S8 is not reproducing its backtest. That is the system working. A
+loop that can only ever confirm is the one not worth having.
+
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.
 - **Planned starting capital: ~US$100** (noted 2026-09-18). Needs a *small-account mode*: fractional/dollar-amount
