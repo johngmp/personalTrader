@@ -22,6 +22,7 @@ import pandas as pd
 from trader.config import PROJECT_ROOT, CostModel, Settings, SleeveLimits
 from trader.research.backtest import BacktestResult, run_backtest
 from trader.research.deflated import DSR_THRESHOLD, deflated_sharpe
+from trader.research.leakage import truncation_check
 from trader.research.ledger import trial_count, trial_sharpes, verify_chain
 from trader.research.metrics import Metrics, buy_and_hold, compute_metrics, risk_free_returns
 from trader.strategies import REGISTRY
@@ -209,8 +210,14 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
                           periods_per_year=len(chosen_returns) / years)
 
     dd_limit = max_drawdown_pct if max_drawdown_pct is not None else limits.max_drawdown_disable_pct
+    # This slot used to hold `GateCheck("Realistic backtest", True, ...)` -- a tick hardcoded to pass,
+    # describing properties that `tests/test_backtest.py` already proves and asserting nothing itself.
+    # Those properties now live in the report's methodology note, where documentation belongs, and the
+    # slot holds a test that can actually fail. See `leakage.py` for why this is the one check that
+    # catches what the deflated Sharpe provably cannot.
+    leak = truncation_check(cls(params=chosen, symbols=symbols), bars)
     checks = [
-        GateCheck("Realistic backtest", True, "next-day fills, spread + slippage + fees on every trade, stops can gap"),
+        GateCheck("No look-ahead in the indicators", leak.clean, leak.detail),
         GateCheck("Beats benchmark out-of-sample", oos_m.sharpe > bench_oos.sharpe,
                   f"Sharpe {oos_m.sharpe:.2f} vs {bench_label} {bench_oos.sharpe:.2f}"),
         GateCheck(f"Out-of-sample drawdown ≤ {dd_limit:.0f}%", oos_m.max_drawdown >= -dd_limit / 100,
