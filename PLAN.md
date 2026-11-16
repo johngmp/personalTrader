@@ -1173,6 +1173,54 @@ live-vs-backtest divergence monitor; turning the weekly review on. Full plan in
 stop passing, and that Gate 2 reports S8 is not reproducing its backtest. That is the system working. A
 loop that can only ever confirm is the one not worth having.
 
+### The evidence engine, part 2: the verdicts (2026-11-16)
+
+**Gate 2 exists** (`trader gate2 <sleeve|all>`). Three states; PENDING comes only from missing evidence
+and never from a bad result, but a sleeve that would already fail says so, because sixty closed trades
+at a 28% win rate will not be rescued by day ninety. Two checks are not in §6's spec and are the two
+that bite: that the sleeve is running the settings Gate 1 chose, and that measured cost matches
+modelled cost. Also new: `mismatch_ok:{symbol}:{date}` gives "unexplained" a definition, so a stale
+broker difference can be cleared on the record instead of blocking a sleeve for ever.
+
+**The sealed holdout.** Everything from 2022-01-01 is fenced off in the data. `research_bars` is the
+only door and it truncates; `evaluate` separately refuses a hand-built bars dict that reaches past the
+seal. The date is pinned in code, not config — a seal settable from YAML is a tunable. Opening it costs
+a receipt, written and fsynced *before* any data is returned, so a crash still spends it. Every receipt
+records `pre_existing_exposure`: sealing today does not unsee, and S1/S4/S8/S9 were all measured
+against this period before the seal existed, so their first read is weak evidence and prints as such.
+
+**PBO via CSCV**, as a second and independent statistic, with an honesty guard. I expected it to read
+uselessly low on an 18-cell grid and nearly skipped it; measuring instead of assuming showed otherwise.
+
+**The dashboard** gained two cards above everything else: operational health (the four things that fail
+silently, all of which have happened here) and the Gate 2 verdict, read from its persisted record.
+
+**The weekly review is scheduled** (Saturday 09:00). Reports only — it cannot touch `trader/`,
+`config/`, `tests/` or `reports/`, and `vault.py` regenerates everything above `<!-- engine:end -->`
+from the journal anyway, so an edit to a trade note's facts is reverted rather than merely forbidden.
+Experiments must now be **pre-registered**: hypothesis, mechanism, grid, window and the numeric success
+bar, all written before the first backtest runs.
+
+#### What it found, which is the point
+
+| | |
+|---|---|
+| **S8 now FAILS Gate 1** | out-of-sample Sharpe **0.66** vs buy-and-hold **0.98** on sealed data |
+| **S8 would FAIL Gate 2** | 5 of 8 checks |
+| S8 vs its benchmark | Sharpe **−4.50 vs B0's −4.12 over the same 38 days**. Life-to-date it looked *ahead* (−7.45% vs −7.69%) purely because B0 started three weeks earlier |
+| S8's payoff | 0.19 — needs an **84%** win rate to break even, gets 28% |
+| **Costs are not the problem** | stops filled a median **1.8 bps** from where they were placed against a model assuming 15. The "costs are eating it" story is dead |
+| **S1's parameters carry no information** | PBO **51%** — a coin flip — on eighteen settings differing by 0.042 Sharpe |
+| Trials counted | 216 → **463**, of which 201 were intraday work invisible to every confidence figure ever printed |
+
+This is what was predicted in part 1, recorded before it was built: "the most likely outcome is that S1
+and S8's deflated Sharpe scores fall below the bar, and Gate 2 reports that S8 is not reproducing its
+backtest. That is the system working."
+
+**Open and yours to decide:** S8 runs `atr_mult: 2.5` while the Gate 1 it cites chose `4.5`. Re-run
+Gate 1 and adopt what it picks, or set the config to 4.5 — but not neither. Its largest loss category
+is "protective stop (trailed up)" at 29 of 60 trades, which is what a stop 80% too tight would produce.
+
 ### Phase 6: Live readiness (separate plan, only if something passes)
 IBKR/OANDA AU live accounts, small sizes, manual approval at first, ATO record-keeping.
 - **Planned starting capital: ~US$100** (noted 2026-09-18). Needs a *small-account mode*: fractional/dollar-amount
