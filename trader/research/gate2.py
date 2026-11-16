@@ -12,9 +12,18 @@ whose clock has not run out reports what the answer WOULD be today, and says tha
 
 Two checks here are not in PLAN.md's spec and are the ones that bite:
 
-- **Check 6, that the sleeve is running what Gate 1 chose.** S8 trades `atr_mult: 2.5` while the
-  40-market Gate 1 its own config cites chose `4.5`. Without this check, check 5 compares live results
-  against a backtest of different rules and reports the outcome as confirmation.
+- **Check 6, that the sleeve is running what Gate 1 chose.** This is the check that found something.
+  S8 traded `atr_mult: 2.5` for two months while the 40-market Gate 1 its own config cited had chosen
+  `4.5`: a tighter stop than anything certified, with the certification quoted on the dashboard. Without
+  this check, check 5 compares live results against a backtest of different rules and reports the
+  outcome as confirmation. Corrected in sleeves.yaml on 2026-11-17; the check stays, because nothing
+  else would have noticed and nothing stops it happening again.
+
+  Note which record it compares against: `latest_gate1` cites only PASSING runs, deliberately, so the
+  best cell of a failing run cannot authorise what the sleeve trades. The cost is that a sleeve whose
+  most recent Gate 1 FAILED is still measured against an older PASS. That is the right trade for check 6
+  but it leaves a real gap: nothing here notices that the cited Gate 1 was scored on a window since
+  declared burned, which is true of S8's 2026-10-03 PASS today.
 - **Check 7, measured cost against modelled cost.** `cost_haircut_usd` re-applies the configured bps to
   live notional, so the dashboard's "after estimated costs" figure cannot disagree with the backtest by
   construction. `stop_slippage` measures what the broker actually did, which can.

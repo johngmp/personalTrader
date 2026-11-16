@@ -148,11 +148,54 @@ sleeves:
               BTC/USD, ETH/USD, SOL/USD]
     benchmark: B0
     strategy: S8
-    params: {fast: 20, slow: 200, atr_mult: 2.5}   # chosen by Gate 1 (2026-09-19): PASS, out-of-sample Sharpe 0.98
-    # Gate 1 re-ran on the 40-market basket on 2026-10-03 and PASSED all eight checks: out-of-sample
-    # Sharpe 0.85 vs buy-and-hold 0.62, worst drop -19.0%, 4261 completed trades, neighbouring settings
-    # keep 95% of the Sharpe, deflated Sharpe 99.3% confident after 90 distinct trials, profitable
-    # out-of-sample on 29 of the 40 symbols.
+    params: {fast: 20, slow: 200, atr_mult: 4.5}   # the settings the 2026-10-03 Gate 1 PASS chose
+    # 2026-11-17: atr_mult corrected 2.5 -> 4.5, approved by you. `fast` and `slow` unchanged.
+    #
+    # Why. The config cited the 40-market Gate 1 of 2026-10-03 (PASS, out-of-sample Sharpe 0.85 vs
+    # buy-and-hold 0.62) but did not match it: that run chose atr_mult 4.5, and the sleeve traded 2.5
+    # for two months. So the live stop was tighter than anything that had been certified, while the
+    # dashboard cited the certification. gate2.py check 6 exists for exactly this and is what found it.
+    #
+    # Why NOT {fast: 50, atr_mult: 4.5}. Gate 1 was re-run on 2026-11-16 against the holdout sealed at
+    # 2022-01-01, and chose {fast: 50, slow: 200, atr_mult: 4.5} -- but that run FAILED (see below), and
+    # gate2.latest_gate1() deliberately cites only PASSING runs. Setting fast: 50 would leave check 6
+    # failing forever and would point checks 5 and 6 at two different backtests: the forward Sharpe
+    # compared against the 0.85 of the 2026-10-03 run, the parameters taken from a run that did not
+    # clear its benchmark. Gate 2 asks whether the live sleeve reproduces ITS backtest, and that
+    # question needs one named backtest. The best cell of a failing run is not a certification.
+    #
+    # What the 2026-11-16 re-run says, and it is not good (reports/backtests/S8-gate1-20261116-1538.html,
+    # research_log.jsonl 2026-11-16T04:38Z). Verdict FAIL, 7 of 8 checks passing; the one that fails is
+    # "beats benchmark out-of-sample", at Sharpe 0.656 vs buy-and-hold 0.976.
+    #
+    #   window                    S8 Sharpe   bench   S8 return/yr   bench   S8 worst drop   bench
+    #   in-sample   1995-2014          0.55    0.38           5.1%    4.4%          -28.8%  -44.0%
+    #   out-of-sample 2014-2021        0.66    0.98           5.8%   23.1%          -14.0%  -32.7%
+    #   walk-forward  1999-2021        0.54    0.65           5.4%   11.1%          -48.6%  -44.0%
+    #
+    # Read that in both directions. 2014-2021 is a near-uninterrupted bull market, the worst possible
+    # window for trend following with stops -- nothing carrying a stop was going to keep up with
+    # 23.1%/yr -- and sealing a fresh holdout put the out-of-sample window squarely on it. That is a
+    # confound, not an excuse. S8 did do its job there: -14.0% worst drop against the benchmark's
+    # -32.7%, and it BEAT buy-and-hold in 1995-2014, the window holding the dot-com crash and 2008.
+    # Against that: walk-forward is the fairest single comparison -- 22 years, both crashes, settings
+    # re-picked yearly from the past only -- and there S8 loses on Sharpe AND takes a WORSE drawdown
+    # than buy-and-hold. Drawdown protection is the whole pitch, so that number is the damning one.
+    #
+    # So this change is NOT a claim that S8 works. It makes the forward test coherent: the sleeve now
+    # runs the rules of the backtest it is being measured against. S8 also fails Gate 2 today on its own
+    # live record, independently of all of the above (reports/gate2_log.jsonl). It stays on paper. If the
+    # live record keeps agreeing with these numbers the answer is to STOP trading it, not to re-tune it
+    # -- picking settings from the live record spends the ledger and proves nothing.
+    #
+    # Also unresolved, and worth keeping in view: the 0.85 of 2026-10-03 was scored on a window that is
+    # now declared burned, so "S8 passed Gate 1" is a weak claim even when the parameters agree. Nothing
+    # in Gate 2 currently notices that the Gate 1 it cites predates the current seal.
+    #
+    # Open question: Gate 1 judges on Sharpe against a benchmark, and this family's product is smaller
+    # drawdowns, which S8 does deliver in the windows that contain crashes. trend.py's note on the
+    # regime filter already says the same thing. That is an argument for a drawdown-aware objective,
+    # pre-registered as an experiment -- NOT for relaxing the gate because its answer is unwelcome.
     #
     # WHAT WAS BLOCKING IT, and why the budget matters. A cold start on 40 markets wants 80 orders: an
     # entry and a protective stop for each. risk.yaml used to cap the whole ACCOUNT at 60, shared with
