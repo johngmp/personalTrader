@@ -149,6 +149,27 @@ def test_deflation_alone_does_not_catch_the_planted_oracle(bars):
     assert dsr >= DSR_THRESHOLD, "if deflation ever does catch this, say so here -- do not delete it"
 
 
+def test_the_overfitting_probability_does_not_catch_it_either(bars):
+    """The same point for the other statistic, so neither is mistaken for a leakage check.
+
+    PBO asks whether picking a winner in-sample generalises out-of-sample. A strategy that can read
+    tomorrow wins in BOTH halves of every recombination, so it ranks top every time and its PBO is
+    excellent. Being consistently right is exactly what cheating looks like to a method that measures
+    consistency.
+    """
+    from trader.research.pbo import cscv_pbo
+
+    rng = np.random.default_rng(4)
+    oracle = run_backtest(LookAheadOracle(params={}, symbols=["SPY"]), bars, 100_000, LOOSE,
+                          {"SPY": NO_COST}).equity.pct_change()
+    honest = pd.DataFrame({f"h{i}": rng.normal(0, 0.01, len(oracle)) for i in range(17)},
+                          index=oracle.index)
+    honest["oracle"] = oracle.to_numpy()
+    result = cscv_pbo(honest.dropna())
+    assert result.pbo < 0.2 and result.passed, \
+        "if PBO ever does catch a look-ahead oracle, say so here -- do not delete this"
+
+
 # --- 3. the structural check does ---------------------------------------------------------------------
 
 def test_the_truncation_check_catches_the_planted_oracle(bars):

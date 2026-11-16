@@ -24,6 +24,7 @@ from trader.research.backtest import BacktestResult, run_backtest
 from trader.research.deflated import DSR_THRESHOLD, deflated_sharpe
 from trader.research.holdout import HOLDOUT_START, reaches_past_the_seal
 from trader.research.leakage import truncation_check
+from trader.research.pbo import cscv_pbo
 from trader.research.ledger import trial_count, trial_sharpes, verify_chain
 from trader.research.metrics import Metrics, buy_and_hold, compute_metrics, risk_free_returns
 from trader.strategies import REGISTRY
@@ -217,6 +218,17 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
     chosen_returns = chosen_equity.pct_change().dropna()
     chosen_returns = chosen_returns - risk_free_returns(chosen_returns.index).reindex(chosen_returns.index).fillna(0.0)
     years = max((chosen_equity.index[-1] - chosen_equity.index[0]).days / 365.25, 1e-9)
+    # PBO asks a different question from the deflated Sharpe, and they are kept as separate checks
+    # rather than blended: deflation asks whether the WINNER beats a luck bar, PBO asks whether the
+    # act of picking a winner in-sample generalises at all. The returns matrix is free -- every grid
+    # cell's equity curve is already in `runs`.
+    cell_returns = pd.DataFrame({_key(p): runs[_key(p)].equity.loc[eval_start:end].pct_change()
+                                 for p in grid}).dropna()
+    try:
+        pbo = cscv_pbo(cell_returns)
+    except ValueError:
+        pbo = None
+
     spread_sharpes, spread_source = _spread_population(code, grid_table)
     dsr = deflated_sharpe(chosen_returns, ever, spread_sharpes,
                           periods_per_year=len(chosen_returns) / years)
@@ -240,6 +252,8 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
                   f"walk-forward Sharpe {wf_m.sharpe:.2f} vs in-sample {is_m.sharpe:.2f}" if wf_m else "not enough history"),
         GateCheck("Not a lucky parameter choice", robustness >= 0.7,
                   f"neighbouring settings keep {robustness:.0%} of the Sharpe (need 70%)"),
+        GateCheck("Picking settings in-sample generalises", pbo is None or pbo.passed,
+                  pbo.detail if pbo else "not enough history to recombine"),
         GateCheck("Survives how hard we looked", dsr >= DSR_THRESHOLD,
                   f"deflated Sharpe {dsr:.1%} confident after {ever} distinct looks at the data "
                   f"(need {DSR_THRESHOLD:.0%}); luck bar set from {spread_source}"),
