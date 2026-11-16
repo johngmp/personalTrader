@@ -235,11 +235,29 @@ def write_report(r: Gate1Result, out_dir: Path = REPORT_DIR) -> Path:
                               split=r.split_date, title="Growth of the sleeve's capital")
     dd_chart = line_chart([("Strategy", dd(r.equity)), ("Benchmark", dd(r.bench_equity))], log=False, fmt="pct",
                           split=r.split_date, title="Drop from previous high")
+    # In-sample Sharpe only, one column, deliberately.
+    #
+    # This table used to carry an out-of-sample Sharpe per cell: eighteen held-out numbers laid out on
+    # one page, in front of whoever is about to decide what to change next. PLAN.md line 418 records
+    # what that cost in this project's own words -- "that was measured by peeking at out-of-sample and
+    # cannot be acted on" -- and research_log.jsonl shows the same window read nineteen times. A window
+    # read like that is not a test any more; it is a slow-motion training set.
+    #
+    # Selection is allowed to use in-sample results, so those stay: seeing a flat in-sample surface is
+    # how you notice that which cell "wins" is noise, which is exactly what the PBO check reports on.
+    # The chosen configuration's out-of-sample Sharpe is still on the page, in Results and in the
+    # verdict, because it IS the verdict. What is gone is the surface -- the ability to read off which
+    # OTHER settings would have scored better on held-out data, which is the one thing that cannot be
+    # known without spending the window.
+    #
+    # Honest limit: this does not make peeking impossible, because re-running with different settings
+    # still reveals one cell at a time. It makes it cost a trial in the ledger each time instead of
+    # being free and invisible, which is the whole difference between one look and eighteen.
     grid_rows = "".join(
         f'<tr class="{"chosen" if row["params"] == r.chosen_params else ""}"><td>'
         f'{html.escape(", ".join(f"{k}={v}" for k, v in row["params"].items()))}'
         f'{" ← chosen" if row["params"] == r.chosen_params else ""}</td>'
-        f'<td>{_num(row["is_sharpe"])}</td><td>{_num(row["oos_sharpe"])}</td></tr>'
+        f'<td>{_num(row["is_sharpe"])}</td></tr>'
         for row in sorted(r.grid_table, key=lambda x: -x["is_sharpe"]))
     sym_rows = "".join(f"<tr><td>{html.escape(s)}</td><td>${v:,.0f}</td></tr>" for s, v in r.oos_symbol_pnl.items())
     caveats = [
@@ -274,8 +292,15 @@ def write_report(r: Gate1Result, out_dir: Path = REPORT_DIR) -> Path:
 Sharpe measures return per unit of risk (higher is better; above 1 is good). Bench = {html.escape(r.benchmark)}.
 Walk-forward re-picks settings each year using only the previous {4} years.</p>{_yearly_table(r)}</div>
 <h2>Every setting tried</h2>
-<div class="card"><table><tr><th>Settings</th><th>In-sample Sharpe</th><th>Out-of-sample Sharpe</th></tr>
-{grid_rows}</table></div>
+<div class="card"><table><tr><th>Settings</th><th>In-sample Sharpe</th></tr>
+{grid_rows}</table>
+<p style="color:var(--ink2);font-size:13px;margin-bottom:0">In-sample only, on purpose. The
+out-of-sample Sharpe of each setting used to be listed here, which put the whole held-out surface on
+the page before the next decision was made &mdash; and this project&rsquo;s log shows that window read
+nineteen times. Settings are chosen on the {r.eval_start.date()} &ndash; {r.split_date.date()} window
+alone; the chosen configuration&rsquo;s out-of-sample result is in Results above. Reading another
+cell&rsquo;s out-of-sample Sharpe means re-running Gate 1, which costs a trial in the ledger and
+raises the bar for every future result.</p></div>
 <h2>Out-of-sample profit by symbol</h2>
 <div class="card"><table><tr><th>Symbol</th><th>Closed-trade P&amp;L</th></tr>{sym_rows}</table></div>
 <h2>Read this before trusting the numbers</h2>
