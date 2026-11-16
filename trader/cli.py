@@ -180,11 +180,12 @@ def cmd_sync(settings: Settings, _: argparse.Namespace) -> int:
 
 
 def _research_bars(code: str, settings: Settings, refresh: bool = False):
-    from trader.data.history import load_many
+    """Price history for research, which stops before the holdout seal. See `research/holdout.py`."""
     from trader.research.evaluate import benchmark_symbols, strategy_setup
+    from trader.research.holdout import research_bars
 
     _, symbols, _, _ = strategy_setup(code, settings)
-    return load_many(sorted(set(symbols) | set(benchmark_symbols(code, symbols))), refresh=refresh)
+    return research_bars(sorted(set(symbols) | set(benchmark_symbols(code, symbols))), refresh=refresh)
 
 
 def cmd_data(settings: Settings, args: argparse.Namespace) -> int:
@@ -228,6 +229,72 @@ def cmd_gate1(settings: Settings, args: argparse.Namespace) -> int:
         for c in result.checks:
             print(f"  {'PASS' if c.passed else 'FAIL'}  {c.name}: {c.detail}")
         print(f"  report: {path.relative_to(settings.root)}")
+    return 0
+
+
+def cmd_holdout(settings: Settings, args: argparse.Namespace) -> int:
+    """Spend a strategy's single read of the sealed holdout. Refuses, loudly, far more often than not."""
+    import json
+
+    from trader.research.backtest import run_backtest
+    from trader.research.evaluate import benchmark_symbols, strategy_setup, symbol_costs
+    from trader.research.holdout import (HOLDOUT_START, RECEIPTS_DIR, HoldoutAlreadyOpened,
+                                         HoldoutRefused, holdout_bars, request_receipt)
+    from trader.research.metrics import buy_and_hold, compute_metrics, risk_free_returns
+
+    if args.list:
+        receipts = sorted(RECEIPTS_DIR.glob("*.json")) if RECEIPTS_DIR.exists() else []
+        if not receipts:
+            print(f"No holdout has been opened. The seal is at {HOLDOUT_START.date()}.")
+            return 0
+        for path in receipts:
+            r = json.loads(path.read_text())
+            scored = f"Sharpe {r['result']['sharpe']:+.2f}" if r.get("result") else "read did not complete"
+            print(f"  {r['strategy']:<6} {r['opened_at'][:10]}  {scored}  params {r['params']}"
+                  + ("  [weak: measured against this period before the seal]"
+                     if r["pre_existing_exposure"] else ""))
+        return 0
+
+    try:
+        receipt = request_receipt(args.strategy, settings, confirmation=args.confirm,
+                                  sleeve_id=args.sleeve)
+    except (HoldoutRefused, HoldoutAlreadyOpened) as refused:
+        print(f"Refused: {refused}")
+        return 1
+
+    cls, symbols, capital, limits = strategy_setup(args.strategy, settings)
+    bench_syms = benchmark_symbols(args.strategy, symbols)
+    bars = holdout_bars(sorted(set(symbols) | set(bench_syms)), receipt)   # spends it, before any read
+
+    print(f"Holdout opened for {args.strategy}: {HOLDOUT_START.date()} onward. This read is now spent.")
+    if receipt.pre_existing_exposure:
+        print("  WEAK EVIDENCE: this strategy was measured against data from this period before the\n"
+              "  seal existed, so the window was never truly unseen for it. Sealing does not unsee.")
+
+    result = run_backtest(cls(params=receipt.params, symbols=symbols), bars, capital, limits,
+                          symbol_costs(symbols, settings))
+    equity = result.equity
+    metrics = compute_metrics(equity, result.trades, result.exposure,
+                              risk_free=risk_free_returns(equity.index))
+    bench_costs = {s: c.total_bps + c.broker_fee_bps
+                   for s, c in symbol_costs(bench_syms, settings).items()}
+    bench = buy_and_hold(bars, bench_syms, equity.index, capital, bench_costs)
+    bench_m = compute_metrics(bench, risk_free=risk_free_returns(bench.index))
+
+    kept = metrics.sharpe / receipt.gate1_oos_sharpe if receipt.gate1_oos_sharpe else float("nan")
+    passed = metrics.sharpe > bench_m.sharpe and metrics.sharpe > 0
+    print(f"  settings       {receipt.params}")
+    print(f"  {metrics.start} → {metrics.end}: Sharpe {metrics.sharpe:+.2f} · return "
+          f"{metrics.total_return:+.1%} · worst drop {metrics.max_drawdown:.1%} · {metrics.n_trades} trades")
+    print(f"  benchmark      Sharpe {bench_m.sharpe:+.2f} ({', '.join(bench_syms) or 'cash'})")
+    print(f"  Gate 1 said    Sharpe {receipt.gate1_oos_sharpe:+.2f} on {receipt.gate1_ts[:10]} "
+          f"→ the holdout kept {kept:.0%} of it")
+    print(f"\n  HOLDOUT {'PASS' if passed else 'FAIL'} — this receipt is spent and cannot be reopened.")
+
+    receipt.result = {"sharpe": round(metrics.sharpe, 3), "return": round(metrics.total_return, 4),
+                      "max_drawdown": round(metrics.max_drawdown, 4), "n_trades": metrics.n_trades,
+                      "benchmark_sharpe": round(bench_m.sharpe, 3), "passed": passed}
+    receipt.save()
     return 0
 
 
@@ -885,6 +952,11 @@ def main(argv: list[str] | None = None) -> int:
     p_g1.add_argument("--refresh", action="store_true", help="re-download price history first")
     p_g2 = sub.add_parser("gate2", help="forward test: is the live sleeve reproducing its backtest?")
     p_g2.add_argument("sleeve", help="a sleeve id, or 'all' for every sleeve with a live record")
+    p_ho = sub.add_parser("holdout", help="spend a strategy's ONE read of the sealed holdout")
+    p_ho.add_argument("strategy", help="strategy code, e.g. S8")
+    p_ho.add_argument("--confirm", default="", help='exactly: "open holdout for S8"')
+    p_ho.add_argument("--sleeve", default=None, help="sleeve id, when it differs from the strategy code")
+    p_ho.add_argument("--list", action="store_true", help="show every receipt instead of opening one")
     p_news = sub.add_parser("news", help="latest headlines for enabled symbols (or --symbols)")
     p_news.add_argument("--symbols", help="comma-separated, e.g. SPY,BTC/USD")
     p_news.add_argument("--hours", type=float, default=48)
@@ -928,7 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
-                "gate1": cmd_gate1, "gate2": cmd_gate2, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
+                "gate1": cmd_gate1, "gate2": cmd_gate2, "holdout": cmd_holdout, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
                 "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
                 "menubar": cmd_menubar, "excursions": cmd_excursions, "app": cmd_app,

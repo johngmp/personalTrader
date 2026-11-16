@@ -22,6 +22,7 @@ import pandas as pd
 from trader.config import PROJECT_ROOT, CostModel, Settings, SleeveLimits
 from trader.research.backtest import BacktestResult, run_backtest
 from trader.research.deflated import DSR_THRESHOLD, deflated_sharpe
+from trader.research.holdout import HOLDOUT_START, reaches_past_the_seal
 from trader.research.leakage import truncation_check
 from trader.research.ledger import trial_count, trial_sharpes, verify_chain
 from trader.research.metrics import Metrics, buy_and_hold, compute_metrics, risk_free_returns
@@ -139,6 +140,17 @@ def evaluate(code: str, settings: Settings, bars: dict[str, pd.DataFrame], oos_f
             f"the trial ledger has been altered: {why}. Gate 1 will not score against it -- its "
             f"confidence is built on the count of past searches, and that count can no longer be "
             f"trusted. Restore reports/trials.jsonl from git, or start a new chain deliberately.")
+    # Belt and braces. `research_bars` truncates at the door, so this only fires on a bars dict
+    # built by hand -- an ad-hoc script, a notebook, a well-meant shortcut. Those are exactly the paths
+    # that produced the nineteen reads of the old out-of-sample window, so the refusal lives where the
+    # verdict is made rather than only where the data is loaded.
+    past = reaches_past_the_seal(bars)
+    if past:
+        raise RuntimeError(
+            f"these bars reach past the holdout seal at {HOLDOUT_START.date()} ({', '.join(past[:5])}"
+            f"{' and more' if len(past) > 5 else ''}). Gate 1 may not see the holdout. Load data with "
+            f"`trader.research.holdout.research_bars`, or open the holdout deliberately with "
+            f"`trader holdout {code} --confirm ...`, which spends it.")
     cls, symbols, capital, limits = strategy_setup(code, settings)
     costs = symbol_costs(symbols, settings)
     grid = _grid(cls)
