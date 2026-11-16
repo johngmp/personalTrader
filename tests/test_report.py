@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from trader.research.evaluate import evaluate
-from trader.research.report import _num, write_report
+from trader.research.report import _num, _oos_symbol_summary, _pct, write_report
 
 
 def _trending_bars(seed: int, n: int = 3000) -> pd.DataFrame:
@@ -118,3 +118,79 @@ def test_the_chosen_configuration_s_out_of_sample_sharpe_is_still_in_results(set
     assert cells[0] == _num(result.is_metrics.sharpe), "column 1 is not in-sample"
     assert cells[2] == _num(result.oos_metrics.sharpe), "column 3 is not the chosen config's out-of-sample"
     assert cells[3] == _num(result.bench_oos.sharpe), "column 4 is not the out-of-sample benchmark"
+
+
+# --- the same defect one section down, and a sharper one -----------------------------------------------
+#
+# "Out-of-sample profit by symbol" listed held-out P&L for all forty markets. Worse than the grid, for a
+# specific reason: a grid tells you which settings to prefer, this tells you which MARKETS to drop, and
+# dropping the losers is one edit to `symbols` in sleeves.yaml that no gate would notice. The result
+# would be a universe selected on the window that is supposed to test it.
+
+def _breadth_card(page: str) -> str:
+    start = page.index("<h2>Out-of-sample breadth</h2>")
+    return page[start:page.index("<h2>", start + 10)]
+
+
+def test_no_symbol_is_named_with_its_out_of_sample_profit(settings, monkeypatch, tmp_path):
+    """Neither the names nor the per-symbol figures may reach the page."""
+    result, page = _report(settings, monkeypatch, tmp_path)
+    card = _breadth_card(page)
+
+    for symbol, pnl in result.oos_symbol_pnl.items():
+        assert symbol not in card, f"{symbol} is named in the breadth section"
+        if abs(pnl) >= 1:
+            assert f"${pnl:,.0f}" not in card, f"{symbol}'s held-out P&L is on the page"
+    assert "<table" not in card, "a table here is the shape of the defect"
+
+
+def test_the_breadth_count_the_checklist_uses_is_still_shown(settings, monkeypatch, tmp_path):
+    """Removing the section outright would satisfy the test above. The count is a real gate input --
+    `Works on most of its symbols` turns on it -- so it has to stay, and it has to agree with the
+    checklist rather than being computed a second, different way."""
+    result, page = _report(settings, monkeypatch, tmp_path)
+    card = _breadth_card(page)
+
+    traded = {s: v for s, v in result.oos_symbol_pnl.items() if v != 0}
+    winners = [v for v in traded.values() if v > 0]
+    assert f"<b>{len(winners)} of {len(traded)}</b>" in card
+
+    check = next(c for c in result.checks if c.name == "Works on most of its symbols")
+    assert f"{len(winners)} of {len(traded)}" in check.detail, "the card and the checklist must not drift"
+
+
+def test_concentration_is_reported_so_one_market_cannot_hide(settings, monkeypatch, tmp_path):
+    """A count of 20 of 40 reads as broad even when one market made all the money. That is the one
+    thing the old table was legitimately good for, and it survives as an aggregate: it says something
+    is concentrated, not which symbol to keep."""
+    result, page = _report(settings, monkeypatch, tmp_path)
+    card = _breadth_card(page)
+
+    wins = [v for v in result.oos_symbol_pnl.values() if v > 0]
+    assert wins, "fixture should have at least one profitable symbol"
+    expected = _pct(max(result.oos_symbol_pnl.values()) / sum(wins), 0)
+    assert f"contributed {expected} of the gross profit" in card
+
+
+def test_a_symbol_that_never_traded_is_not_counted_as_a_loser():
+    """`traded` must exclude symbols with no closed trades, exactly as the checklist does.
+
+    Tested on a stub rather than the end-to-end fixture, because every symbol in that fixture trades,
+    so the two definitions agree there and a drift between them would go unseen. S8 carries forty
+    markets and routinely has some that never fire; counting those as losses would turn "20 of 20" into
+    "20 of 40" and fail a check the strategy passed.
+    """
+    class _R:
+        oos_symbol_pnl = {"A": 100.0, "B": -50.0, "C": 0.0}
+
+    card = _oos_symbol_summary(_R())            # type: ignore[arg-type]
+    assert "<b>1 of 2</b>" in card, card
+    assert "100% of the gross profit" in card
+
+
+def test_a_strategy_that_lost_on_everything_says_so_instead_of_dividing_by_zero():
+    class _R:
+        oos_symbol_pnl = {"A": -10.0, "B": -5.0}
+
+    card = _oos_symbol_summary(_R())            # type: ignore[arg-type]
+    assert "<b>0 of 2</b>" in card and "none made money" in card

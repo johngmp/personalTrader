@@ -220,6 +220,41 @@ def _yearly_table(r: Gate1Result) -> str:
             f"<tr><th>Year</th><th>Strategy</th><th>{html.escape(r.benchmark)}</th></tr>{rows}</table></div></details>")
 
 
+def _oos_symbol_summary(r: Gate1Result) -> str:
+    """How wide the out-of-sample profit was -- without naming which symbols made it.
+
+    This section used to be a table of held-out profit per symbol, all forty rows of it. That is a
+    worse peeking surface than the parameter grid was, and for a sharper reason: a grid tells you which
+    settings to prefer, but this tells you which MARKETS to drop, and dropping the losers is a single
+    edit to `symbols` in sleeves.yaml that no gate would notice. Doing it would manufacture a basket
+    selected on the held-out window and then report that window's Sharpe as out-of-sample evidence for
+    it. The universe caveat already on every report -- symbols were picked today, knowing which assets
+    did well -- would become the whole result rather than a footnote.
+
+    What the gate actually uses is the count, so the count is what is shown. The concentration figure
+    stays because it is the one thing the table was legitimately good for: a strategy whose entire
+    held-out profit came from one market is fragile in a way the count alone hides. It cannot be acted
+    on the way the table could -- it says that something is concentrated, not what to keep.
+    """
+    traded = {s: v for s, v in r.oos_symbol_pnl.items() if v != 0}
+    if not traded:
+        return '<p style="margin:0;color:var(--ink2)">No symbol traded out-of-sample.</p>'
+    winners = [v for v in traded.values() if v > 0]
+    total_win = sum(winners)
+    biggest = max(traded.values())
+    share = biggest / total_win if total_win > 0 else float("nan")
+    return (f'<p style="margin-top:0"><b>{len(winners)} of {len(traded)}</b> traded symbols were '
+            f'profitable out-of-sample'
+            + (f', and the single best contributed {_pct(share, 0)} of the gross profit.'
+               if total_win > 0 else ', and none made money.')
+            + f'</p><p style="margin-bottom:0;color:var(--ink2);font-size:13px">Held-out profit per '
+            f'symbol is deliberately not listed. It is the one number on this page that could be acted '
+            f'on with a single edit &mdash; dropping the markets that lost would build a universe '
+            f'chosen on the window that is supposed to test it, and no gate here would catch that. '
+            f'Breadth is what the checklist uses; concentration is shown because a strategy carried by '
+            f'one market is fragile in a way a count hides.</p>')
+
+
 def write_report(r: Gate1Result, out_dir: Path = REPORT_DIR) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     cls = REGISTRY[r.strategy]
@@ -259,7 +294,7 @@ def write_report(r: Gate1Result, out_dir: Path = REPORT_DIR) -> Path:
         f'{" ← chosen" if row["params"] == r.chosen_params else ""}</td>'
         f'<td>{_num(row["is_sharpe"])}</td></tr>'
         for row in sorted(r.grid_table, key=lambda x: -x["is_sharpe"]))
-    sym_rows = "".join(f"<tr><td>{html.escape(s)}</td><td>${v:,.0f}</td></tr>" for s, v in r.oos_symbol_pnl.items())
+    sym_summary = _oos_symbol_summary(r)
     caveats = [
         f"{r.trials} parameter combinations were tried in this run ({r.total_trials_ever} for {r.strategy} in total). "
         "The more variants are tried, the more likely a good result is luck.",
@@ -301,8 +336,8 @@ nineteen times. Settings are chosen on the {r.eval_start.date()} &ndash; {r.spli
 alone; the chosen configuration&rsquo;s out-of-sample result is in Results above. Reading another
 cell&rsquo;s out-of-sample Sharpe means re-running Gate 1, which costs a trial in the ledger and
 raises the bar for every future result.</p></div>
-<h2>Out-of-sample profit by symbol</h2>
-<div class="card"><table><tr><th>Symbol</th><th>Closed-trade P&amp;L</th></tr>{sym_rows}</table></div>
+<h2>Out-of-sample breadth</h2>
+<div class="card">{sym_summary}</div>
 <h2>Read this before trusting the numbers</h2>
 <div class="card"><ul>{''.join(f'<li>{html.escape(c)}</li>' for c in caveats)}</ul></div>
 </main>"""
