@@ -349,6 +349,11 @@ def log_result(result: Gate1Result, report_path: Path | None, log: Path | None =
         "is_sharpe": round(result.is_metrics.sharpe, 3), "oos_sharpe": round(result.oos_metrics.sharpe, 3),
         "benchmark_oos_sharpe": round(result.bench_oos.sharpe, 3),
         "wf_sharpe": round(result.wf_metrics.sharpe, 3) if result.wf_metrics else None,
+        # The last bar this run was allowed to see. Gate 2 check 7 uses it to tell a Gate 1 scored
+        # under the current seal from one scored on a window since declared burned. Rows written
+        # before the seal existed have no `data_end`, and are treated as pre-seal -- a record that
+        # cannot show it respected the seal does not get the benefit of the doubt.
+        "data_end": result.end.date().isoformat(),
         "failed_checks": [c.name for c in result.checks if not c.passed],
         "report": str(report_path.relative_to(PROJECT_ROOT)) if report_path else None,
         "git_commit": _git_commit(),

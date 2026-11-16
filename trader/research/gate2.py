@@ -10,7 +10,7 @@ Three states, not two. PENDING comes only from missing evidence -- too few days,
 a bare PENDING on a sleeve that is losing badly would hide the thing most worth knowing. So a sleeve
 whose clock has not run out reports what the answer WOULD be today, and says that it is provisional.
 
-Two checks here are not in PLAN.md's spec and are the ones that bite:
+Three checks here are not in PLAN.md's spec and are the ones that bite:
 
 - **Check 6, that the sleeve is running what Gate 1 chose.** This is the check that found something.
   S8 traded `atr_mult: 2.5` for two months while the 40-market Gate 1 its own config cited had chosen
@@ -21,9 +21,14 @@ Two checks here are not in PLAN.md's spec and are the ones that bite:
 
   Note which record it compares against: `latest_gate1` cites only PASSING runs, deliberately, so the
   best cell of a failing run cannot authorise what the sleeve trades. The cost is that a sleeve whose
-  most recent Gate 1 FAILED is still measured against an older PASS. That is the right trade for check 6
-  but it leaves a real gap: nothing here notices that the cited Gate 1 was scored on a window since
-  declared burned, which is true of S8's 2026-10-03 PASS today.
+  most recent Gate 1 FAILED is still measured against an older PASS, which is S8's position today.
+- **Check 7, that the cited Gate 1 respects the current seal.** Check 6 passing only means the sleeve
+  runs the rules some passing backtest chose; it says nothing about whether that backtest is still
+  worth anything. S8's 2026-10-03 PASS was scored before the holdout existed, on the out-of-sample
+  window `research_log.jsonl` shows read nineteen times with every grid cell's out-of-sample Sharpe on
+  the page. Checks 5 and 6 would both go green on it and the sleeve would look certified. A Gate 1 row
+  carries `data_end` since 2026-11-17; a row without one is treated as pre-seal, because a record that
+  cannot show it respected the seal must not get the benefit of the doubt.
 - **Check 7, measured cost against modelled cost.** `cost_haircut_usd` re-applies the configured bps to
   live notional, so the dashboard's "after estimated costs" figure cannot disagree with the backtest by
   construction. `stop_slippage` measures what the broker actually did, which can.
@@ -43,6 +48,15 @@ import pandas as pd
 
 from trader.config import PROJECT_ROOT, Settings
 from trader.journal.db import Journal
+from trader.research.holdout import HOLDOUT_START
+
+# When the holdout was sealed: commit 9332810, "Seal the last five years, and make reading them cost a
+# receipt". Before this, `research_bars` did not exist and no Gate 1 truncated anything, so any run
+# logged earlier read the whole history and its out-of-sample window is the burned one. Used only to
+# tell "demonstrably read past the seal" from "ran under the seal but did not record its span", which
+# are different enough to deserve different verdicts. Spans have been recorded since 2026-11-17, so
+# this constant stops mattering as the pre-seal rows age out of being cited.
+SEALED_SINCE = pd.Timestamp("2026-11-16")
 from trader.research.forward import LiveRecord, Shape, SlippageReport, daily_equity, live_record, live_shape, stop_slippage
 from trader.research.metrics import Metrics, compute_metrics, risk_free_returns
 
@@ -78,6 +92,36 @@ class Gate1Record:
     chosen_params: dict
     oos_sharpe: float
     verdict: str
+    data_end: str | None = None    # last bar the run saw; None on rows written before spans were logged
+
+    def seal_state(self) -> tuple[str, str]:
+        """Was this run scored on data the current seal allows -- and can it show that it was?
+
+        Four cases, and they are genuinely different, so the check reports them differently rather than
+        collapsing "demonstrably burned" and "cannot be shown" into one verdict.
+
+        A row whose span is recorded settles the question outright, either way. A row without one is
+        read against when the seal landed: anything before `SEALED_SINCE` ran when nothing truncated
+        anything, so its out-of-sample window IS the burned one -- that is a fact about this project's
+        history, not an inference. Anything after it very likely came through `research_bars` and so
+        respected the seal, but cannot prove it, and a check that cannot tell says PENDING instead of
+        picking the answer it prefers. Re-running Gate 1 settles it and costs nothing.
+        """
+        seal = HOLDOUT_START.date().isoformat()
+        if self.data_end is None:
+            if pd.Timestamp(self.ts[:10]) < SEALED_SINCE:
+                return FAIL, (f"the Gate 1 of {self.ts[:10]} ran before the holdout was sealed on "
+                              f"{SEALED_SINCE.date().isoformat()}, so its out-of-sample window is the "
+                              f"one inside the data now sealed at {seal}, which research_log.jsonl "
+                              f"shows read nineteen times; re-run Gate 1")
+            return PENDING, (f"the Gate 1 of {self.ts[:10]} ran under the seal but did not record the "
+                             f"data span it used, so it cannot show which years it read; re-run Gate 1 "
+                             f"to settle it")
+        if pd.Timestamp(self.data_end) >= HOLDOUT_START:
+            return FAIL, (f"the Gate 1 of {self.ts[:10]} read data to {self.data_end}, past the seal at "
+                          f"{seal}; its out-of-sample Sharpe is not a held-out number")
+        return PASS, (f"the Gate 1 of {self.ts[:10]} was scored on data ending {self.data_end}, "
+                      f"before the seal at {seal}")
 
 
 def latest_gate1(strategy: str, symbols: list[str] | None = None,
@@ -106,7 +150,8 @@ def latest_gate1(strategy: str, symbols: list[str] | None = None,
     best = max(rows, key=lambda r: r["ts"])
     return Gate1Record(ts=best["ts"], strategy=strategy, symbols=best.get("symbols", []),
                        chosen_params=best.get("chosen_params") or {},
-                       oos_sharpe=float(best.get("oos_sharpe") or 0.0), verdict=best["verdict"])
+                       oos_sharpe=float(best.get("oos_sharpe") or 0.0), verdict=best["verdict"],
+                       data_end=best.get("data_end"))
 
 
 def forward_sharpe_ok(live_sharpe: float, gate1_oos_sharpe: float) -> bool:
@@ -273,7 +318,25 @@ def evaluate_gate2(sleeve_id: str, settings: Settings, journal: Journal) -> Gate
                             "same settings the backtest chose" if not differs else
                             "; ".join(f"{k}: running {a}, Gate 1 chose {b}" for k, (a, b) in sorted(differs.items()))))
 
-    # 7: the only cost number the configuration cannot produce for itself.
+    # 7: and was that test run on data the seal still allows?
+    #
+    # Check 6 can pass on a citation that no longer means anything. S8's parameters agree with the Gate 1
+    # of 2026-10-03, but that run was scored before the holdout was sealed, on a window this project has
+    # since declared burned -- the same out-of-sample years read nineteen times, with every grid cell's
+    # out-of-sample Sharpe printed in front of the researcher each time. "Passed Gate 1" then reads as a
+    # clean claim while resting on a number that is not out-of-sample in any useful sense.
+    #
+    # This is the same defect class as the hardcoded `GateCheck("Realistic backtest", True, ...)` that
+    # this project removed: a green tick that does not mean what it looks like. The difference is that
+    # the stale citation is invisible rather than merely unearned, so nothing would ever have surfaced
+    # it. It is a FAIL and not a note, because a sleeve trading on a certification that does not hold is
+    # failing the thing Gate 2 exists to ask.
+    if g1 is None:
+        checks.append(Check("Gate 1 respects the seal", NA, f"no passing Gate 1 for {strategy}"))
+    else:
+        checks.append(Check("Gate 1 respects the seal", *g1.seal_state()))
+
+    # 8: the only cost number the configuration cannot produce for itself.
     modelled = max((settings.costs[c].half_spread_bps + settings.costs[c].slippage_bps)
                    for c in {settings.asset_class(s) for s in sleeve.symbols} if c) if sleeve.symbols else 0.0
     if not slip.measured:
@@ -285,7 +348,7 @@ def evaluate_gate2(sleeve_id: str, settings: Settings, journal: Journal) -> Gate
                             f"(median of {slip.n}); the model assumes {modelled:.1f} bps"
                             + (f"; {slip.gaps} gapped badly, worst {slip.worst_bps:+.0f} bps" if slip.gaps else "")))
 
-    # 8: shadow sleeves have no broker to disagree with.
+    # 9: shadow sleeves have no broker to disagree with.
     if sleeve.broker.startswith("shadow"):
         checks.append(Check("Broker and journal agree", NA, "shadow sleeve: there is no broker"))
     else:

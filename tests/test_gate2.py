@@ -16,8 +16,9 @@ import pandas as pd
 import pytest
 
 from trader.research.forward import daily_equity, live_shape, stop_slippage
-from trader.research.gate2 import (FAIL, MIN_CLOSED_TRADES, MIN_DAYS, NA, PASS, PENDING, Check,
-                                   Gate1Record, Gate2Result, latest_gate1, log_gate2)
+from trader.research.gate2 import (FAIL, MIN_CLOSED_TRADES, MIN_DAYS, NA, PASS, PENDING, SEALED_SINCE,
+                                   Check, Gate1Record, Gate2Result, latest_gate1, log_gate2)
+from trader.research.holdout import HOLDOUT_START
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -117,7 +118,7 @@ def test_a_check_that_does_not_apply_does_not_block_a_pass():
     assert Gate2Result("S9", "S4", None, None, None, None, None, "", checks).verdict == "PASS"  # type: ignore[arg-type]
 
 
-# --- the two checks that are not in PLAN.md's spec, and are the ones that bite -------------------------
+# --- the three checks that are not in PLAN.md's spec, and are the ones that bite -----------------------
 
 def test_a_sleeve_running_settings_gate1_did_not_choose_fails(journal, settings, tmp_path):
     """S8 trades atr_mult 2.5 while the 40-market Gate 1 its own config cites chose 4.5. Without this,
@@ -295,3 +296,108 @@ def test_the_payoff_and_win_rate_describe_the_same_trades():
     assert shape.n == 4 and shape.win_rate == 0.5
     assert shape.payoff == pytest.approx(0.25)
     assert 1 / (1 + shape.payoff) == pytest.approx(0.8), "needs an 80% win rate at a 0.25 payoff"
+
+# --- check 7: is the Gate 1 being cited still worth citing? -------------------------------------------
+#
+# Check 6 passing only says the sleeve runs the rules SOME passing backtest chose. S8's parameters agree
+# with the Gate 1 of 2026-10-03 -- a run scored before the holdout existed, on the out-of-sample window
+# research_log.jsonl shows read nineteen times with every grid cell's out-of-sample Sharpe on the page.
+# Checks 5 and 6 both go green on it, and the sleeve reads as certified. These four tests pin the four
+# cases apart, because collapsing "demonstrably burned" into "cannot be shown" in either direction is
+# how this check would become either noise or decoration.
+
+def _rec(**kw):
+    base = dict(ts="2026-12-01T00:00:00+00:00", strategy="S8", symbols=["A"],
+                chosen_params={"atr_mult": 4.5}, oos_sharpe=0.85, verdict="PASS")
+    return Gate1Record(**{**base, **kw})
+
+
+def test_a_gate1_scored_under_the_seal_passes_the_seal_check():
+    """The baseline. If this does not pass, every other case below is meaningless."""
+    state, detail = _rec(data_end="2021-12-31").seal_state()
+    assert state == PASS
+    assert "2021-12-31" in detail and HOLDOUT_START.date().isoformat() in detail
+
+
+def test_a_gate1_that_read_past_the_seal_fails_however_good_its_sharpe():
+    state, detail = _rec(data_end="2026-10-01", oos_sharpe=2.5).seal_state()
+    assert state == FAIL
+    assert "not a held-out number" in detail
+
+
+def test_a_gate1_older_than_the_seal_fails_rather_than_pleading_ignorance():
+    """S8's and S9's real position. These rows carry no span because spans were not logged yet -- but
+    `research_bars` did not exist either, so nothing truncated anything and the window they called
+    out-of-sample IS the burned one. That is a fact about this project's history, not a guess, so the
+    check states it instead of reporting the span as merely unknown.
+    """
+    state, detail = _rec(ts="2026-10-03T06:29:04+00:00", data_end=None).seal_state()
+    assert state == FAIL
+    assert "before the holdout was sealed" in detail
+
+
+def test_a_gate1_run_under_the_seal_without_a_recorded_span_says_it_cannot_tell():
+    """The case that must NOT be a FAIL and must NOT be a PASS.
+
+    S1's Gate 1 of 2026-11-16 ran after the seal landed and almost certainly came through
+    `research_bars`, but predates span logging, so nothing in the record proves which years it read.
+    Reporting PASS would hand it a certification it has not shown; reporting FAIL would accuse it of
+    something it probably did not do, and a check that cries wolf gets switched off. PENDING is the
+    state this module reserves for missing evidence, and re-running Gate 1 settles it for free.
+    """
+    after = (SEALED_SINCE + pd.Timedelta(days=1)).date().isoformat()
+    state, detail = _rec(ts=f"{after}T00:00:00+00:00", data_end=None).seal_state()
+    assert state == PENDING
+    assert "did not record the data span" in detail
+
+
+def test_matching_the_chosen_parameters_does_not_satisfy_the_seal_check(journal, settings, tmp_path):
+    """The whole point: a sleeve can agree perfectly with its Gate 1 and still be citing a dead number.
+    Check 6 must pass here and check 7 must fail, on the same sleeve in the same run."""
+    from trader.research.gate2 import evaluate_gate2
+    import trader.research.gate2 as g2
+
+    params = dict(settings.sleeves["S1"].params)
+    log = tmp_path / "research_log.jsonl"
+    log.write_text(json.dumps({
+        "ts": "2026-10-03T06:29:04+00:00", "strategy": "S1",
+        "symbols": sorted(settings.sleeves["S1"].symbols), "verdict": "PASS", "oos_sharpe": 0.85,
+        "chosen_params": params,          # exactly what the sleeve runs
+    }) + "\n")
+    _equity(journal, "S1", days=10)
+
+    original, g2.RESEARCH_LOG = g2.RESEARCH_LOG, log
+    try:
+        result = evaluate_gate2("S1", settings, journal)
+    finally:
+        g2.RESEARCH_LOG = original
+    by_name = {c.name: c for c in result.checks}
+    assert by_name["Running the settings Gate 1 chose"].state == PASS
+    assert by_name["Gate 1 respects the seal"].state == FAIL
+
+
+def test_gate1_now_records_the_span_it_was_allowed_to_see(tmp_path, monkeypatch):
+    """End-to-end through `log_result`, not against a hand-built row. If the field stops being written,
+    every future Gate 1 silently becomes un-auditable and check 7 degrades to PENDING forever -- which
+    would look like the check working.
+    """
+    import trader.research.evaluate as ev
+
+    log = tmp_path / "research_log.jsonl"
+    monkeypatch.setattr(ev, "RESEARCH_LOG", log)
+
+    class _Fake:
+        strategy, symbols, trials = "S8", ["SPY"], 18
+        grid_table = [{"params": {"atr_mult": 4.5}}]
+        chosen_params = {"atr_mult": 4.5}
+        end = pd.Timestamp("2021-12-31")
+        is_metrics = oos_metrics = bench_oos = type("M", (), {"sharpe": 0.5})()
+        wf_metrics = None
+        checks: list = []
+        passed = True
+
+    ev.log_result(_Fake(), None, log=log)          # type: ignore[arg-type]
+    row = json.loads(log.read_text().splitlines()[0])
+    assert row["data_end"] == "2021-12-31"
+    assert pd.Timestamp(row["data_end"]) < HOLDOUT_START
+    assert latest_gate1("S8", ["SPY"], log).seal_state()[0] == PASS
