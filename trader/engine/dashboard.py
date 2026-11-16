@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -212,6 +213,8 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         # Rendered here rather than in render(), which only ever sees this dict.
         "intraday": intraday_card(settings, journal, now),
         "research": latest_research(settings),
+        "gate2": latest_gate2(settings),
+        "health": operational_health(settings, journal, now),
         "blocked": blocked_orders(journal),
         "warnings": [e for e in journal.recent_events(60) if e["level"] in ("warning", "error", "critical")][:12],
         "blocked_today": _blocked_today(journal, now),
@@ -726,6 +729,114 @@ def blocked_orders(journal: Journal, limit: int = 15) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def operational_health(settings: Settings, journal: Journal, now: datetime) -> list[dict]:
+    """The handful of things that fail silently, and whose failure invalidates everything above.
+
+    Each one has already happened here. The alert channel built a null notifier under launchd for seven
+    weeks and threw roughly five thousand messages away without a single error. The newest journal
+    backup was 34 days old, on the same disk, with Time Machine off. The Mac slept through two entire
+    US sessions. None of these announce themselves, and every number on this page is worth less if any
+    of them is true right now.
+    """
+    def age_hours(ts: str | None) -> float | None:
+        if not ts:
+            return None
+        try:
+            return (now - datetime.fromisoformat(ts)).total_seconds() / 3600
+        except ValueError:
+            return None
+
+    rows: list[dict] = []
+
+    channel = journal.kv_get("alert_channel") or ""
+    broken = channel.startswith(("DISCARDING", "FAILING"))
+    rows.append({"name": "Alerts reaching your phone", "ok": bool(channel) and not broken,
+                 "detail": channel or "never checked -- the engine has not run since this was added"})
+
+    backups = Path.home() / "Library" / "Application Support" / "PersonalTrader" / "backups"
+    newest = max((p.stat().st_mtime for p in backups.glob("*")), default=None) if backups.exists() else None
+    if newest is None:
+        rows.append({"name": "Journal backup", "ok": False, "detail": "no backup found"})
+    else:
+        hours = (now.timestamp() - newest) / 3600
+        rows.append({"name": "Journal backup", "ok": hours < 48,
+                     "detail": f"newest is {hours:.0f}h old" + ("" if hours < 48 else " -- the 90-day "
+                               "record Gate 2 needs lives in one file")})
+
+    last_run = age_hours(journal.kv_get("last_engine_run"))
+    rows.append({"name": "Engine heartbeat", "ok": last_run is not None and last_run < 1.0,
+                 "detail": "never run" if last_run is None else f"last run {last_run:.1f}h ago"})
+
+    ok, why = (True, "ok")
+    try:
+        from trader.research.ledger import trial_count, verify_chain
+        ok, why = verify_chain()
+        counted = sum(trial_count(c) for c in ("S1", "S2", "S3", "S4", "S8"))
+        detail = f"{counted} distinct looks at the data, chain intact" if ok else why
+    except Exception as exc:                                    # pragma: no cover - defensive
+        ok, detail = False, str(exc)
+    rows.append({"name": "Trial ledger", "ok": ok, "detail": detail})
+    return rows
+
+
+def _health_card(rows: list[dict]) -> str:
+    items = "".join(
+        f'<div class="row gap"><span class="pill {"ok" if r["ok"] else "closed"}">'
+        f'{"ok" if r["ok"] else "check"}</span><b>{html.escape(r["name"])}</b>'
+        f'<span class="spacer"></span><span class="subtle">{html.escape(r["detail"])}</span></div>'
+        for r in rows)
+    return f'<div class="card">{items}</div>'
+
+
+def latest_gate2(settings: Settings) -> list[dict]:
+    """The most recent Gate 2 verdict per sleeve, newest first.
+
+    Read from `reports/gate2_log.jsonl`, never computed here: Gate 2 re-runs a backtest over the live
+    window, which is seconds of work and has no business happening inside a page render. Its own file,
+    not the research log -- `latest_research` keys that one by STRATEGY and keeps the newest timestamp,
+    so a Gate 2 line written there would quietly replace S8's Gate 1 card.
+    """
+    log = settings.root / "reports" / "gate2_log.jsonl"
+    if not log.exists():
+        return []
+    newest: dict[str, dict] = {}
+    for line in log.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        sleeve = row.get("sleeve")
+        if sleeve and row.get("ts", "") >= newest.get(sleeve, {}).get("ts", ""):
+            newest[sleeve] = row
+    return sorted(newest.values(), key=lambda r: r.get("ts", ""), reverse=True)
+
+
+def _gate2_card(r: dict) -> str:
+    """One forward verdict: is the sleeve that is RUNNING reproducing the one that was tested?
+
+    Gate 1 asks whether a rule worked on history. This asks whether this sleeve, as configured, with
+    this broker, on this feed, is doing what that history promised -- which for S8 it is not.
+    """
+    verdict = r.get("verdict", "?")
+    failing = r.get("failing") or []
+    waiting = verdict == "NOT ENOUGH EVIDENCE YET"
+    good = verdict == "PASS" or (waiting and not failing)
+    live, bench = r.get("live_sharpe"), r.get("benchmark_sharpe")
+    label = {"PASS": "PASS", "FAIL": "FAIL"}.get(verdict, "WAITING")
+    return f"""<div class="card sleeve"><div class="row">
+<span class="dot" style="background:{'#199e70' if good else '#d95926'}"></span><b>{html.escape(r.get('sleeve', '?'))}</b>
+<span class="pill {'open' if good else 'closed'}">{label}</span>
+{f'<span class="pill closed">{html.escape(r["provisional"])}</span>' if waiting and failing else ''}</div>
+<div class="big {'up' if good else 'down'}">{'–' if live is None else f'{live:+.2f}'}</div>
+<div class="row gap"><span class="subtle">live Sharpe vs benchmark
+{'–' if bench is None else f'{bench:+.2f}'}, over the same days</span></div>
+<div class="subtle">{r.get('days_live', 0)} of 90 days · {r.get('closed_trades', 0)} of 30 closed trades
+{f" · backtest said {r['gate1_oos_sharpe']:+.2f}" if r.get('gate1_oos_sharpe') is not None else ''}</div>
+{('<div class="subtle down">fails: ' + html.escape('; '.join(failing)) + '</div>') if failing else
+ '<div class="subtle">every check it can answer yet is passing</div>'}
+</div>"""
+
+
 def _research_card(r: dict, sleeves: list[dict]) -> str:
     """One Gate 1 verdict, and -- the part that matters -- whether that sleeve is trading anyway."""
     code = r.get("strategy", "?")
@@ -866,6 +977,9 @@ def render(d: dict) -> str:
                         for w in d["warnings"]) or "<li class='subtle'>No warnings.</li>"
     research_cards = "".join(_research_card(r, d["sleeves"]) for r in d["research"]) or \
         "<p class='subtle'>No Gate 1 results yet. Run <code>trader gate1 all</code>.</p>"
+    gate2_cards = "".join(_gate2_card(r) for r in d["gate2"]) or \
+        "<p class='subtle'>No forward test has been run yet. Run <code>trader gate2 all</code>.</p>"
+    health_card = _health_card(d["health"])
     blocked_rows = "".join(
         f"<tr><td class='subtle'>{b['created_at'][:19].replace('T', ' ')}</td><td>{html.escape(b['sleeve_id'])}</td>"
         f"<td>{html.escape(b['side'])}</td><td>{html.escape(b['symbol'])}</td>"
@@ -1096,6 +1210,20 @@ low, which is what a stop is measured against.</p>
 <th>Symbol</th><th>Type</th><th>Size</th><th>Stop</th><th>Status</th><th>Reason</th></tr>{order_rows}</table></div>
 <h2>Warnings</h2><div class="card"><ul class="warnings">{warn_rows}</ul></div></section>
 <section data-panel="evidence" hidden>
+<h2>Can you believe any of this?</h2>
+<p class="subtle">The things that fail silently. Every one has happened here: the alert channel threw
+away five thousand messages without a single error, the newest backup was 34 days old on the same disk,
+the Mac slept through two whole US sessions. Nothing below is worth much while anything here says
+&ldquo;check&rdquo;.</p>
+{health_card}
+<h2>Is what's running doing what was tested?</h2>
+<p class="subtle">Gate 2, the forward test. Gate 1 below asks whether a rule worked on history; this asks
+whether this sleeve, as configured, with this broker, on this data feed, is reproducing it. The
+benchmark is measured over the sleeve's own days and no others &mdash; comparing life-to-date returns
+between sleeves that started on different dates is not a comparison. WAITING means too few days or too
+few closed trades, never a bad result; where it would already fail, it says so rather than implying
+that waiting might rescue it.</p>
+<div class="grid sleeves">{gate2_cards}</div>
 <h2>Does each strategy deserve its money?</h2>
 <p class="subtle">The most recent Gate 1 result per strategy: parameters chosen on the first 70% of history,
 then judged on the 30% they never saw. Sharpe is measured in excess of cash, so 0 means "no better than
