@@ -687,6 +687,7 @@ def test_a_retirement_completes_itself_once_the_sleeve_is_flat(settings, tmp_pat
     class Spy(NullNotifier):
         def send(self, text):
             sent.append(text)
+            return True
 
     def engine_now():
         for s, df in bars.full.items():

@@ -352,6 +352,41 @@ class IntradayWatcher:
         """
         return self.journal.kv_set_if(self._key(day, "state", symbol), expect, becomes)
 
+    def _announce(self, text: str, key: str, wrote: str, was: str | None = None) -> bool:
+        """Send a message that a state change has already been claimed for, and undo the claim if it
+        does not get through.
+
+        Every transition here writes the state BEFORE sending, and has to: the watcher runs in two
+        places, so the write is what makes the decision exclusive. The cost was a silent one. A send
+        that failed -- one timed-out request was enough -- left the state saying you were in a trade
+        nobody had told you to open, and the next thing you would hear was a SELL for a position you
+        did not hold, quoting a profit on money you never put in.
+
+        So a failed send is rolled back, conditionally, and the next pass a minute later tries again
+        from the state the market is actually in. Conditionally because the other process may have moved
+        on in the meantime: `kv_del_if` only removes the value this caller wrote, and `kv_set_if` only
+        restores over it.
+
+        `was` is what the key held before the claim, and getting it wrong is worse than not rolling back
+        at all. A SELL claims "in" -> "done"; DELETING that leaves no state, which reads as "waiting",
+        and the next pass would see a rate under the trigger and send a BUY for a trade that had already
+        closed. So an overwrite is restored and only a fresh claim is deleted.
+
+        What this does NOT fix, stated because it reads like it should: if you have the resting limit
+        order the plan recommends, the broker may fill it whether or not any message arrives, and the
+        retried message a minute later quotes the rate then rather than the fill. The entry prices this
+        watcher records are what the message said, not what your broker did -- it has no broker
+        connection at all. Reconciling the two is still yours to do.
+        """
+        if self.notifier.send(text):
+            return True
+        undone = (self.journal.kv_del_if(key, wrote) if was is None
+                  else self.journal.kv_set_if(key, wrote, was))
+        self.journal.log(f"intraday: could not deliver message for {key}; "
+                         f"{f'state put back to {was or None}, will retry' if undone else 'state had already moved on'}",
+                         level="error")
+        return False
+
     def _get(self, day: date, name: str, symbol: str) -> str | None:
         return self.journal.kv_get(self._key(day, name, symbol))
 
@@ -410,7 +445,9 @@ class IntradayWatcher:
                     # a day the setup never appeared, and you would be left wondering which. The usual
                     # cause is this Mac asleep -- caffeinate -s only holds sleep off on AC power, so a
                     # morning on battery skips the open (observed 2026-10-07, 06:24 to 08:18, no runs).
-                    self.notifier.send(missed_text(self.cfg, day, minutes_in, symbol))
+                    if not self._announce(missed_text(self.cfg, day, minutes_in, symbol),
+                                          self._key(day, "state", symbol), "missed"):
+                        return [f"intraday: missed the open, message not delivered; will retry"]
                     return [f"intraday: missed the {self.cfg.open_utc} open by "
                             f"{minutes_in:.0f} min; no plan today"]
                 return []
@@ -420,11 +457,12 @@ class IntradayWatcher:
             plan = build_plan(self.cfg, rate, self._daily_ranges(symbol), day, symbol)
             if plan is None:
                 return []
-            if not self.journal.kv_set_if(self._key(day, "plan", symbol), None,
-                                          f"{plan.session_open},{plan.atr},{plan.trigger},"
-                                          f"{plan.stop},{plan.target},{plan.qty}"):
+            stored = (f"{plan.session_open},{plan.atr},{plan.trigger},"
+                      f"{plan.stop},{plan.target},{plan.qty}")
+            if not self.journal.kv_set_if(self._key(day, "plan", symbol), None, stored):
                 return []                               # another process got there first
-            self.notifier.send(plan_text(plan, self.cfg))
+            if not self._announce(plan_text(plan, self.cfg), self._key(day, "plan", symbol), stored):
+                return [f"intraday plan for {symbol} could not be delivered; will retry"]
             return [f"intraday plan for {symbol}: buy {plan.trigger:.5f}"]
 
         state = self._get(day, "state", symbol) or "waiting"
@@ -443,13 +481,18 @@ class IntradayWatcher:
                 # down here is simply a different trade from the one that was measured.
                 if not self._claim(day, symbol, None, "gapped"):
                     return []
-                self.notifier.send(gapped_text(plan, rate))
+                if not self._announce(gapped_text(plan, rate), self._key(day, "state", symbol), "gapped"):
+                    return [f"intraday: {symbol} gapped, message not delivered; will retry"]
                 return [f"intraday: {symbol} gapped past the stop at {rate:.5f}; day skipped"]
             if rate <= plan.trigger:
                 if not self._claim(day, symbol, None, "in"):
                     return []
                 self._set(day, "entry", f"{rate}", symbol)       # what the message quoted, for the sell to measure from
-                self.notifier.send(buy_text(plan, rate))
+                if not self._announce(buy_text(plan, rate), self._key(day, "state", symbol), "in"):
+                    # The entry goes with the claim. Leaving it behind would have the retried BUY --
+                    # or a later SELL -- measure profit from a rate that was never sent to anyone.
+                    self.journal.kv_del_if(self._key(day, "entry", symbol), f"{rate}")
+                    return [f"intraday BUY {symbol} not delivered; will retry"]
                 return [f"intraday BUY {symbol} at {rate:.5f}"]
             return []
 
@@ -462,7 +505,9 @@ class IntradayWatcher:
             return []
         if not self._claim(day, symbol, "in", "done"):
             return []
-        self.notifier.send(sell_text(plan, rate, why, self._entry(day, symbol)))
+        if not self._announce(sell_text(plan, rate, why, self._entry(day, symbol)),
+                              self._key(day, "state", symbol), "done", was="in"):
+            return [f"intraday SELL {symbol} not delivered; will retry"]
         return [f"intraday SELL {symbol} at {rate:.5f} ({why})"]
 
     def sweep_unfinished(self) -> list[str]:
@@ -499,7 +544,10 @@ class IntradayWatcher:
                 continue
             if not self._claim(day, symbol, "in", "done"):
                 continue
-            self.notifier.send(stranded_text(plan, self._entry(day, symbol)))
+            if not self._announce(stranded_text(plan, self._entry(day, symbol)),
+                                  self._key(day, "state", symbol), "done", was="in"):
+                out.append(f"intraday: {symbol} from {day} left open, message not delivered; will retry")
+                continue
             out.append(f"intraday: {symbol} from {day} was left open; told you to check it")
         return out
 
@@ -530,7 +578,8 @@ class IntradayWatcher:
             # system knew and never told you. Silence should not need interpreting.
             if not self._claim(day, symbol, None, "done"):
                 return []
-            self.notifier.send(no_setup_text(plan, self.cfg))
+            if not self._announce(no_setup_text(plan, self.cfg), self._key(day, "state", symbol), "done"):
+                return [f"intraday: no {symbol} setup message not delivered; will retry"]
             return [f"intraday: no {symbol} setup today"]
 
         rate = self._rate(symbol)
@@ -538,7 +587,9 @@ class IntradayWatcher:
             return []
         if not self._claim(day, symbol, "in", "done"):
             return []
-        self.notifier.send(sell_text(plan, rate, "session end", self._entry(day, symbol)))
+        if not self._announce(sell_text(plan, rate, "session end", self._entry(day, symbol)),
+                              self._key(day, "state", symbol), "done", was="in"):
+            return [f"intraday SELL {symbol} (session end) not delivered; will retry"]
         return [f"intraday SELL {symbol} at {rate:.5f} (session end)"]
 
     # --- data ---------------------------------------------------------------------------------------

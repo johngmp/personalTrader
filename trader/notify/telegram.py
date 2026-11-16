@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Protocol
+import time
+from typing import Callable, Protocol
 
 import httpx
 from dotenv import load_dotenv
@@ -17,6 +18,14 @@ from trader.config import PROJECT_ROOT
 log = logging.getLogger(__name__)
 MAX_LEN = 3900  # Telegram's limit is 4096 characters
 
+# A send gets three attempts, roughly a second apart. The numbers come from what this is for: the
+# forex watcher runs on a one-minute beat, so the whole retry sequence has to finish well inside a
+# minute or it delays the next pass. Three attempts over ~4 seconds covers the failure this is aimed at
+# -- a single timed-out request on a flaky connection -- without turning a dead network into a stall.
+SEND_ATTEMPTS = 3
+RETRY_WAIT_S = (1.0, 3.0)
+MAX_RETRY_AFTER_S = 10.0   # cap on Telegram's own 429 retry_after, so rate limiting cannot hang a pass
+
 
 class KV(Protocol):
     def kv_get(self, key: str, default: str | None = None) -> str | None: ...
@@ -24,7 +33,7 @@ class KV(Protocol):
 
 
 class Notifier(Protocol):
-    def send(self, text: str) -> None: ...
+    def send(self, text: str) -> bool: ...
     def poll_commands(self, store: KV) -> list[str]: ...
 
 
@@ -44,23 +53,34 @@ class NullNotifier:
         self.reason = reason
         self.misconfigured = misconfigured
 
-    def send(self, text: str) -> None:
+    def send(self, text: str) -> bool:
+        """True when discarding is what the caller asked for, False when it is an accident.
+
+        A dry run or a test wants messages to go nowhere and should see success. A notifier that exists
+        only because the credentials were missing is a delivery failure, and callers that check -- the
+        forex watcher, which rolls its state back on a failed send -- must be told so rather than
+        advancing through a trade nobody was told about.
+        """
         self.sent.append(text)
+        return not self.misconfigured
 
     def poll_commands(self, store: KV) -> list[str]:
         return []
 
 
 class Telegram:
-    def __init__(self, token: str, chat_id: str, client: httpx.Client | None = None) -> None:
+    def __init__(self, token: str, chat_id: str, client: httpx.Client | None = None,
+                 sleep: Callable[[float], None] | None = None) -> None:
         self.base = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id)
         self.client = client or httpx.Client(timeout=10)
+        self.sleep = sleep or time.sleep   # injectable so the retry tests do not actually wait
         self.failures = 0                   # consecutive sends that did not get through
         self.last_error: str | None = None
+        self.attempts_used = 0              # attempts the last failed send spent, for the tests
 
-    def send(self, text: str) -> None:
-        """Never raises: an alert failing must not stop the engine trading.
+    def send(self, text: str) -> bool:
+        """True if Telegram confirmed delivery. Never raises: an alert must not stop the engine trading.
 
         But it must not vanish either. This logged to a Python logger nobody reads, so a wrong chat id,
         a revoked token or a blocked bot would have made every message disappear while the engine
@@ -68,20 +88,60 @@ class Telegram:
         failure is indistinguishable from a quiet market. You would be waiting for a signal that had
         already been sent into nothing. The count is read after each run and recorded where you can see
         it; see Coordinator._check_alerts_got_through.
+
+        It now retries, and returns whether it worked, because of what sits downstream. The forex
+        watcher claims the day's state BEFORE it sends -- it has to, or two processes would message you
+        the same entry -- so a send that failed silently left the state saying you were in a trade you
+        had never been told to open, and the next message you would get was a SELL for a position you
+        did not hold. One timed-out request is the likely cause and is exactly what a retry fixes; the
+        return value is what lets the watcher put the state back when it does not.
+
+        Retried: timeouts, dropped connections, Telegram's 5xx, and 429 rate limiting. Not retried: a
+        4xx, which means the token or the chat id is wrong and trying again cannot help -- it would
+        just spend the minute the watcher is running in.
         """
+        tried, failure = 0, None
+        while tried < SEND_ATTEMPTS:
+            delivered, retry_after, exc = self._attempt(text)
+            tried += 1
+            if delivered:
+                self.failures = 0
+                self.last_error = None
+                return True
+            failure = exc
+            if retry_after is None or tried == SEND_ATTEMPTS:
+                break                       # nothing a retry would fix, or out of attempts
+            self.sleep(retry_after)
+        self.failures += 1
+        self.last_error = f"{type(failure).__name__}: {failure}" if failure else "unknown"
+        self.attempts_used = tried
+        log.warning("telegram send failed after %d attempt(s): %s", tried, self.last_error)
+        return False
+
+    def _attempt(self, text: str) -> tuple[bool, float | None, Exception | None]:
+        """(delivered, seconds to wait before retrying or None if retrying is pointless, what failed)."""
         try:
-            r = self.client.post(f"{self.base}/sendMessage", json={"chat_id": self.chat_id, "text": text[:MAX_LEN]})
+            r = self.client.post(f"{self.base}/sendMessage",
+                                 json={"chat_id": self.chat_id, "text": text[:MAX_LEN]})
+        except httpx.RequestError as exc:                      # timeout, DNS, refused, reset
+            return False, RETRY_WAIT_S[0], exc
+        if r.status_code == 429:
+            try:
+                wait = float(r.json().get("parameters", {}).get("retry_after", RETRY_WAIT_S[0]))
+            except ValueError:
+                wait = RETRY_WAIT_S[0]
+            return False, min(wait, MAX_RETRY_AFTER_S), httpx.HTTPError("429 rate limited")
+        if r.status_code >= 500:
+            return False, RETRY_WAIT_S[1], httpx.HTTPError(f"{r.status_code} from telegram")
+        try:
             r.raise_for_status()
             # Telegram can answer 200 with ok:false, so the status alone is not proof of delivery.
-            if not r.json().get("ok"):
-                raise httpx.HTTPError(str(r.json().get("description") or "telegram returned ok:false"))
-        except (httpx.HTTPError, ValueError) as exc:  # never let an alert failure break trading
-            self.failures += 1
-            self.last_error = f"{type(exc).__name__}: {exc}"
-            log.warning("telegram send failed: %s", exc)
-        else:
-            self.failures = 0
-            self.last_error = None
+            body = r.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            return False, None, exc                            # a 4xx or unreadable body: retrying cannot help
+        if not body.get("ok"):
+            return False, None, httpx.HTTPError(str(body.get("description") or "telegram returned ok:false"))
+        return True, None, None
 
     def poll_commands(self, store: KV) -> list[str]:
         offset = int(store.kv_get("telegram_offset", "0") or 0)

@@ -949,13 +949,48 @@ def cmd_watch_fx(settings, args) -> int:
         return 0
     journal = Journal(settings.journal_path)
     try:
-        watcher = IntradayWatcher(settings, journal, from_env())
+        notifier = from_env()
+        watcher = IntradayWatcher(settings, journal, notifier)
         did = watcher.sweep_unfinished() + watcher.run_once() + watcher.close_out()
         for what in did:
             journal.log(what, level="info")
             print(f"{datetime.now():%Y-%m-%d %H:%M} {what}")
+        return _fx_delivery_check(journal, notifier)
     finally:
         journal.close()
+
+
+def _fx_delivery_check(journal, notifier) -> int:
+    """Did this pass's messages reach the phone? Non-zero exit if not.
+
+    The engine has `Coordinator._check_alerts_got_through` for exactly this, and this command had
+    nothing: it built a notifier, sent into it and exited 0 regardless. Three ways that went wrong, all
+    silent. A `NullNotifier` from missing credentials appended every message to a list and dropped it --
+    which is what happened for weeks, see `telegram.from_env`. A send that timed out swallowed the
+    exception. And launchd, which runs this every minute, had no way to know either had happened,
+    because the exit code said fine.
+
+    So the state goes where it can be read -- `alert_channel`, the same key the engine writes and the
+    dashboard's health card shows -- and the exit code tells launchd. There is nothing to send the bad
+    news over, which is the whole problem with a broken notifier, so it has to be recorded instead.
+    """
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if getattr(notifier, "misconfigured", False):
+        discarded = len(getattr(notifier, "sent", []) or [])
+        reason = getattr(notifier, "reason", "Telegram is not set up")
+        journal.kv_set("alert_channel", f"DISCARDING {reason}")
+        journal.log(f"watch-fx: alerts going nowhere, {discarded} message(s) discarded: {reason}",
+                    level="error")
+        print(f"alerts going nowhere: {reason}")
+        return 1
+    failures = getattr(notifier, "failures", 0)
+    if failures:
+        error = getattr(notifier, "last_error", None) or "unknown"
+        journal.kv_set("alert_channel", f"FAILING {error}")
+        journal.log(f"watch-fx: {failures} message(s) did not reach Telegram: {error}", level="error")
+        print(f"{failures} message(s) did not reach Telegram: {error}")
+        return 1
+    journal.kv_set("alert_channel", f"{type(notifier).__name__} ok {now}")
     return 0
 
 

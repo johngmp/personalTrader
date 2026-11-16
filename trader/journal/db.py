@@ -435,6 +435,17 @@ class Journal:
                                         (value, key, expect))
             return cur.rowcount > 0
 
+    def kv_del_if(self, key: str, expect: str) -> bool:
+        """Delete `key` only if it still holds `expect`. True if this caller won.
+
+        The undo for `kv_set_if`, and conditional for the same reason the set is: the forex watcher
+        claims the day's state before it sends a message, so when the send fails it has to put the
+        state back -- but only if nothing else has moved it on in the meantime. An unconditional delete
+        would let a failed send in one process wipe a claim another process had already acted on.
+        """
+        with self.conn:
+            return self.conn.execute("DELETE FROM kv WHERE key=? AND value=?", (key, expect)).rowcount > 0
+
     def kv_keys(self, like: str) -> list[str]:
         """Keys matching a SQL LIKE pattern, in order. For sweeping state a caller cannot name upfront."""
         return [r["key"] for r in self.conn.execute("SELECT key FROM kv WHERE key LIKE ? ORDER BY key", (like,))]

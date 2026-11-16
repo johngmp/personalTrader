@@ -29,11 +29,20 @@ ODD_RANGES = [0.01197, 0.00619, 0.00951, 0.00723, 0.00901, 0.00488, 0.00672, 0.0
 
 
 class Spy:
-    def __init__(self):
-        self.sent = []
+    """A notifier that delivers. `delivers=False` is the one that does not, for the rollback tests.
+
+    Returning a truthy value is not decoration: the watcher now treats a falsy send as a delivery
+    failure and puts the day's state back, so a fake that forgot to return anything would quietly make
+    every test here run against a watcher that never advances.
+    """
+
+    def __init__(self, delivers: bool = True):
+        self.sent: list[str] = []
+        self.delivers = delivers
 
     def send(self, text):
         self.sent.append(text)
+        return self.delivers
 
 
 @pytest.fixture
@@ -43,10 +52,10 @@ def journal(tmp_path):
     j.close()
 
 
-def _watcher(journal, at: str, rate: float, cfg=CFG, ranges=None):
+def _watcher(journal, at: str, rate: float, cfg=CFG, ranges=None, delivers: bool = True):
     now = datetime.fromisoformat(f"2026-10-07T{at}+00:00")
     s = load_settings().model_copy(update={"intraday": cfg})
-    return IntradayWatcher(s, journal, Spy(), clock=lambda: now, price=lambda _s: rate,
+    return IntradayWatcher(s, journal, Spy(delivers), clock=lambda: now, price=lambda _s: rate,
                            ranges=RANGES if ranges is None else ranges)
 
 
@@ -639,12 +648,17 @@ def test_every_message_the_watcher_sends_is_behind_a_claim():
     for method in (IntradayWatcher._run_symbol, IntradayWatcher._close_symbol,
                    IntradayWatcher.sweep_unfinished):
         src = inspect.getsource(method)
-        sends = src.count("self.notifier.send(")
+        sends = src.count("self._announce(")
         guards = src.count("self._claim(") + src.count("self.journal.kv_set_if(")
         assert sends > 0, f"{method.__name__} sends nothing; this test is watching the wrong place"
         assert guards == sends, (
             f"{method.__name__} has {sends} message(s) and {guards} exclusive claim(s): "
             "every message must be behind one, or two processes can send the same alert")
+        # And every message goes through `_announce`, never the notifier directly. A bare send is a
+        # message with no delivery check behind it, which is how a claimed state could advance while
+        # the message that was supposed to go with it vanished.
+        assert "self.notifier.send(" not in src, (
+            f"{method.__name__} calls the notifier directly; use _announce so a failed send is undone")
 
 
 def test_the_quick_watcher_is_its_own_command_and_touches_no_broker():
@@ -890,3 +904,91 @@ def test_the_floor_is_judged_against_the_brokers_step_not_a_hardcoded_one():
     assert p.floored, "the step that matters is the broker's, not 0.01"
     assert p.lots == 0.05
     assert "smallest trade your broker takes" in plan_text(p, cfg)
+
+
+# --- a message that did not arrive must not leave the state saying it did -----------------------------
+#
+# Every transition claims the day's state before it sends, and has to: the watcher runs in two places,
+# so the write is what makes the decision exclusive. The cost was silent and bad. One timed-out request
+# left the state at "in" with nobody told to buy, and the next message you would get was a SELL for a
+# position that was never opened, quoting a profit on money that was never at risk.
+
+def test_an_undelivered_buy_does_not_leave_the_state_saying_you_are_in(journal):
+    """The one that mattered. A failed BUY rolls back to waiting, and the next pass tries again."""
+    plan = _watcher(journal, "07:05", 1.16420)
+    plan.run_once()
+    trigger = plan._stored_plan(DAY, "EUR/USD").trigger
+
+    lost = _watcher(journal, "09:00", trigger, delivers=False)
+    out = lost.run_once()
+    assert len(lost.notifier.sent) == 1, "it must have tried"
+    assert "not delivered" in out[0]
+    assert lost._get(DAY, "state", "EUR/USD") is None, "the claim must be undone"
+    assert lost._entry(DAY, "EUR/USD") is None, "and the entry rate with it"
+
+    again = _watcher(journal, "09:01", trigger)
+    assert again.run_once() == [f"intraday BUY EUR/USD at {trigger:.5f}"]
+    assert again._get(DAY, "state", "EUR/USD") == "in"
+    assert "BUY" in again.notifier.sent[0]
+
+
+def test_an_undelivered_sell_goes_back_to_in_and_never_re_sends_a_buy(journal):
+    """The rollback direction is load-bearing, and the wrong one is worse than not rolling back.
+
+    A SELL claims "in" -> "done". DELETING that key leaves no state, which reads as "waiting" -- and
+    the next pass, seeing a rate under the trigger, would send a BUY for a trade that had already
+    closed. So an overwritten value is restored rather than removed.
+    """
+    plan = _watcher(journal, "07:05", 1.16420)
+    plan.run_once()
+    stored = plan._stored_plan(DAY, "EUR/USD")
+    _watcher(journal, "09:00", stored.trigger).run_once()
+    assert plan._get(DAY, "state", "EUR/USD") == "in"
+
+    lost = _watcher(journal, "12:00", stored.target, delivers=False)
+    assert "not delivered" in lost.run_once()[0]
+    assert lost._get(DAY, "state", "EUR/USD") == "in", "it must go back to in, not to nothing"
+
+    # And the retry is a SELL, not a second BUY.
+    again = _watcher(journal, "12:01", stored.target)
+    assert again.run_once() == [f"intraday SELL EUR/USD at {stored.target:.5f} (target)"]
+    assert "SELL" in again.notifier.sent[0] or "CLOSE" in again.notifier.sent[0]
+
+
+def test_an_undelivered_plan_is_rebuilt_and_sent_again(journal):
+    """The plan message is the ticket. Losing it leaves nothing to place by hand all day."""
+    lost = _watcher(journal, "07:05", 1.16420, delivers=False)
+    assert "could not be delivered" in lost.run_once()[0]
+    assert lost._stored_plan(DAY, "EUR/USD") is None, "the stored plan must be undone too"
+
+    again = _watcher(journal, "07:06", 1.16420)
+    assert again.run_once() and "Open a BUY LIMIT ticket" in again.notifier.sent[0]
+
+
+def test_a_failed_send_is_recorded_where_someone_can_read_it(journal):
+    """There is nothing to send the bad news over, so it has to be written down."""
+    lost = _watcher(journal, "07:05", 1.16420, delivers=False)
+    lost.run_once()
+    logs = [r["message"] for r in journal.conn.execute(
+        "SELECT message FROM events WHERE level='error'").fetchall()]
+    assert any("could not deliver" in m for m in logs), logs
+
+
+def test_a_rollback_does_not_touch_a_claim_another_process_has_moved_on(journal):
+    """`kv_del_if` and `kv_set_if` are conditional for a reason: the engine's fifteen-minute pass and
+    this minute-by-minute one both run. If the other process has advanced the state in the meantime, a
+    failed send here must leave it alone rather than reopening a settled day."""
+    plan = _watcher(journal, "07:05", 1.16420)
+    plan.run_once()
+    w = _watcher(journal, "09:00", plan._stored_plan(DAY, "EUR/USD").trigger, delivers=False)
+
+    key = w._key(DAY, "state", "EUR/USD")
+    original = w.notifier.send
+
+    def send_then_someone_else_moves_on(text):
+        journal.kv_set(key, "done")          # the other pass finished the day while this send hung
+        return original(text)
+
+    w.notifier.send = send_then_someone_else_moves_on
+    w.run_once()
+    assert journal.kv_get(key) == "done", "a stale rollback must not reopen the day"

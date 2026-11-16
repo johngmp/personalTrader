@@ -130,21 +130,27 @@ def test_a_two_hundred_with_ok_false_still_counts_as_a_failure():
 
 
 def test_a_successful_send_clears_the_failure_count():
-    """Otherwise one network blip would report a broken notifier for the rest of the day."""
+    """Otherwise one network blip would report a broken notifier for the rest of the day.
+
+    The first send has to exhaust every attempt to count as a failure now that sends retry, so the
+    transport fails SEND_ATTEMPTS times and then recovers. That is also the honest shape of the thing
+    being tested: a single 500 is no longer a failure at all.
+    """
     import httpx
 
-    from trader.notify.telegram import Telegram
+    from trader.notify.telegram import SEND_ATTEMPTS, Telegram
 
     ok = {"n": 0}
 
     def flaky(_request):
         ok["n"] += 1
-        return httpx.Response(500) if ok["n"] == 1 else httpx.Response(200, json={"ok": True})
+        return httpx.Response(500) if ok["n"] <= SEND_ATTEMPTS else httpx.Response(200, json={"ok": True})
 
-    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(flaky)))
-    bot.send("one")
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(flaky)),
+                   sleep=lambda _s: None)
+    assert bot.send("one") is False
     assert bot.failures == 1
-    bot.send("two")
+    assert bot.send("two") is True
     assert bot.failures == 0 and bot.last_error is None
 
 
@@ -158,7 +164,7 @@ def test_the_run_reports_alerts_that_did_not_arrive(settings, tmp_path):
         failures = 3
         last_error = "HTTPStatusError: 401 Unauthorized"
 
-        def send(self, text): pass
+        def send(self, text): return False
         def poll_commands(self, store): return []
 
     journal = Journal(tmp_path / "j.db")
@@ -184,3 +190,167 @@ def test_every_run_actually_checks_that_the_alerts_arrived():
     from trader.engine.live import Coordinator
 
     assert "_check_alerts_got_through" in inspect.getsource(Coordinator.run_once)
+
+
+# --- a timed-out BUY used to be lost silently, and the state said you were in the trade ---------------
+#
+# Every transition claims the day's state BEFORE it sends, and has to, or two processes would message
+# the same entry. The cost was that one timed-out request left the state at "in" with nobody told to
+# buy -- and the next message would be a SELL for a position that was never opened, quoting a profit on
+# money that was never at risk. Two halves to the fix: the send retries, and a send that still fails
+# puts the state back.
+
+def _flaky_bot(responses, **kw):
+    import httpx
+
+    from trader.notify.telegram import Telegram
+
+    seq = list(responses)
+    calls = {"n": 0}
+
+    def transport(_request):
+        calls["n"] += 1
+        return seq[min(calls["n"] - 1, len(seq) - 1)]
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(transport)),
+                   sleep=lambda _s: None, **kw)
+    return bot, calls
+
+
+def test_one_timed_out_request_is_retried_and_the_message_gets_through():
+    """The failure this was built for. A single timeout is the common case on a flaky connection, and
+    before this it silently lost whatever the message was."""
+    import httpx
+
+    from trader.notify.telegram import Telegram
+
+    calls = {"n": 0}
+
+    def transport(_request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectTimeout("timed out")
+        return httpx.Response(200, json={"ok": True})
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(transport)),
+                   sleep=lambda _s: None)
+    assert bot.send("BUY EUR/USD") is True
+    assert calls["n"] == 2 and bot.failures == 0
+
+
+def test_retries_stop_after_the_configured_number_of_attempts():
+    """Unbounded retries would be worse than none: this runs on a one-minute beat, so a dead network
+    has to be given up on rather than allowed to stall the next pass."""
+    import httpx
+
+    from trader.notify.telegram import SEND_ATTEMPTS, Telegram
+
+    bot, calls = _flaky_bot([httpx.Response(503)])
+    assert bot.send("x") is False
+    assert calls["n"] == SEND_ATTEMPTS == 3
+    assert bot.attempts_used == SEND_ATTEMPTS
+
+
+def test_a_wrong_token_or_chat_id_is_not_retried():
+    """A 4xx means the credentials are wrong and trying again cannot help. Retrying would spend the
+    minute this command runs in, three times over, to reach the same answer."""
+    import httpx
+
+    bot, calls = _flaky_bot([httpx.Response(401, json={"description": "Unauthorized"})])
+    assert bot.send("x") is False
+    assert calls["n"] == 1, "a 401 must be given up on immediately"
+
+
+def test_rate_limiting_waits_as_long_as_telegram_asks_within_reason():
+    import httpx
+
+    from trader.notify.telegram import MAX_RETRY_AFTER_S, Telegram
+
+    waits: list[float] = []
+    calls = {"n": 0}
+
+    def transport(_request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"parameters": {"retry_after": 999}})
+        return httpx.Response(200, json={"ok": True})
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(transport)),
+                   sleep=waits.append)
+    assert bot.send("x") is True
+    assert waits == [MAX_RETRY_AFTER_S], "an absurd retry_after must be capped, not obeyed"
+
+
+def test_ok_false_is_still_a_failure_and_is_not_retried():
+    """Telegram answers 200 with ok:false for a chat that does not exist. The status is not delivery."""
+    import httpx
+
+    bot, calls = _flaky_bot([httpx.Response(200, json={"ok": False, "description": "chat not found"})])
+    assert bot.send("x") is False
+    assert calls["n"] == 1 and "chat not found" in (bot.last_error or "")
+
+
+def test_a_misconfigured_null_notifier_reports_failure_but_a_dry_run_does_not():
+    """The two reasons to be silent are not the same. A dry run wants to discard; a notifier that
+    exists only because the credentials were missing is a delivery failure, and the watcher must be
+    told or it advances through a trade nobody heard about."""
+    from trader.notify.telegram import NullNotifier
+
+    assert NullNotifier().send("x") is True
+    assert NullNotifier(reason="no token", misconfigured=True).send("x") is False
+
+
+# --- the command's own delivery check ----------------------------------------------------------------
+#
+# `trader watch-fx` built a notifier, sent into it and exited 0 regardless. launchd runs it every
+# minute and had no way to know a message had gone nowhere.
+
+def _check(notifier, tmp_path):
+    from trader.cli import _fx_delivery_check
+    from trader.journal.db import Journal
+
+    journal = Journal(tmp_path / "j.db")
+    try:
+        code = _fx_delivery_check(journal, notifier)
+        errors = [r["message"] for r in journal.conn.execute(
+            "SELECT message FROM events WHERE level='error'").fetchall()]
+        return code, journal.kv_get("alert_channel"), errors
+    finally:
+        journal.close()
+
+
+def test_a_working_notifier_records_that_it_is_working(tmp_path):
+    """The healthy case is written down too, so "the alerts are working" is something you can check
+    rather than assume. A clean pass and a pass whose every message vanished used to look identical."""
+    from trader.notify.telegram import NullNotifier
+
+    code, channel, errors = _check(NullNotifier(), tmp_path)
+    assert code == 0
+    assert channel and channel.startswith("NullNotifier ok")
+    assert not errors
+
+
+def test_missing_credentials_exit_non_zero_instead_of_discarding_quietly(tmp_path):
+    """This is what happened for weeks: thousands of messages appended to a list and dropped."""
+    from trader.notify.telegram import NullNotifier
+
+    notifier = NullNotifier(reason="TELEGRAM_BOT_TOKEN not found in .env", misconfigured=True)
+    notifier.send("BUY EUR/USD")
+    code, channel, errors = _check(notifier, tmp_path)
+    assert code == 1, "launchd has to be able to see this"
+    assert channel.startswith("DISCARDING")
+    assert any("1 message(s) discarded" in m for m in errors), errors
+
+
+def test_a_send_that_failed_exits_non_zero_and_names_the_error(tmp_path):
+    class Failing:
+        failures = 1
+        last_error = "ConnectTimeout: timed out"
+
+        def send(self, text): return False
+        def poll_commands(self, store): return []
+
+    code, channel, errors = _check(Failing(), tmp_path)
+    assert code == 1
+    assert channel == "FAILING ConnectTimeout: timed out"
+    assert any("did not reach Telegram" in m and "timed out" in m for m in errors), errors
