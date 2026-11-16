@@ -232,6 +232,38 @@ def cmd_gate1(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ledger(settings: Settings, args: argparse.Namespace) -> int:
+    """How many distinct looks at the data each strategy has spent, and whether the record is intact."""
+    import numpy as np
+
+    from trader.research.holdout import HOLDOUT_START
+    from trader.research.ledger import TRIAL_LEDGER, _rows, trial_count, trial_sharpes, verify_chain
+
+    ok, why = verify_chain()
+    if args.action == "verify" or not ok:
+        print(f"trial ledger: {'intact' if ok else 'ALTERED -- ' + why}")
+        if not ok:
+            print("  Gate 1 will refuse to score until this is restored (try `git checkout "
+                  "reports/trials.jsonl`).")
+            return 1
+        if args.action == "verify":
+            return 0
+
+    rows = _rows()
+    strategies = sorted({r["strategy"] for r in rows})
+    print(f"{len(rows)} recorded runs · holdout sealed from {HOLDOUT_START.date()}\n")
+    print(f"  {'strategy':<14}{'looks':>7}{'sharpes':>9}{'spread':>9}")
+    for code in strategies:
+        sharpes = trial_sharpes(code)
+        spread = f"{float(np.std(sharpes)):.3f}" if len(sharpes) > 1 else "–"
+        print(f"  {code:<14}{trial_count(code):>7}{len(sharpes):>9}{spread:>9}")
+    print(f"\n  {'total':<14}{sum(trial_count(c) for c in strategies):>7}")
+    print(f"\n{TRIAL_LEDGER.relative_to(settings.root) if TRIAL_LEDGER.is_relative_to(settings.root) else TRIAL_LEDGER}")
+    print("Every backtest records one. The spread of past trial Sharpes sets how high a result has to\n"
+          "clear to beat what luck alone would have produced after that many attempts.")
+    return 0
+
+
 def cmd_holdout(settings: Settings, args: argparse.Namespace) -> int:
     """Spend a strategy's single read of the sealed holdout. Refuses, loudly, far more often than not."""
     import json
@@ -952,6 +984,8 @@ def main(argv: list[str] | None = None) -> int:
     p_g1.add_argument("--refresh", action="store_true", help="re-download price history first")
     p_g2 = sub.add_parser("gate2", help="forward test: is the live sleeve reproducing its backtest?")
     p_g2.add_argument("sleeve", help="a sleeve id, or 'all' for every sleeve with a live record")
+    p_led = sub.add_parser("ledger", help="the trial ledger: how hard have we looked, and is it intact?")
+    p_led.add_argument("action", nargs="?", default="stats", choices=["stats", "verify"])
     p_ho = sub.add_parser("holdout", help="spend a strategy's ONE read of the sealed holdout")
     p_ho.add_argument("strategy", help="strategy code, e.g. S8")
     p_ho.add_argument("--confirm", default="", help='exactly: "open holdout for S8"')
@@ -1000,7 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {"status": cmd_status, "check-config": cmd_check_config, "sync": cmd_sync, "order": cmd_order,
                 "halt": cmd_halt, "resume": cmd_resume, "data": cmd_data, "backtest": cmd_backtest,
-                "gate1": cmd_gate1, "gate2": cmd_gate2, "holdout": cmd_holdout, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
+                "gate1": cmd_gate1, "gate2": cmd_gate2, "holdout": cmd_holdout, "ledger": cmd_ledger, "run": cmd_run, "news": cmd_news, "fundamentals": cmd_fundamentals,
                 "serve": cmd_serve, "telegram-setup": cmd_telegram_setup, "context": cmd_context,
                 "ctrader-setup": cmd_ctrader_setup, "ctrader-auth": cmd_ctrader_auth,
                 "menubar": cmd_menubar, "excursions": cmd_excursions, "app": cmd_app,
