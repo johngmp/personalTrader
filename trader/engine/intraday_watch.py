@@ -27,12 +27,22 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from trader.config import IntradayConfig
 from trader.models import AssetClass, format_price, round_price
 
 PIP = 1e-4
+
+# Liveness keys. `last_pass` moves on every executed pass and nothing else; `downtime_reported` holds
+# the `last_pass` value an outage was already announced for, so a long gap is reported once rather than
+# on every pass for the rest of the day.
+LAST_PASS_KEY = "irv:last_pass"
+DOWNTIME_KEY = "irv:downtime_reported"
+# The watcher runs every minute, so an hour of silence is already far outside normal. Three hours is
+# chosen to sit comfortably above a laptop lid closed over lunch while still catching a missed session:
+# the London open to close is nine hours, so no whole session can hide under this.
+QUIET_GAP_HOURS = 3.0
 
 # What the out-of-sample test actually said about each pair, carried into the message because the two
 # are not equally believed and a signal that hides that is misleading. Same parameters for both, chosen
@@ -196,26 +206,77 @@ def _floor_note(p: Plan) -> str:
             f"A wider day makes that worse, not better.\n")
 
 
+def _expiry(p: Plan, cfg: IntradayConfig) -> tuple[str, str]:
+    """(local time, UTC time) the order must stop being valid, as strings for the ticket.
+
+    The tested rule holds nothing past the close, so an order still resting after it is a trade the
+    rule never took. Saying "cancel it at 16:00 UTC" asked the wrong thing of someone in Australia --
+    that is 3am, and nobody is cancelling anything at 3am. MT4 can expire the order itself, which is
+    the difference between a rule you have to stay up for and one you can sleep through, so the
+    message gives the time in the local zone AND in UTC rather than making it an arithmetic problem
+    on a phone.
+    """
+    hh, mm = (int(x) for x in cfg.close_utc.split(":"))
+    close = datetime.combine(p.day, time(hh, mm), tzinfo=timezone.utc)
+    local = close.astimezone()
+    same_day = local.date() == close.date()
+    return (f"{local:%H:%M} {local:%Z}" + ("" if same_day else f" {local:%a %d %b}"),
+            f"{close:%H:%M} UTC")
+
+
 def plan_text(p: Plan, cfg: IntradayConfig) -> str:
+    """The ticket, written for MetaTrader 4 on an iPhone, which is what it gets typed into.
+
+    Field names and the order of the steps are MT4's, not a generic description of a limit order. The
+    third line is the one that matters most and used to be missing: MT4 opens the trade screen on
+    "Market Execution", so a ticket filled in without changing that buys at the CURRENT rate instead
+    of resting at the trigger -- a different trade from the tested one, entered at the worst moment,
+    and the mistake is invisible because the ticket looks right apart from one dropdown.
+
+    Not cTrader: there is no Fill Policy field in MT4, and a message naming boxes that are not on the
+    screen teaches you to skim it.
+    """
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
+    local_close, utc_close = _expiry(p, cfg)
     return (
         f"📋 {p.symbol} plan · {p.day:%a %d %b}\n"
         f"London opened at {f(p.session_open)} · typical day {p.atr / PIP:.0f} pips\n"
         f"\n"
-        f"Open a BUY LIMIT ticket and fill it in exactly like this:\n"
+        f"In MT4: Quotes → {p.symbol.replace('/', '')} → Trade\n"
+        f"Change the type from Market Execution to BUY LIMIT, then:\n"
         f"   Volume       {p.lots:.2f}        ({p.sized_qty:,.0f} units)\n"
         f"   Price        {f(p.trigger)}\n"
         f"   Stop Loss    {f(p.stop)}\n"
         f"   Take Profit  {f(p.target)}\n"
+        f"   Expiry       {local_close}   ({utc_close})\n"
+        f"then tap PLACE.\n"
         f"\n"
         f"Risks ${p.risk_usd:,.2f} ({p.risk_pips:.0f} pips) to make {p.reward_pips:.0f} pips, if it "
         f"fills at all -- most days it will not.\n"
         f"{_floor_note(p)}"
-        f"Those two levels are the point of doing it this way: with them set, your broker closes the "
-        f"trade at whichever comes first and you need not watch anything. Cancel whatever is left of "
-        f"the order at {cfg.close_utc} UTC -- the tested rule holds nothing overnight.\n"
+        f"Set all four and you can put the phone down: the Stop Loss and Take Profit attach to the "
+        f"position the moment the order fills, your broker closes it at whichever comes first, and the "
+        f"Expiry cancels anything still resting at the close -- the tested rule holds nothing "
+        f"overnight. If your MT4 has no Expiry box, cancel it yourself by {local_close}.\n"
         f"Shadow test — {EVIDENCE.get(p.symbol, 'not yet measured on this pair')}. Not advice."
     )
+
+
+def downtime_text(previous: datetime, now: datetime, gap_h: float, skipped: list[date],
+                  cfg: IntradayConfig) -> str:
+    """What you missed, said the moment anything runs again."""
+    when = f"{gap_h:.0f} hours" if gap_h < 48 else f"{gap_h / 24:.0f} days"
+    head = (f"🔌 The forex watcher was not running for {when}\n"
+            f"Last pass {previous:%a %d %b %H:%M} UTC, back now at {now:%a %d %b %H:%M} UTC.\n")
+    if not skipped:
+        return head + ("No London open fell inside the gap, so no plan was missed. Nothing to do.")
+    days = ", ".join(f"{d:%a %d %b}" for d in skipped[:6]) + (" …" if len(skipped) > 6 else "")
+    return head + (
+        f"\n{len(skipped)} London open(s) went by with no plan sent: {days}\n"
+        f"Those are gone -- the levels are measured from the {cfg.open_utc} UTC open and cannot be "
+        f"reconstructed later, so there is nothing to place for them now.\n"
+        f"\nIf you have an MT4 order still resting from before the gap, cancel it: its levels were "
+        f"for a day that has ended.")
 
 
 def missed_text(cfg: IntradayConfig, day: date, minutes_in: float, symbol: str) -> str:
@@ -232,7 +293,8 @@ def missed_text(cfg: IntradayConfig, day: date, minutes_in: float, symbol: str) 
 def buy_text(p: Plan, rate: float) -> str:
     f = lambda v: format_price(v, AssetClass.FOREX)      # noqa: E731
     return (f"🟢 BUY {p.symbol} now — {f(rate)}\n"
-            f"Buy by Market, then set both levels on the position:\n"
+            f"In MT4: Quotes → {p.symbol.replace('/', '')} → Trade → Buy by Market, then tap the open "
+            f"position and set both levels on it:\n"
             f"   Volume       {p.lots:.2f}        ({p.sized_qty:,.0f} units)\n"
             f"   Stop Loss    {f(p.stop)}\n"
             f"   Take Profit  {f(p.target)}\n"
@@ -509,6 +571,72 @@ class IntradayWatcher:
                               self._key(day, "state", symbol), "done", was="in"):
             return [f"intraday SELL {symbol} not delivered; will retry"]
         return [f"intraday SELL {symbol} at {rate:.5f} ({why})"]
+
+    # --- liveness ------------------------------------------------------------------------------------
+
+    def note_pass(self) -> None:
+        """Record that a pass actually executed. Written on EVERY pass, before anything can fail.
+
+        The one fact nothing recorded. `launchctl` counts a run when it *attempts* the job, and a quiet
+        pass prints nothing, so a stale log and a stale database were the only symptoms of six agents
+        that had not executed for four days -- and both look exactly like a market with no setups. This
+        key is the difference: it has no network, market or price dependency, so if it is not moving,
+        the watcher is not running. Nothing else here can make that distinction.
+        """
+        self.journal.kv_set(LAST_PASS_KEY, self.clock().isoformat(timespec="seconds"))
+
+    def report_downtime(self) -> list[str]:
+        """Say how many London sessions went by while nothing was running.
+
+        `missed` only ever fires from inside a session, so a day when the Mac was asleep at 07:00 UTC
+        leaves NO row at all -- and a weekday with no row is invisible. Three quiet days and three days
+        of downtime were the same thing seen from the phone.
+
+        This cannot make a dead Mac speak; nothing on the Mac can. What it does is make the silence
+        unambiguous the moment anything runs again: you are told what you missed instead of having to
+        work out that you missed it. A dead-man's switch off the machine is the only way to be told
+        while it is still down, and that is a separate decision because it sends a ping off this
+        computer.
+        """
+        if not self.cfg.enabled:
+            return []
+        now = self.clock()
+        raw = self.journal.kv_get(LAST_PASS_KEY)
+        self.note_pass()
+        if not raw:
+            return []                          # first ever pass: nothing to compare against
+        try:
+            previous = datetime.fromisoformat(raw)
+        except ValueError:
+            return []
+        gap_h = (now - previous).total_seconds() / 3600
+        if gap_h < QUIET_GAP_HOURS:
+            return []
+        skipped = self._sessions_without_a_plan(previous, now)
+        if self.journal.kv_get(DOWNTIME_KEY) == raw:
+            return []                          # already reported this outage; do not repeat it hourly
+        self.journal.kv_set(DOWNTIME_KEY, raw)
+        self.notifier.send(downtime_text(previous, now, gap_h, skipped, self.cfg))
+        return [f"intraday: nothing ran for {gap_h:.0f}h; {len(skipped)} session(s) with no plan"]
+
+    def _sessions_without_a_plan(self, previous: datetime, now: datetime) -> list[date]:
+        """Weekdays between two passes whose London session opened and left no row behind.
+
+        A row of any kind counts -- plan, missed, gapped -- because the question is whether the system
+        was there, not whether it traded. Weekends are excluded because the market is shut, and the
+        current day only counts once its open is behind us.
+        """
+        hh, mm = (int(x) for x in self.cfg.open_utc.split(":"))
+        out: list[date] = []
+        day = previous.date()
+        while day <= now.date():
+            opened = datetime.combine(day, time(hh, mm), tzinfo=timezone.utc)
+            if day.weekday() < 5 and previous <= opened <= now:
+                if not any(self._get(day, name, s) for s in self.cfg.symbols
+                           for name in ("plan", "state")):
+                    out.append(day)
+            day += timedelta(days=1)
+        return out
 
     def sweep_unfinished(self) -> list[str]:
         """Days that ended while you were still holding, and were never told to sell.

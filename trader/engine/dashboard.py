@@ -763,9 +763,20 @@ def operational_health(settings: Settings, journal: Journal, now: datetime) -> l
                      "detail": f"newest is {hours:.0f}h old" + ("" if hours < 48 else " -- the 90-day "
                                "record Gate 2 needs lives in one file")})
 
-    last_run = age_hours(journal.kv_get("last_engine_run"))
+    last_run = age_hours(journal.kv_get(Journal.ENGINE_HEARTBEAT))
     rows.append({"name": "Engine heartbeat", "ok": last_run is not None and last_run < 1.0,
                  "detail": "never run" if last_run is None else f"last run {last_run:.1f}h ago"})
+
+    # The forex watcher gets its own row because it is the one output the user acts on by hand, and
+    # because its failure is the least visible on this page: a day with no setup and a day when nothing
+    # ran produce exactly the same empty signal list. `irv:last_pass` has no market or network
+    # dependency, so its age is the only honest answer to "is the watcher alive".
+    last_fx = age_hours(journal.kv_get("irv:last_pass"))
+    rows.append({"name": "Forex watcher heartbeat",
+                 "ok": last_fx is not None and last_fx < 1.0,
+                 "detail": "never run -- no forex message can be arriving" if last_fx is None else
+                           f"last pass {last_fx:.1f}h ago" +
+                           ("" if last_fx < 1.0 else " -- it runs every minute, so this is a stall")})
 
     ok, why = (True, "ok")
     try:

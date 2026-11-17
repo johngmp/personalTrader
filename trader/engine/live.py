@@ -193,7 +193,9 @@ class Engine:
 
     def _run(self) -> RunReport:
         report = RunReport(started=self.clock())
-        self.journal.kv_set("last_run", report.started.isoformat(timespec="seconds"))  # shown on dashboard/vault
+        # Via the constant, not the literal: the dashboard reads the same name from the same place.
+        self.journal.kv_set(Journal.ENGINE_HEARTBEAT,
+                            report.started.isoformat(timespec="seconds"))  # shown on dashboard/vault
         self.journal.kv_set(f"last_run:{self.broker.name}", report.started.isoformat(timespec="seconds"))
         steps: list[tuple[str, Callable[[RunReport], None]]] = [
             *([("telegram commands", self._handle_commands)] if self.handle_commands else []),

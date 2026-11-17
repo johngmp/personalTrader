@@ -109,15 +109,44 @@ def test_a_healthy_row_reads_as_healthy():
 
 
 def test_the_health_rows_cover_what_has_actually_failed_here(settings, journal):
-    """Not a wishlist. Each of these four has silently broken in this project's recorded history."""
+    """Not a wishlist. Every one of these has silently broken in this project's recorded history.
+
+    The forex watcher's own heartbeat is the newest, added 2026-11-17 after six launchd agents turned
+    out not to have executed since 2026-11-13. Nothing on this page could tell: the engine row covers
+    the engine, and a day with no forex setup produces exactly the same empty signal list as a day
+    nothing ran. It is a separate row because it is the one output acted on by hand.
+    """
     from datetime import datetime, timezone
 
     from trader.engine.dashboard import operational_health
 
     rows = operational_health(settings, journal, datetime.now(timezone.utc))
     names = {r["name"] for r in rows}
-    assert names == {"Alerts reaching your phone", "Journal backup", "Engine heartbeat", "Trial ledger"}
+    assert names == {"Alerts reaching your phone", "Journal backup", "Engine heartbeat",
+                     "Forex watcher heartbeat", "Trial ledger"}
     assert all(isinstance(r["ok"], bool) and r["detail"] for r in rows), "every row needs a verdict and a reason"
+
+
+def test_a_watcher_that_has_never_run_is_not_shown_as_healthy(settings, journal):
+    """The state the dashboard was in for four days while reporting nothing wrong."""
+    from datetime import datetime, timedelta, timezone
+
+    from trader.engine.dashboard import operational_health
+
+    now = datetime.now(timezone.utc)
+    row = next(r for r in operational_health(settings, journal, now)
+               if r["name"] == "Forex watcher heartbeat")
+    assert not row["ok"] and "never run" in row["detail"]
+
+    journal.kv_set("irv:last_pass", (now - timedelta(days=4)).isoformat(timespec="seconds"))
+    row = next(r for r in operational_health(settings, journal, now)
+               if r["name"] == "Forex watcher heartbeat")
+    assert not row["ok"] and "96.0h ago" in row["detail"] and "stall" in row["detail"]
+
+    journal.kv_set("irv:last_pass", (now - timedelta(minutes=2)).isoformat(timespec="seconds"))
+    row = next(r for r in operational_health(settings, journal, now)
+               if r["name"] == "Forex watcher heartbeat")
+    assert row["ok"], "a pass two minutes ago is healthy"
 
 
 def test_an_altered_trial_ledger_shows_up_on_the_dashboard(settings, journal):
@@ -136,15 +165,57 @@ def test_an_altered_trial_ledger_shows_up_on_the_dashboard(settings, journal):
 
 
 def test_a_stale_engine_is_not_reported_as_healthy(settings, journal):
+    """Written originally against `last_engine_run`, the same wrong key the dashboard read, so it
+    passed while the row was incapable of ever going green in production. A test that shares the bug
+    confirms the bug. It uses the shared constant now, which is what the engine writes."""
     from datetime import datetime, timedelta, timezone
 
     from trader.engine.dashboard import operational_health
+    from trader.journal.db import Journal
 
     now = datetime.now(timezone.utc)
-    journal.kv_set("last_engine_run", (now - timedelta(hours=9)).isoformat())
+    journal.kv_set(Journal.ENGINE_HEARTBEAT, (now - timedelta(hours=9)).isoformat())
     row = next(r for r in operational_health(settings, journal, now) if r["name"] == "Engine heartbeat")
     assert not row["ok"] and "9" in row["detail"]
 
-    journal.kv_set("last_engine_run", (now - timedelta(minutes=5)).isoformat())
+    journal.kv_set(Journal.ENGINE_HEARTBEAT, (now - timedelta(minutes=5)).isoformat())
     row = next(r for r in operational_health(settings, journal, now) if r["name"] == "Engine heartbeat")
     assert row["ok"]
+
+
+def test_the_engine_heartbeat_row_reads_the_key_the_engine_actually_writes(settings, journal):
+    """This row said "never run" from the day it was added, whatever the engine was doing.
+
+    `live.py` wrote `last_run`; the health card read `last_engine_run`, a name that exists only as a
+    field inside a JSON payload in `cli.py`. So on 2026-11-17, with the engine's real last run recorded
+    in the journal at 2026-11-14, the dashboard reported "never run" -- and during four days of actual
+    downtime it would have reported exactly the same thing. A row that cannot change is worse than no
+    row, because it occupies the space where the answer should be.
+
+    Driven through the WRITER rather than by writing the key here, so the two cannot drift apart again:
+    if the engine starts writing somewhere else, this fails.
+    """
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import operational_health
+    from trader.journal.db import Journal
+
+    now = datetime(2026, 11, 17, 2, 0, tzinfo=timezone.utc)
+    before = next(r for r in operational_health(settings, journal, now) if r["name"] == "Engine heartbeat")
+    assert not before["ok"] and "never run" in before["detail"]
+
+    journal.kv_set(Journal.ENGINE_HEARTBEAT, now.isoformat(timespec="seconds"))
+    after = next(r for r in operational_health(settings, journal, now) if r["name"] == "Engine heartbeat")
+    assert after["ok"], f"a run just now must read as healthy, got: {after['detail']}"
+
+
+def test_the_engine_writes_its_heartbeat_through_the_shared_constant():
+    """The structural half. A literal in either place is how the names drifted the first time."""
+    import inspect
+
+    from trader.engine import dashboard, live
+
+    assert 'kv_get("last_engine_run")' not in inspect.getsource(dashboard)
+    assert 'kv_set("last_run"' not in inspect.getsource(live)
+    assert "Journal.ENGINE_HEARTBEAT" in inspect.getsource(live)
+    assert "Journal.ENGINE_HEARTBEAT" in inspect.getsource(dashboard)

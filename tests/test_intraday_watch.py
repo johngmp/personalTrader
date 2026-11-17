@@ -82,7 +82,7 @@ def test_the_scale_never_uses_todays_own_range():
 def test_a_plan_goes_out_once_at_the_open_and_is_not_repeated(journal):
     w = _watcher(journal, "07:05", 1.16420)
     assert w.run_once() and len(w.notifier.sent) == 1
-    assert "Open a BUY LIMIT ticket" in w.notifier.sent[0]
+    assert "Market Execution to BUY LIMIT" in w.notifier.sent[0]
     w2 = _watcher(journal, "07:20", 1.16420)
     w2.run_once()
     assert w2.notifier.sent == [], "the plan must not be re-sent every fifteen minutes"
@@ -178,7 +178,7 @@ def test_a_day_whose_open_was_missed_is_skipped_not_improvised(journal):
     # dressed up as the open -- that would look identical to a real one and be a different trade.
     assert len(late.notifier.sent) == 1
     assert "No EUR/USD plan today" in late.notifier.sent[0]
-    assert "Open a BUY LIMIT ticket" not in late.notifier.sent[0]
+    assert "Market Execution to BUY LIMIT" not in late.notifier.sent[0]
 
     # And it stays skipped for the rest of that day, however many times the engine runs. The notice is
     # sent once: one message explaining the day, not one every fifteen minutes until midnight.
@@ -189,7 +189,7 @@ def test_a_day_whose_open_was_missed_is_skipped_not_improvised(journal):
 
 def test_a_plan_built_inside_the_window_is_still_allowed(journal):
     w = _watcher(journal, "07:25", 1.16420)
-    assert w.run_once() and "Open a BUY LIMIT ticket" in w.notifier.sent[0]
+    assert w.run_once() and "Market Execution to BUY LIMIT" in w.notifier.sent[0]
 
 
 def test_a_trade_left_open_by_a_missed_close_is_raised_not_forgotten(journal):
@@ -435,7 +435,7 @@ def test_a_day_that_never_triggered_says_so_at_the_close(journal):
     the system knew all day and never said. Silence should not need interpreting."""
     w = _watcher(journal, "07:05", 1.11919)
     w.run_once()
-    assert "Open a BUY LIMIT ticket" in w.notifier.sent[0]
+    assert "Market Execution to BUY LIMIT" in w.notifier.sent[0]
 
     quiet = _watcher(journal, "16:05", 1.12100)          # drifted up all day, never near the trigger
     actions = quiet.run_once() + quiet.close_out()
@@ -962,7 +962,7 @@ def test_an_undelivered_plan_is_rebuilt_and_sent_again(journal):
     assert lost._stored_plan(DAY, "EUR/USD") is None, "the stored plan must be undone too"
 
     again = _watcher(journal, "07:06", 1.16420)
-    assert again.run_once() and "Open a BUY LIMIT ticket" in again.notifier.sent[0]
+    assert again.run_once() and "Market Execution to BUY LIMIT" in again.notifier.sent[0]
 
 
 def test_a_failed_send_is_recorded_where_someone_can_read_it(journal):
@@ -992,3 +992,170 @@ def test_a_rollback_does_not_touch_a_claim_another_process_has_moved_on(journal)
     w.notifier.send = send_then_someone_else_moves_on
     w.run_once()
     assert journal.kv_get(key) == "done", "a stale rollback must not reopen the day"
+
+
+# --- silence must never be ambiguous -----------------------------------------------------------------
+#
+# Four days of downtime looked exactly like four quiet days. `launchctl` counts a run when it ATTEMPTS
+# the job and a quiet pass prints nothing, so a stale log and a stale database were the only symptoms
+# of six agents that had not executed since 2026-11-13 -- and both are also what a market with no
+# setups looks like. `missed` could not help: it only fires from inside a session, so a day the Mac
+# slept through the 07:00 UTC open leaves no row at all.
+
+def test_every_pass_records_that_it_actually_ran(journal):
+    """The key has no market, price or network dependency, which is the whole point: if it is not
+    moving, the watcher is not running, and nothing else here can tell you that."""
+    from trader.engine.intraday_watch import LAST_PASS_KEY
+
+    w = _watcher(journal, "20:00", 1.16420)        # outside the session: a pass that does nothing
+    assert w.run_once() == []
+    w.report_downtime()
+    assert journal.kv_get(LAST_PASS_KEY) == "2026-10-07T20:00:00+00:00"
+
+
+def test_a_long_gap_is_reported_with_the_sessions_it_swallowed(journal):
+    """What actually happened: 2026-11-13 to 2026-11-17, three weekday opens, nothing sent."""
+    from trader.engine.intraday_watch import LAST_PASS_KEY
+
+    journal.kv_set(LAST_PASS_KEY, "2026-11-13T06:00:00+00:00")
+    s = load_settings().model_copy(update={"intraday": CFG})
+    back = datetime.fromisoformat("2026-11-17T06:00:00+00:00")
+    w = IntradayWatcher(s, journal, Spy(), clock=lambda: back, price=lambda _s: 1.16,
+                        ranges=RANGES)
+
+    out = w.report_downtime()
+    assert out and "96h" in out[0]
+    message = w.notifier.sent[0]
+    assert "was not running for 4 days" in message
+    # Mon 16, Fri 13 and Mon 16 are weekdays; Sat 14 and Sun 15 must not be counted.
+    assert "Fri 13 Nov" in message and "Mon 16 Nov" in message
+    assert "Sat 14" not in message and "Sun 15" not in message
+
+
+def test_a_weekend_gap_is_not_reported_as_missed_sessions(journal):
+    """The market is shut. Crying wolf every Monday is how a check gets ignored."""
+    from trader.engine.intraday_watch import LAST_PASS_KEY
+
+    journal.kv_set(LAST_PASS_KEY, "2026-11-14T06:00:00+00:00")       # Saturday
+    s = load_settings().model_copy(update={"intraday": CFG})
+    monday = datetime.fromisoformat("2026-11-16T06:30:00+00:00")     # before Monday's 07:00 open
+    w = IntradayWatcher(s, journal, Spy(), clock=lambda: monday, price=lambda _s: 1.16, ranges=RANGES)
+
+    w.report_downtime()
+    assert "No London open fell inside the gap" in w.notifier.sent[0]
+
+
+def test_a_session_that_did_send_a_plan_is_not_counted_as_missed(journal):
+    """Otherwise a laptop asleep for one evening would report the day's own successful plan as lost."""
+    from trader.engine.intraday_watch import LAST_PASS_KEY
+
+    planned = _watcher(journal, "07:05", 1.16420)
+    planned.run_once()                                   # Wed 7 Oct gets a real plan
+    assert planned._stored_plan(DAY, "EUR/USD") is not None
+
+    journal.kv_set(LAST_PASS_KEY, "2026-10-07T06:00:00+00:00")
+    s = load_settings().model_copy(update={"intraday": CFG})
+    later = datetime.fromisoformat("2026-10-07T18:00:00+00:00")
+    w = IntradayWatcher(s, journal, Spy(), clock=lambda: later, price=lambda _s: 1.16, ranges=RANGES)
+
+    w.report_downtime()
+    assert "No London open fell inside the gap" in w.notifier.sent[0], w.notifier.sent[0]
+
+
+def test_an_outage_is_reported_once_and_not_on_every_pass(journal):
+    """It runs every minute. Reporting the same four-day gap sixty times an hour would make you mute
+    the channel, which costs you the messages this whole project exists to send.
+
+    This passes on the heartbeat alone: the first pass writes `last_pass`, so the second sees a
+    one-minute gap. The race below is what the separate dedupe key is actually for.
+    """
+    from trader.engine.intraday_watch import LAST_PASS_KEY
+
+    journal.kv_set(LAST_PASS_KEY, "2026-11-13T06:00:00+00:00")
+    s = load_settings().model_copy(update={"intraday": CFG})
+    spy = Spy()
+    for minute in (0, 1, 2):
+        at = datetime.fromisoformat(f"2026-11-17T06:0{minute}:00+00:00")
+        IntradayWatcher(s, journal, spy, clock=lambda at=at: at, price=lambda _s: 1.16,
+                        ranges=RANGES).report_downtime()
+    assert len(spy.sent) == 1, f"announced {len(spy.sent)} times"
+
+
+def test_two_processes_seeing_the_same_outage_announce_it_once(journal):
+    """The reason `downtime_reported` exists, and the case the heartbeat cannot cover.
+
+    The watcher runs in two places -- its own minute-by-minute agent and the engine's fifteen-minute
+    pass -- so both can read the same stale `last_pass` before either writes a new one. The heartbeat
+    then does not separate them and only the dedupe key does. Simulated by putting `last_pass` back to
+    what the second process would still have been holding.
+
+    Verified by deleting the dedupe branch: without it this announces twice.
+    """
+    from trader.engine.intraday_watch import LAST_PASS_KEY
+
+    stale = "2026-11-13T06:00:00+00:00"
+    journal.kv_set(LAST_PASS_KEY, stale)
+    s = load_settings().model_copy(update={"intraday": CFG})
+    spy = Spy()
+
+    def pass_at(at: str):
+        when = datetime.fromisoformat(at)
+        IntradayWatcher(s, journal, spy, clock=lambda: when, price=lambda _s: 1.16,
+                        ranges=RANGES).report_downtime()
+
+    pass_at("2026-11-17T06:00:00+00:00")
+    assert len(spy.sent) == 1
+    journal.kv_set(LAST_PASS_KEY, stale)         # the other process had already read the old value
+    pass_at("2026-11-17T06:07:00+00:00")
+    assert len(spy.sent) == 1, "the same outage must not be announced by both processes"
+
+
+def test_a_short_gap_is_not_an_outage(journal):
+    """A pass can be a few minutes late without anything being wrong."""
+    from trader.engine.intraday_watch import LAST_PASS_KEY
+
+    journal.kv_set(LAST_PASS_KEY, "2026-10-07T07:00:00+00:00")
+    w = _watcher(journal, "08:30", 1.16420)
+    assert w.report_downtime() == [] and w.notifier.sent == []
+
+
+def test_the_first_ever_pass_does_not_claim_an_outage(journal):
+    w = _watcher(journal, "07:05", 1.16420)
+    assert w.report_downtime() == [] and w.notifier.sent == []
+
+
+# --- the ticket has to match the app it gets typed into ----------------------------------------------
+
+def test_the_ticket_tells_you_to_change_the_order_type(journal):
+    """MT4 opens the trade screen on Market Execution. A ticket filled in without changing that buys
+    at the CURRENT rate instead of resting at the trigger -- a different trade from the tested one,
+    taken at the worst possible moment, and invisible because everything else on the ticket is right.
+    """
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    msg = w.notifier.sent[0]
+    assert "Market Execution to BUY LIMIT" in msg
+    assert "In MT4: Quotes → EURUSD → Trade" in msg, "name the path, not just the order type"
+    assert "Fill Policy" not in msg, "that is a cTrader field; MT4 has no such box"
+
+
+def test_the_expiry_is_given_in_local_time_not_only_utc(journal):
+    """The close is 16:00 UTC, which is 3am in Sydney. Asking someone to cancel an order at 3am is
+    asking them not to follow the rule; MT4 can expire it for them, so the message gives the time in
+    the zone they live in and lets the broker do the work."""
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    msg = w.notifier.sent[0]
+    assert "16:00 UTC" in msg, "keep UTC for the record"
+    assert "Expiry" in msg
+    local = next(line for line in msg.splitlines() if line.strip().startswith("Expiry"))
+    assert "UTC)" in local and local.count(":") >= 2, f"needs a local time beside the UTC one: {local}"
+
+
+def test_the_ticket_still_carries_what_the_evidence_actually_says(journal):
+    """+4.0%/yr, not the +17.2% a broken backtest deadline produced. A ticket that hides how thin the
+    edge is would be the most expensive line in this file."""
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    assert "+4.0%/yr out of sample over 34 trades" in w.notifier.sent[0]
+    assert "Not advice" in w.notifier.sent[0]

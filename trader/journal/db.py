@@ -435,6 +435,14 @@ class Journal:
                                         (value, key, expect))
             return cur.rowcount > 0
 
+    # The engine's heartbeat key. A constant because it was not one: `live.py` wrote "last_run" and the
+    # dashboard's health card read "last_engine_run" -- a name that exists only as a field inside a JSON
+    # payload in cli.py. So the "Engine heartbeat" row had reported "never run" since the day it was
+    # added, whatever the engine was doing, and the one row that should have shown four days of downtime
+    # could not have shown anything at all. Two things that must agree, with nothing checking that they
+    # did: the same shape as most bugs found in this project.
+    ENGINE_HEARTBEAT = "last_run"
+
     def kv_del_if(self, key: str, expect: str) -> bool:
         """Delete `key` only if it still holds `expect`. True if this caller won.
 

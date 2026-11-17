@@ -951,7 +951,10 @@ def cmd_watch_fx(settings, args) -> int:
     try:
         notifier = from_env()
         watcher = IntradayWatcher(settings, journal, notifier)
-        did = watcher.sweep_unfinished() + watcher.run_once() + watcher.close_out()
+        # First, because it is the only thing that reports on the passes that did NOT happen, and it
+        # must run whether or not the rest of this pass works.
+        did = watcher.report_downtime()
+        did += watcher.sweep_unfinished() + watcher.run_once() + watcher.close_out()
         for what in did:
             journal.log(what, level="info")
             print(f"{datetime.now():%Y-%m-%d %H:%M} {what}")
