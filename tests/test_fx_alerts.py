@@ -465,3 +465,81 @@ def test_the_group_finder_returns_nothing_when_only_a_private_chat_exists():
 
     _, chat = find_group_chat("tok", client=httpx.Client(transport=httpx.MockTransport(transport)))
     assert chat is None
+
+
+# --- the setup commands must not answer a network blip with a traceback ------------------------------
+#
+# `send` was given retries this morning because one timeout to api.telegram.org was losing a forex
+# ticket. The setup commands were left making bare calls, and the first blip after that printed sixty
+# lines of httpx traceback -- to someone whose next step was creating a Telegram group on a phone.
+
+def _flaky_client(responses, calls=None):
+    import httpx
+
+    seq, n = list(responses), calls if calls is not None else {"n": 0}
+
+    def transport(request):
+        n["n"] += 1
+        item = seq[min(n["n"] - 1, len(seq) - 1)]
+        if isinstance(item, Exception):
+            raise item
+        if request.url.path.endswith("/getMe"):
+            return httpx.Response(200, json={"ok": True, "result": {"username": "mybot"}})
+        return item
+
+    return httpx.Client(transport=httpx.MockTransport(transport)), n
+
+
+def test_one_timed_out_setup_request_is_retried_rather_than_crashing(monkeypatch):
+    import httpx
+
+    from trader.notify import telegram
+    from trader.notify.telegram import find_group_chat
+
+    monkeypatch.setattr(telegram.time, "sleep", lambda _s: None)
+    client, calls = _flaky_client([
+        httpx.ConnectTimeout("handshake timed out"),
+        httpx.Response(200, json={"ok": True, "result": [
+            {"my_chat_member": {"chat": {"id": -500, "type": "group", "title": "Forex tickets"}}}]}),
+    ])
+    username, chat = find_group_chat("tok", client=client)
+    assert username == "mybot" and chat["id"] == -500
+    assert calls["n"] > 1, "it must actually have retried"
+
+
+def test_a_network_failure_is_a_sentence_not_a_traceback(monkeypatch):
+    """What the user saw: `httpx.ConnectTimeout: _ssl.c:1015: The handshake operation timed out` under
+    forty lines of frames. `TelegramUnreachable` subclasses ValueError because both setup commands
+    already print one and exit 1, so the readable path was there and simply unused."""
+    import httpx
+    import pytest
+
+    from trader.notify import telegram
+    from trader.notify.telegram import TelegramUnreachable, find_group_chat
+
+    monkeypatch.setattr(telegram.time, "sleep", lambda _s: None)
+    client, _ = _flaky_client([httpx.ConnectTimeout("handshake timed out")])
+    with pytest.raises(TelegramUnreachable, match="Nothing was changed"):
+        find_group_chat("tok", client=client)
+    assert issubclass(TelegramUnreachable, ValueError), "the CLI's except ValueError must catch it"
+
+
+def test_a_bad_token_is_still_reported_immediately_and_not_retried(monkeypatch):
+    """A 401 means the token is wrong. Three attempts cannot fix that and the message must stay the
+    one that tells you where to get a new one."""
+    import httpx
+    import pytest
+
+    from trader.notify import telegram
+    from trader.notify.telegram import find_chat
+
+    monkeypatch.setattr(telegram.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def transport(_request):
+        calls["n"] += 1
+        return httpx.Response(401, json={"description": "Unauthorized"})
+
+    with pytest.raises(ValueError, match="@BotFather"):
+        find_chat("tok", client=httpx.Client(transport=httpx.MockTransport(transport)))
+    assert calls["n"] == 1, "a 401 must not be retried"

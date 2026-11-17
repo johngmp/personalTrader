@@ -219,16 +219,47 @@ def from_env() -> Notifier:
     return NullNotifier(reason=f"{missing} not found in {PROJECT_ROOT / '.env'}", misconfigured=True)
 
 
+class TelegramUnreachable(ValueError):
+    """Telegram could not be reached. A ValueError so the setup commands, which already print one and
+    exit 1, report it as a plain sentence instead of a traceback."""
+
+
+def _get_json(client: httpx.Client, url: str, params: dict | None = None,
+              sleep: Callable[[float], None] = time.sleep) -> dict:
+    """A GET that survives one bad moment, and explains itself when it does not.
+
+    `send` was given retries this morning because a single timeout to api.telegram.org was losing a
+    forex ticket. The setup commands were left making bare calls, and the first blip after that put
+    sixty lines of httpx traceback on screen in place of "the network dropped, try again" -- for
+    someone whose next move was to create a Telegram group on a phone. Same three attempts, same
+    reasoning: this host times out often enough here that the project's own logs show it.
+    """
+    last: Exception | None = None
+    for attempt in range(SEND_ATTEMPTS):
+        try:
+            r = client.get(url, params=params)
+        except httpx.RequestError as exc:
+            last = exc
+        else:
+            if r.status_code == 401:
+                raise ValueError("Telegram rejected the bot token. Copy it again from @BotFather.")
+            if r.status_code < 500:
+                r.raise_for_status()
+                return r.json()
+            last = httpx.HTTPError(f"{r.status_code} from telegram")
+        if attempt < SEND_ATTEMPTS - 1:
+            sleep(RETRY_WAIT_S[0])
+    raise TelegramUnreachable(
+        f"Could not reach Telegram after {SEND_ATTEMPTS} tries ({type(last).__name__}). "
+        "Nothing was changed. Check the connection and run the same command again.")
+
+
 def find_chat(token: str, client: httpx.Client | None = None) -> tuple[str, dict | None]:
     """(bot username, the most recent private chat that messaged the bot, if any)."""
     client = client or httpx.Client(timeout=10)
     base = f"https://api.telegram.org/bot{token}"
-    me = client.get(f"{base}/getMe")
-    if me.status_code == 401:
-        raise ValueError("Telegram rejected the bot token. Copy it again from @BotFather.")
-    me.raise_for_status()
-    username = me.json()["result"]["username"]
-    updates = client.get(f"{base}/getUpdates", params={"timeout": 0}).json().get("result", [])
+    username = _get_json(client, f"{base}/getMe")["result"]["username"]
+    updates = _get_json(client, f"{base}/getUpdates", {"timeout": 0}).get("result", [])
     chats = [u["message"]["chat"] for u in updates if u.get("message", {}).get("chat", {}).get("type") == "private"]
     return username, (chats[-1] if chats else None)
 
@@ -247,12 +278,8 @@ def find_group_chat(token: str, client: httpx.Client | None = None) -> tuple[str
     """
     client = client or httpx.Client(timeout=10)
     base = f"https://api.telegram.org/bot{token}"
-    me = client.get(f"{base}/getMe")
-    if me.status_code == 401:
-        raise ValueError("Telegram rejected the bot token. Copy it again from @BotFather.")
-    me.raise_for_status()
-    username = me.json()["result"]["username"]
-    updates = client.get(f"{base}/getUpdates", params={"timeout": 0}).json().get("result", [])
+    username = _get_json(client, f"{base}/getMe")["result"]["username"]
+    updates = _get_json(client, f"{base}/getUpdates", {"timeout": 0}).get("result", [])
     wanted = {"group", "supergroup", "channel"}
     found = [chat for u in updates
              for chat in (((u.get("message") or {}).get("chat")),
