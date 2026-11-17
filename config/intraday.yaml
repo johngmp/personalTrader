@@ -58,9 +58,14 @@ close_utc: "16:00"     # flat before the thin late session
 capital_usd: 175
 risk_pct: 1.0
 
-# The smallest volume the broker will accept, in lots. UNCONFIRMED: asked on 2026-11-14 the answer was
-# "0.01 I think", and the only ticket we have a picture of had 0.02 in the volume box. It matters more
-# than any other number in this file, because at $175 it is what sets the position size on every trade
-# -- at 0.02 the risk doubles, to 2.8% of the account on a typical day and 6.2% on a wide one.
-# Check it by holding the "-0.01" stepper down until the volume stops falling.
+# The smallest volume the broker will accept, in lots. CONFIRMED 2026-11-17 by you, after being carried
+# as "0.01 I think" since 2026-11-14 -- the screenshot we had showed 0.02 in the volume box, which is a
+# ticket someone filled in, not the floor.
+#
+# It matters more than any other number in this file, because at $175 it is what sets the position size
+# on every trade rather than the risk rule: 1% of $175 over a median 24 pip stop is 723 units and the
+# floor is 1,000. So every plan is 0.01 lots and the risk is whatever that costs -- $1.20 on a quiet
+# day, $5.40 on a wide one, 0.7% to 3.1% of the account, about 1.4% typically. Now that it is
+# confirmed, that range is the real risk being run and not a guess. Had it been 0.02 it would have been
+# 2.8% typical and 6.2% on a wide day, which is why this was worth asking about rather than assuming.
 min_lot: 0.01
