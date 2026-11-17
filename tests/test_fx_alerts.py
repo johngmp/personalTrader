@@ -354,3 +354,114 @@ def test_a_send_that_failed_exits_non_zero_and_names_the_error(tmp_path):
     assert code == 1
     assert channel == "FAILING ConnectTimeout: timed out"
     assert any("did not reach Telegram" in m and "timed out" in m for m in errors), errors
+
+
+# --- forex tickets get their own chat ----------------------------------------------------------------
+#
+# These are the only messages the user acts on by hand -- a ticket to type into MetaTrader 4 on a phone
+# -- and they arrived in the same conversation as every paper fill, stop and warning the engine sends.
+# On a busy day the one message that needs doing is one of forty that do not.
+
+def test_forex_messages_go_to_the_forex_chat_when_one_is_configured(monkeypatch):
+    from trader.notify.telegram import Telegram, fx_from_env
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setenv("TELEGRAM_FX_CHAT_ID", "222")
+    notifier = fx_from_env()
+    assert isinstance(notifier, Telegram) and notifier.chat_id == "222"
+
+
+def test_forex_messages_fall_back_to_the_main_chat_rather_than_going_silent(monkeypatch):
+    """A half-finished setup must not stop the tickets arriving. The whole point of this path is that
+    it keeps working -- going quiet because an optional key is missing would be the worst outcome of
+    a change meant to make the messages easier to see."""
+    from trader.notify.telegram import Telegram, fx_from_env
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.delenv("TELEGRAM_FX_CHAT_ID", raising=False)
+    notifier = fx_from_env()
+    assert isinstance(notifier, Telegram) and notifier.chat_id == "111"
+
+
+def test_the_engines_own_pass_uses_the_forex_chat_too():
+    """Half a split is worse than none: the same ticket would arrive in a different place depending on
+    whether the minute agent or the engine's fifteen-minute pass happened to catch the level."""
+    import inspect
+
+    from trader.engine.live import Coordinator
+
+    src = inspect.getsource(Coordinator._intraday)
+    assert "self.fx_notifier" in src, "_intraday must hand the watcher the forex notifier"
+    assert "self.journal, self.notifier" not in src, "not the engine's main notifier"
+
+
+def test_the_coordinator_defaults_the_forex_chat_to_the_main_one(settings, tmp_path):
+    """Every existing caller and test built a Coordinator with one notifier. They must behave exactly
+    as before, or this change would quietly redirect messages in code nobody updated."""
+    from trader.brokers.sim import SimBroker
+    from trader.engine.live import Coordinator, Engine
+    from trader.journal.db import Journal
+    from trader.notify.telegram import NullNotifier
+
+    journal = Journal(tmp_path / "j.db")
+    try:
+        only = NullNotifier()
+        engines = [Engine(settings, SimBroker(cash=1_000, name="alpaca"), journal, {}, notifier=only)]
+        assert Coordinator(settings, journal, engines, only).fx_notifier is only
+    finally:
+        journal.close()
+
+
+def test_a_dry_run_does_not_message_the_forex_chat():
+    """`--dry-run` means send nothing. Reaching for the real forex chat there would post a ticket from
+    a run explicitly not meant to send anything -- and unlike the engine's own alerts, a forex ticket
+    is an instruction to go and place a trade."""
+    import inspect
+
+    from trader import cli
+
+    src = inspect.getsource(cli.cmd_run)
+    assert "notifier if args.dry_run else fx_from_env()" in src
+
+
+def test_the_group_finder_sees_groups_and_ignores_the_private_chat():
+    """`find_chat` deliberately only looks at private chats, so the forex split needs its own finder.
+    It reads `my_chat_member` as well as messages: that is the update Telegram sends when the bot is
+    ADDED to a group, and it arrives even with privacy mode on. Relying on an ordinary group message
+    would fail silently for any bot left on the default privacy setting, which is most of them.
+    """
+    import httpx
+
+    from trader.notify.telegram import find_group_chat
+
+    updates = {"ok": True, "result": [
+        {"message": {"chat": {"id": 111, "type": "private", "first_name": "Jo"}}},
+        {"my_chat_member": {"chat": {"id": -500, "type": "group", "title": "Forex tickets"}}},
+    ]}
+
+    def transport(request):
+        if request.url.path.endswith("/getMe"):
+            return httpx.Response(200, json={"ok": True, "result": {"username": "mybot"}})
+        return httpx.Response(200, json=updates)
+
+    username, chat = find_group_chat("tok", client=httpx.Client(transport=httpx.MockTransport(transport)))
+    assert username == "mybot"
+    assert chat["id"] == -500 and chat["title"] == "Forex tickets"
+
+
+def test_the_group_finder_returns_nothing_when_only_a_private_chat_exists():
+    """So setup can print the three steps instead of silently wiring the forex chat to the main one."""
+    import httpx
+
+    from trader.notify.telegram import find_group_chat
+
+    def transport(request):
+        if request.url.path.endswith("/getMe"):
+            return httpx.Response(200, json={"ok": True, "result": {"username": "mybot"}})
+        return httpx.Response(200, json={"ok": True, "result": [
+            {"message": {"chat": {"id": 111, "type": "private"}}}]})
+
+    _, chat = find_group_chat("tok", client=httpx.Client(transport=httpx.MockTransport(transport)))
+    assert chat is None

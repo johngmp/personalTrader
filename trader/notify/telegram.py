@@ -13,6 +13,8 @@ from typing import Callable, Protocol
 import httpx
 from dotenv import load_dotenv
 
+from pathlib import Path
+
 from trader.config import PROJECT_ROOT
 
 log = logging.getLogger(__name__)
@@ -165,6 +167,35 @@ class Telegram:
         return commands
 
 
+def _notifier_for(token: str, chat_id: str, missing: str, env_path: Path) -> Notifier:
+    if token and chat_id:
+        return Telegram(token, chat_id)
+    return NullNotifier(reason=f"{missing} not found in {env_path}", misconfigured=True)
+
+
+def fx_from_env() -> Notifier:
+    """The notifier the FOREX messages go to: its own chat when one is configured, else the main one.
+
+    These are the only messages the user is expected to act on by hand -- a ticket to type into
+    MetaTrader on a phone -- and they were arriving in the same conversation as every paper fill, stop
+    and warning the engine produces. On a busy day the one message that needs doing is buried in forty
+    that do not, which is a good way to miss it.
+
+    Falls back to the main chat rather than going silent, because a half-finished setup must not stop
+    the tickets arriving; the whole point of this path is that it keeps working. The fallback is logged
+    so it is visible rather than assumed -- `trader telegram-setup --fx` is what sets the split up.
+    """
+    load_dotenv(PROJECT_ROOT / ".env")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    fx_chat = os.environ.get("TELEGRAM_FX_CHAT_ID", "").strip()
+    if token and fx_chat:
+        return Telegram(token, fx_chat)
+    if token and os.environ.get("TELEGRAM_CHAT_ID", "").strip():
+        log.info("TELEGRAM_FX_CHAT_ID not set; forex messages go to the main chat. "
+                 "Run `trader telegram-setup --fx` to give them their own.")
+    return from_env()
+
+
 def from_env() -> Notifier:
     """The notifier the credentials in .env describe -- loading .env here, not trusting a caller to.
 
@@ -200,6 +231,35 @@ def find_chat(token: str, client: httpx.Client | None = None) -> tuple[str, dict
     updates = client.get(f"{base}/getUpdates", params={"timeout": 0}).json().get("result", [])
     chats = [u["message"]["chat"] for u in updates if u.get("message", {}).get("chat", {}).get("type") == "private"]
     return username, (chats[-1] if chats else None)
+
+
+def find_group_chat(token: str, client: httpx.Client | None = None) -> tuple[str, dict | None]:
+    """(bot username, the most recent GROUP or CHANNEL the bot can see, if any).
+
+    Separate from `find_chat`, which deliberately looks only at private chats: the main chat is the
+    user's own conversation with the bot, and a group turning up there would be wrong. The forex split
+    is the opposite case and needs the groups.
+
+    Reads `my_chat_member` as well as messages, because that is the update Telegram sends when the bot
+    is ADDED to a group -- and it arrives whether or not the bot has privacy mode on. Relying on an
+    ordinary group message would fail silently for anyone whose bot has the default privacy setting,
+    since the bot never receives those.
+    """
+    client = client or httpx.Client(timeout=10)
+    base = f"https://api.telegram.org/bot{token}"
+    me = client.get(f"{base}/getMe")
+    if me.status_code == 401:
+        raise ValueError("Telegram rejected the bot token. Copy it again from @BotFather.")
+    me.raise_for_status()
+    username = me.json()["result"]["username"]
+    updates = client.get(f"{base}/getUpdates", params={"timeout": 0}).json().get("result", [])
+    wanted = {"group", "supergroup", "channel"}
+    found = [chat for u in updates
+             for chat in (((u.get("message") or {}).get("chat")),
+                          ((u.get("channel_post") or {}).get("chat")),
+                          ((u.get("my_chat_member") or {}).get("chat")))
+             if chat and chat.get("type") in wanted]
+    return username, (found[-1] if found else None)
 
 
 def set_env_value(env_path, key: str, value: str) -> None:

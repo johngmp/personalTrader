@@ -1096,8 +1096,15 @@ class Coordinator:
     """Runs one Engine per broker under a single lock, then writes the shared outputs once."""
 
     def __init__(self, settings: Settings, journal: Journal, engines: list[Engine], notifier: Notifier,
-                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
+                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 fx_notifier: Notifier | None = None) -> None:
         self.settings, self.journal, self.engines, self.notifier, self.clock = settings, journal, engines, notifier, clock
+        # Forex messages have their own destination when one is configured. Defaults to the main
+        # notifier so every existing caller and test behaves exactly as before; `cmd_run` passes the
+        # real one. Without this the split would only cover `trader watch-fx` and the engine's own
+        # fifteen-minute pass would keep posting tickets into the busy chat -- the same message arriving
+        # in two different places depending on which schedule happened to catch the level.
+        self.fx_notifier = fx_notifier or notifier
         for engine in engines:
             engine.handle_commands = False
             engine.shared_outputs = False
@@ -1184,7 +1191,7 @@ class Coordinator:
             return
         if self.engines[0].kill_switch.active:
             return
-        watcher = IntradayWatcher(self.settings, self.journal, self.notifier, clock=self.clock)
+        watcher = IntradayWatcher(self.settings, self.journal, self.fx_notifier, clock=self.clock)
         # Swept first and unconditionally: a trade stranded by a missed 16:00 close has to be raised
         # whatever today is, including a weekend, and before a new day's plan is built over the top.
         did = watcher.sweep_unfinished() + watcher.run_once(report) + watcher.close_out()

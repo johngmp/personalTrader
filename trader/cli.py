@@ -376,7 +376,7 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     from trader.brokers.dry_run import DryRunBroker
     from trader.engine.brokers_setup import configured_brokers
     from trader.engine.live import Coordinator, Engine, EngineBusy
-    from trader.notify.telegram import NullNotifier, from_env
+    from trader.notify.telegram import NullNotifier, from_env, fx_from_env
 
     notifier = from_env()
     if args.dry_run:
@@ -395,7 +395,11 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
             brokers = [(b if b.name == "shadow" else DryRunBroker(b), bars) for b, bars in brokers]
         engines = [Engine(settings, b, journal, bars, notifier=notifier) for b, bars in brokers]  # type: ignore[arg-type]
         try:
-            reports = Coordinator(settings, journal, engines, notifier).run_once()
+            # A dry run keeps the NullNotifier for forex too: `notifier` is already the discarding
+            # one in that case, and reaching for the real forex chat here would send a ticket from a
+            # run that is explicitly not meant to send anything.
+            fx = notifier if args.dry_run else fx_from_env()
+            reports = Coordinator(settings, journal, engines, notifier, fx_notifier=fx).run_once()
         except EngineBusy as exc:
             print(f"{datetime.now():%Y-%m-%d %H:%M} skipped: {exc}")
             return 0
@@ -671,16 +675,18 @@ def cmd_ctrader_auth(settings: Settings, _: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_telegram_setup(settings: Settings, _: argparse.Namespace) -> int:
+def cmd_telegram_setup(settings: Settings, args: argparse.Namespace) -> int:
     import os
 
     from dotenv import load_dotenv
 
-    from trader.notify.telegram import Telegram, find_chat, set_env_value
+    from trader.notify.telegram import Telegram, find_chat, find_group_chat, set_env_value
 
     env_path = settings.root / ".env"
     load_dotenv(env_path, override=True)
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if getattr(args, "fx", False):
+        return _telegram_setup_fx(env_path, token, find_group_chat, set_env_value, Telegram)
     if not token:
         print("No TELEGRAM_BOT_TOKEN in .env yet.\n"
               "1. In Telegram, message @BotFather, send /newbot, pick a name and a username ending in 'bot'.\n"
@@ -706,6 +712,48 @@ def cmd_telegram_setup(settings: Settings, _: argparse.Namespace) -> int:
         "Commands: /status · /halt (stop new orders) · /resume")
     print(f"Connected bot @{username} to {who}'s chat. Saved TELEGRAM_CHAT_ID to .env and sent a test message.\n"
           "The engine uses it from its next run (within 15 minutes).")
+    return 0
+
+
+def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Telegram) -> int:
+    """Give the forex tickets their own Telegram conversation.
+
+    Worth a command rather than a line in a README: the forex messages are the only ones acted on by
+    hand, and they arrived in the same chat as every paper fill, stop and warning the engine sends. The
+    one message that needed doing was one of forty that did not.
+
+    The group has to be made in Telegram by the user -- a bot cannot create one and cannot add itself.
+    What this does is the part that is easy to get wrong: find the right chat id and write it to .env
+    without it being typed out or pasted anywhere.
+    """
+    if not token:
+        print("No TELEGRAM_BOT_TOKEN in .env yet. Run `trader telegram-setup` first.")
+        return 1
+    try:
+        username, chat = find_group_chat(token)
+    except ValueError as exc:
+        print(exc)
+        return 1
+    if chat is None:
+        print("I can't see a group yet. Three steps in Telegram, on your phone:\n"
+              "  1. New Group. Call it something like 'Forex tickets'.\n"
+              f"  2. Add @{username} to it as a member.\n"
+              f"  3. Send any message in the group, e.g. /start@{username}\n"
+              "Then run this again. (Adding the bot is usually enough on its own -- Telegram tells it "
+              "about that even with privacy mode on -- but a message makes it certain.)")
+        return 1
+    chat_id = str(chat["id"])
+    set_env_value(env_path, "TELEGRAM_FX_CHAT_ID", chat_id)
+    title = chat.get("title") or chat_id
+    Telegram(token, chat_id).send(
+        "📍 Forex tickets will arrive here from now on.\n"
+        "Only EUR/USD plans you place by hand in MetaTrader 4 -- a ticket at the London open, a note "
+        "when the day is done, and a warning if the watcher stops running. Everything else the system "
+        "does stays in the other chat.\n"
+        "Nothing here is placed for you, and nothing here is advice.")
+    print(f"Forex messages now go to '{title}' ({chat_id}).\n"
+          f"Saved TELEGRAM_FX_CHAT_ID to .env and sent a test message there.\n"
+          f"In use from the next pass -- `trader watch-fx` runs every minute.")
     return 0
 
 
@@ -937,7 +985,7 @@ def cmd_watch_fx(settings, args) -> int:
     replacing the advice in the plan to leave an order sitting there.
     """
     from trader.engine.intraday_watch import IntradayWatcher
-    from trader.notify.telegram import from_env
+    from trader.notify.telegram import fx_from_env
     from trader.risk.kill_switch import KillSwitch
 
     if not settings.intraday.enabled:
@@ -949,7 +997,7 @@ def cmd_watch_fx(settings, args) -> int:
         return 0
     journal = Journal(settings.journal_path)
     try:
-        notifier = from_env()
+        notifier = fx_from_env()
         watcher = IntradayWatcher(settings, journal, notifier)
         # First, because it is the only thing that reports on the passes that did NOT happen, and it
         # must run whether or not the rest of this pass works.
@@ -1040,7 +1088,10 @@ def main(argv: list[str] | None = None) -> int:
     p_fund.add_argument("--json", action="store_true")
     p_serve = sub.add_parser("serve", help="dashboard at http://localhost:8050")
     p_serve.add_argument("--port", type=int, default=8050)
-    sub.add_parser("telegram-setup", help="connect the Telegram bot in .env and send a test message")
+    p_tg = sub.add_parser("telegram-setup",
+                          help="connect the Telegram bot in .env and send a test message")
+    p_tg.add_argument("--fx", action="store_true",
+                      help="give the forex tickets their own group chat, separate from engine alerts")
     sub.add_parser("ctrader-setup", help="store the cTrader Open API app credentials in .env")
     sub.add_parser("ctrader-auth", help="grant the app access to your cTrader demo account")
     sub.add_parser("menubar", help="account P&L in the Mac menu bar")
