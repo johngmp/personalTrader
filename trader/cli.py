@@ -686,7 +686,11 @@ def cmd_telegram_setup(settings: Settings, args: argparse.Namespace) -> int:
     load_dotenv(env_path, override=True)
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if getattr(args, "fx", False):
-        return _telegram_setup_fx(env_path, token, find_group_chat, set_env_value, Telegram)
+        journal = Journal(settings.journal_path)
+        try:
+            return _telegram_setup_fx(env_path, token, find_group_chat, set_env_value, Telegram, journal)
+        finally:
+            journal.close()
     if not token:
         print("No TELEGRAM_BOT_TOKEN in .env yet.\n"
               "1. In Telegram, message @BotFather, send /newbot, pick a name and a username ending in 'bot'.\n"
@@ -715,7 +719,7 @@ def cmd_telegram_setup(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
-def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Telegram) -> int:
+def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Telegram, journal) -> int:
     """Give the forex tickets their own Telegram conversation.
 
     Worth a command rather than a line in a README: the forex messages are the only ones acted on by
@@ -726,6 +730,10 @@ def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Tel
     What this does is the part that is easy to get wrong: find the right chat id and write it to .env
     without it being typed out or pasted anywhere.
     """
+    import json
+
+    from trader.notify.telegram import LAST_GROUP_KEY
+
     if not token:
         print("No TELEGRAM_BOT_TOKEN in .env yet. Run `trader telegram-setup` first.")
         return 1
@@ -734,6 +742,15 @@ def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Tel
     except ValueError as exc:
         print(exc)
         return 1
+    if chat is None:
+        # The engine polls getUpdates every fifteen minutes and that CONFIRMS the queue, after which
+        # Telegram deletes it. So a group added more than one engine run ago is invisible to the live
+        # look above, however correctly it was set up. `poll_commands` writes down any group it is
+        # shown precisely so this can still be answered. See `Telegram._remember_group`.
+        remembered = journal.kv_get(LAST_GROUP_KEY)
+        if remembered:
+            chat = json.loads(remembered)
+            print(f"Telegram had already dropped the update, but the engine had noted the group.")
     if chat is None:
         print("I can't see a group yet. Three steps in Telegram, on your phone:\n"
               "  1. New Group. Call it something like 'Forex tickets'.\n"

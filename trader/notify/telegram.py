@@ -5,6 +5,7 @@ Commands are only accepted from the configured chat, so nobody else can /halt or
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -27,6 +28,10 @@ MAX_LEN = 3900  # Telegram's limit is 4096 characters
 SEND_ATTEMPTS = 3
 RETRY_WAIT_S = (1.0, 3.0)
 MAX_RETRY_AFTER_S = 10.0   # cap on Telegram's own 429 retry_after, so rate limiting cannot hang a pass
+
+# Where `poll_commands` records a group it was shown, for `telegram-setup --fx` to read afterwards.
+# See `Telegram._remember_group` for why this cannot be re-read from Telegram instead.
+LAST_GROUP_KEY = "telegram_last_group"
 
 
 class KV(Protocol):
@@ -157,6 +162,7 @@ class Telegram:
         commands = []
         for update in updates:
             offset = max(offset, update["update_id"] + 1)
+            self._remember_group(update, store)
             message = update.get("message") or {}
             if str(message.get("chat", {}).get("id")) != self.chat_id:
                 continue  # ignore anyone else who finds the bot
@@ -165,6 +171,28 @@ class Telegram:
                 commands.append(text[0].split("@")[0].lower())
         store.kv_set("telegram_offset", str(offset))
         return commands
+
+    @staticmethod
+    def _remember_group(update: dict, store: KV) -> None:
+        """Write down any group this bot is shown, because this poll is about to destroy the evidence.
+
+        `getUpdates` with an offset CONFIRMS everything before it, and Telegram then deletes those
+        updates for good. The engine polls every fifteen minutes, so the `my_chat_member` update that
+        says "the bot was added to a group" -- the one `telegram-setup --fx` needs -- gets consumed and
+        discarded by a caller that has no interest in it. Whoever created the group would then be told
+        "I can't see a group yet" no matter how correctly they had followed the instructions, and the
+        only cure would be luck about which ran first.
+
+        So the consumer records it. Whichever path sees the group first, the id survives: cooperation
+        instead of a race over the same one-shot queue. Commands are still only accepted from the main
+        chat -- being remembered here does not grant a group the right to halt the engine.
+        """
+        for chat in ((update.get("message") or {}).get("chat"),
+                     (update.get("channel_post") or {}).get("chat"),
+                     (update.get("my_chat_member") or {}).get("chat")):
+            if chat and chat.get("type") in {"group", "supergroup", "channel"}:
+                store.kv_set(LAST_GROUP_KEY, json.dumps(
+                    {"id": chat["id"], "title": chat.get("title"), "type": chat["type"]}))
 
 
 def _notifier_for(token: str, chat_id: str, missing: str, env_path: Path) -> Notifier:

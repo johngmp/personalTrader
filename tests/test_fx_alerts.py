@@ -543,3 +543,120 @@ def test_a_bad_token_is_still_reported_immediately_and_not_retried(monkeypatch):
     with pytest.raises(ValueError, match="@BotFather"):
         find_chat("tok", client=httpx.Client(transport=httpx.MockTransport(transport)))
     assert calls["n"] == 1, "a 401 must not be retried"
+
+
+# --- the engine must not eat the update the forex setup needs ----------------------------------------
+#
+# `getUpdates` with an offset CONFIRMS everything before it and Telegram then deletes those updates for
+# good. The engine polls every fifteen minutes, so the `my_chat_member` update saying "the bot was added
+# to a group" is consumed and discarded by a caller with no interest in it. Whoever made the group would
+# be told "I can't see a group yet" however correctly they followed the steps, and the only cure would
+# be luck about which ran first.
+
+class _Store(dict):
+    def kv_get(self, key, default=None):
+        return self.get(key, default)
+
+    def kv_set(self, key, value):
+        self[key] = value
+
+
+def _poll_once(updates):
+    import httpx
+
+    from trader.notify.telegram import Telegram
+
+    bot = Telegram("tok", "111", client=httpx.Client(transport=httpx.MockTransport(
+        lambda _r: httpx.Response(200, json={"ok": True, "result": updates}))))
+    store = _Store()
+    commands = bot.poll_commands(store)
+    return commands, store
+
+
+def test_polling_for_commands_writes_down_any_group_it_is_shown():
+    """The whole fix: the consumer records what it is about to destroy."""
+    import json
+
+    from trader.notify.telegram import LAST_GROUP_KEY
+
+    _, store = _poll_once([
+        {"update_id": 1,
+         "my_chat_member": {"chat": {"id": -500, "type": "supergroup", "title": "Forex tickets"}}},
+    ])
+    noted = json.loads(store[LAST_GROUP_KEY])
+    assert noted["id"] == -500 and noted["title"] == "Forex tickets"
+
+
+def test_a_remembered_group_is_still_there_after_the_queue_is_gone():
+    """End to end on the real failure: the engine polls first, Telegram then returns nothing, and the
+    setup must still be able to answer. Without the record it would say "I can't see a group yet"
+    forever."""
+    import json
+
+    import httpx
+
+    from trader.notify.telegram import LAST_GROUP_KEY, find_group_chat
+
+    _, store = _poll_once([
+        {"update_id": 7,
+         "my_chat_member": {"chat": {"id": -900, "type": "group", "title": "FX"}}},
+    ])
+
+    # Telegram now has nothing left to give: the poll above confirmed the queue.
+    def empty(request):
+        if request.url.path.endswith("/getMe"):
+            return httpx.Response(200, json={"ok": True, "result": {"username": "mybot"}})
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    _, live = find_group_chat("tok", client=httpx.Client(transport=httpx.MockTransport(empty)))
+    assert live is None, "the live look must genuinely come up empty, or this proves nothing"
+    assert json.loads(store[LAST_GROUP_KEY])["id"] == -900
+
+
+def test_being_remembered_does_not_let_a_group_halt_the_engine():
+    """The group is recorded, not trusted. Commands stay restricted to the configured chat, or anyone
+    who found the bot could add it to a group and send /halt."""
+    commands, store = _poll_once([
+        {"update_id": 1, "message": {"chat": {"id": -500, "type": "group", "title": "FX"},
+                                     "text": "/halt"}},
+    ])
+    assert commands == [], "a command from a group must be ignored"
+    from trader.notify.telegram import LAST_GROUP_KEY
+    assert LAST_GROUP_KEY in store, "but the group is still noted"
+
+
+def test_a_command_from_the_real_chat_still_works():
+    """The guard on the guard: if this broke, /halt would stop working and nothing above would notice."""
+    commands, _ = _poll_once([
+        {"update_id": 1, "message": {"chat": {"id": 111, "type": "private"}, "text": "/halt"}},
+    ])
+    assert commands == ["/halt"]
+
+
+def test_the_main_private_chat_is_never_recorded_as_the_forex_group():
+    """The failure this guards is silent and total: if private chats were eligible, your own chat with
+    the bot would be written down as 'the group', `--fx` would set TELEGRAM_FX_CHAT_ID to the chat it
+    was meant to move messages OUT of, and the split would read as configured while changing nothing.
+
+    Ordered with the private message LAST, which is the realistic sequence -- message the bot, add it
+    to a group, message it again -- and the one where a too-loose filter overwrites the right answer.
+    """
+    import json
+
+    from trader.notify.telegram import LAST_GROUP_KEY
+
+    _, store = _poll_once([
+        {"update_id": 1, "my_chat_member": {"chat": {"id": -500, "type": "group", "title": "FX"}}},
+        {"update_id": 2, "message": {"chat": {"id": 111, "type": "private"}, "text": "hi"}},
+    ])
+    assert json.loads(store[LAST_GROUP_KEY])["id"] == -500, "the group must survive a later private message"
+
+
+def test_nothing_is_recorded_when_only_a_private_chat_is_seen():
+    """So setup prints the three steps rather than wiring forex to the main chat."""
+    from trader.notify.telegram import LAST_GROUP_KEY
+
+    _, store = _poll_once([
+        {"update_id": 1, "message": {"chat": {"id": 111, "type": "private"}, "text": "/status"}},
+    ])
+    assert LAST_GROUP_KEY not in store
