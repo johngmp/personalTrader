@@ -752,12 +752,19 @@ def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Tel
             chat = json.loads(remembered)
             print(f"Telegram had already dropped the update, but the engine had noted the group.")
     if chat is None:
-        print("I can't see a group yet. Three steps in Telegram, on your phone:\n"
-              "  1. New Group. Call it something like 'Forex tickets'.\n"
-              f"  2. Add @{username} to it as a member.\n"
-              f"  3. Send any message in the group, e.g. /start@{username}\n"
-              "Then run this again. (Adding the bot is usually enough on its own -- Telegram tells it "
-              "about that even with privacy mode on -- but a message makes it certain.)")
+        # The bot name is printed BARE, with no @ in front of it. That is what goes in Telegram's
+        # search box, and a terminal that renders a leading @ as the full-width U+FF20 -- which this
+        # one does -- produces a string that matches nothing when pasted. A copyable name is the whole
+        # job of this message.
+        print("I can't see a group yet. On your phone, in Telegram:\n"
+              "  1. Tap the pencil (new message) -> New Group\n"
+              f"  2. In the search box type:  {username}\n"
+              "     (no @ in front) and tap the bot to select it, then Next\n"
+              "  3. Name it 'Forex tickets' and tap Create\n"
+              f"  4. In the new group, send:  /start@{username}\n"
+              "\nThen run this command again. Step 4 matters: a plain group message does not reach a "
+              "bot whose privacy mode is on, which is the default, but a command addressed to it "
+              "always does.")
         return 1
     chat_id = str(chat["id"])
     set_env_value(env_path, "TELEGRAM_FX_CHAT_ID", chat_id)
