@@ -139,6 +139,47 @@ def test_trailing_stop_moves_up_with_the_price(world):
     assert sum(1 for o in world["broker"].get_open_orders() if o.symbol == "SPY") == 1
 
 
+def test_a_kill_switch_blocks_a_stop_move_the_same_way_it_blocks_a_new_stop(world):
+    """A trailed stop is still an order the engine derives, so it must go through the same gate check
+    as every other one -- including the kill switch, which blocks _place_stop today."""
+    world["engine"].run_once()
+    broker, journal = world["broker"], world["journal"]
+    before = _stops(broker)["SPY"]
+    price = broker.prices["SPY"].price
+    # Force a higher target stop directly (below price, so _protect wants to move it, not exit), rather
+    # than relying on the trend strategy's own trailing logic -- kill switch also skips _decide, which
+    # is where that logic runs, so a strong up day alone would never reach _move_stop in this test.
+    journal.upsert_position_state("S1", "SPY", stop=before + (price - before) * 0.5)
+    KillSwitch(world["settings"].kill_switch_path).engage("test")
+    report = world["step"](None, hours=0.25)
+    assert _stops(broker)["SPY"] == before  # the resting stop was not moved
+    # Still exactly one resting SPY order: blocked before the broker call, not left half-replaced.
+    assert sum(1 for o in broker.get_open_orders() if o.symbol == "SPY") == 1
+    assert any("kill switch" in p for p in report.problems)
+
+
+def test_a_broker_error_moving_one_stop_does_not_stop_the_others(world):
+    """One symbol's stop-move failing at the broker must not abort protective stops for the rest --
+    the same guarantee `_decide` already gives each sleeve."""
+    world["engine"].run_once()
+    broker = world["broker"]
+    before = _stops(broker)
+    real_replace_stop = broker.replace_stop
+
+    def flaky_replace_stop(broker_order_id, client_order_id, stop_price, limit_price=None):
+        if broker.orders[broker_order_id].symbol == "SPY":
+            raise RuntimeError("connection reset")
+        return real_replace_stop(broker_order_id, client_order_id, stop_price, limit_price)
+
+    broker.replace_stop = flaky_replace_stop
+    report = world["step"]({s: 0.03 for s in START})  # a strong up day: every symbol's stop should trail
+    after = _stops(broker)
+    assert after["SPY"] == before["SPY"]  # SPY's move failed at the broker and was not applied
+    assert any("SPY" in p for p in report.problems)
+    for symbol in ("QQQ", "BTC/USD", "ETH/USD"):
+        assert after[symbol] > before[symbol]  # every other position's stop still trailed up
+
+
 def test_stop_fill_closes_the_position_cleanly(world):
     world["engine"].run_once()
     stop = _stops(world["broker"])["QQQ"]

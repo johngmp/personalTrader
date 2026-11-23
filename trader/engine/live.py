@@ -37,7 +37,6 @@ from trader.models import (
     OrderType,
     Side,
     format_price,
-    new_client_order_id,
     round_price,
 )
 from trader.notify.telegram import Notifier, NullNotifier
@@ -439,7 +438,12 @@ class Engine:
                 self._place_stop(sleeve_id, symbol, qty, stop, asset_class, report)  # type: ignore[arg-type]
             elif stop > (order_row["stop_price"] or 0) * (1 + STOP_MOVE_MIN):
                 if asset_class is AssetClass.CRYPTO or market.is_open:
-                    self._move_stop(order_row, stop, asset_class, report)  # type: ignore[arg-type]
+                    try:  # one symbol's stop-move problem must not stop protecting the others
+                        self._move_stop(order_row, stop, asset_class, report)  # type: ignore[arg-type]
+                    except Exception as exc:
+                        msg = f"{sleeve_id} {symbol} stop move failed: {type(exc).__name__}: {exc}"
+                        report.problems.append(msg)
+                        self.journal.log(msg, level="error")
                 # else: the market is closed; the broker would only queue the change until the open,
                 # so move it on the first run after the open instead (same effect, no half-replaced orders).
 
@@ -891,23 +895,27 @@ class Engine:
                                    f"{result.error or result.decision.summary()}")
 
     def _move_stop(self, order_row, stop: float, asset_class: AssetClass, report: RunReport) -> None:
-        """Trailing stop moved up: replace the resting order (moving a stop up only reduces risk)."""
-        new_id = new_client_order_id(order_row["sleeve_id"])
+        """Trailing stop moved up: replace the resting order (moving a stop up only reduces risk).
+
+        Goes through the executor/risk gate exactly like `_place_stop`, instead of calling the broker
+        directly -- a trailed stop is still an order the engine derives, so the kill switch and every
+        other gate check must apply to it the same way they apply to placing one.
+        """
+        sleeve_id, symbol = order_row["sleeve_id"], order_row["symbol"]
         limit = round(stop * (1 - CRYPTO_STOP_LIMIT_GAP), 2) if asset_class is AssetClass.CRYPTO else None
-        bo = self.broker.replace_stop(order_row["broker_order_id"], new_id, stop, limit)
-        order_type = OrderType(order_row["order_type"])
-        replacement = OrderRequest(sleeve_id=order_row["sleeve_id"], symbol=order_row["symbol"], side=Side.SELL,
-                                   qty=order_row["qty"], order_type=order_type,
-                                   stop_price=round_price(stop, asset_class),
-                                   limit_price=limit, reason="protective stop (trailed up)", client_order_id=new_id)
-        self.journal.record_order(replacement, asset_class.value)
-        self.journal.record_broker_order(self.broker.name, bo)
-        # The old order stays tracked until the broker confirms the replacement (Alpaca reports it as
-        # "replaced", which sync maps to canceled). If it somehow filled first, the fill is still recorded.
-        self.journal.mark_order(order_row["client_order_id"], OrderStatus.SUBMITTED, "replace requested")
-        self.journal.upsert_position_state(order_row["sleeve_id"], order_row["symbol"], stop_order_id=new_id)
-        report.actions.append(f"{order_row['sleeve_id']} trailed {order_row['symbol']} stop up to "
-                              f"{format_price(stop, asset_class)}")
+        order = OrderRequest(sleeve_id=sleeve_id, symbol=symbol, side=Side.SELL, qty=order_row["qty"],
+                             order_type=OrderType(order_row["order_type"]), stop_price=round_price(stop, asset_class),
+                             limit_price=limit, reason="protective stop (trailed up)")
+        result = self.executor.submit_replace(order, order_row["broker_order_id"])
+        if result.decision.approved and not result.error:
+            # The old order stays tracked until the broker confirms the replacement (Alpaca reports it as
+            # "replaced", which sync maps to canceled). If it somehow filled first, the fill is still recorded.
+            self.journal.mark_order(order_row["client_order_id"], OrderStatus.SUBMITTED, "replace requested")
+            self.journal.upsert_position_state(sleeve_id, symbol, stop_order_id=order.client_order_id)
+            report.actions.append(f"{sleeve_id} trailed {symbol} stop up to {format_price(stop, asset_class)}")
+        else:
+            report.problems.append(f"could not move {sleeve_id} stop for {symbol}: "
+                                   f"{result.error or result.decision.summary()}")
 
     def _cancel_stop(self, state) -> None:
         if not state["stop_order_id"]:

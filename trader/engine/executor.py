@@ -93,18 +93,11 @@ class Executor:
         return None
 
     def submit(self, order: OrderRequest, wait_for_fill_s: float = 10.0) -> ExecutionResult:
-        asset_class = self.settings.asset_class(order.symbol)
-        self.journal.record_order(order, asset_class.value if asset_class else None)
-
-        decision = self.gate.check(order, self.build_context(order))
-        self.journal.record_decision(order.client_order_id, decision)
-        if decision.halt_account and not self.kill_switch.active:
-            self.kill_switch.engage("account drawdown limit hit; review, then run `trader resume`")
-            self.journal.log("kill switch engaged by drawdown limit", level="critical")
-        result = ExecutionResult(order=order, decision=decision)
-        if not decision.approved:
+        result = self._propose(order)
+        if not result.decision.approved:
             return result
 
+        asset_class = self.settings.asset_class(order.symbol)
         try:
             result.broker_order = self.broker.submit_order(order, asset_class)  # type: ignore[arg-type]
         except Exception as exc:  # broker rejected or network failure: record it, never retry blindly
@@ -115,6 +108,38 @@ class Executor:
         self.journal.record_broker_order(self.broker.name, result.broker_order)
         result.broker_order, result.fills = self._track_fills(result.broker_order, order.sleeve_id, wait_for_fill_s)
         return result
+
+    def submit_replace(self, order: OrderRequest, broker_order_id: str) -> ExecutionResult:
+        """Risk-gate a trailed stop exactly like `submit`, then replace the resting order at the broker
+        instead of placing a new one alongside it -- the two can't rest together (the broker has already
+        reserved the shares behind the first one), and cancelling the old one first would leave the
+        position briefly unprotected if the new one were then rejected."""
+        result = self._propose(order)
+        if not result.decision.approved:
+            return result
+
+        try:
+            result.broker_order = self.broker.replace_stop(broker_order_id, order.client_order_id,
+                                                            order.stop_price, order.limit_price)
+        except Exception as exc:  # broker rejected or network failure: record it, never retry blindly
+            result.error = str(exc)
+            self.journal.record_broker_error(order.client_order_id, result.error)
+            self.journal.log(f"broker error for {order.client_order_id}: {exc}", level="error")
+            return result
+        self.journal.record_broker_order(self.broker.name, result.broker_order)
+        return result
+
+    def _propose(self, order: OrderRequest) -> ExecutionResult:
+        """Journal the proposal and risk-gate it; callers submit or replace at the broker themselves."""
+        asset_class = self.settings.asset_class(order.symbol)
+        self.journal.record_order(order, asset_class.value if asset_class else None)
+
+        decision = self.gate.check(order, self.build_context(order))
+        self.journal.record_decision(order.client_order_id, decision)
+        if decision.halt_account and not self.kill_switch.active:
+            self.kill_switch.engage("account drawdown limit hit; review, then run `trader resume`")
+            self.journal.log("kill switch engaged by drawdown limit", level="critical")
+        return ExecutionResult(order=order, decision=decision)
 
     def account(self):
         """The broker account, with the day's starting equity filled in from the journal if the broker
