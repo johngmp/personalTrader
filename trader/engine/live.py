@@ -1057,6 +1057,83 @@ def status_text(engines: list[Engine]) -> str:
     return "\n".join(lines)
 
 
+def today_text(settings: Settings, journal: Journal, now: datetime | None = None) -> str:
+    """Today's hand-executed forex plan, in reply to /today -- the same data the dashboard's "today's
+    plan" card shows, reused rather than recomputed."""
+    from trader.engine.dashboard import PIP, _IRV_STATE, intraday_today
+
+    d = intraday_today(settings, journal, now)
+    if not d:
+        return "No forex plan: the intraday watcher is switched off or has no symbols configured."
+    lines = ["📋 Today's forex plan"]
+    for pair in d["pairs"]:
+        sym, plan, state, rate, entry = pair["symbol"], pair["plan"], pair["state"], pair["rate"], pair["entry"]
+        _, _, headline = _IRV_STATE.get(state, _IRV_STATE["none"])
+        if plan is None:
+            lines.append(f"{sym}: {headline}.")
+            continue
+        fx = settings.asset_class(sym)
+        f = lambda v: format_price(v, fx)  # noqa: E731
+        line = f"{sym}: {headline}. Buy {f(plan.trigger)} · stop {f(plan.stop)} · target {f(plan.target)}"
+        if rate is not None:
+            if state == "waiting":
+                line += f" · now {f(rate)} ({(rate - plan.trigger) / PIP:+.1f} pips away)"
+            elif state == "in" and entry:
+                line += f" · now {f(rate)}, bought {f(entry)} ({(rate - entry) / PIP:+.1f} pips)"
+            else:
+                line += f" · now {f(rate)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _open_line(label: str, symbol: str, qty: float, entry: float | None, stop: float | None,
+               pnl: float | None, asset_class: AssetClass, note: str = "") -> str:
+    f = lambda v: format_price(v, asset_class)  # noqa: E731
+    bits = [f"{label} {symbol}: {qty:g}"]
+    if entry is not None:
+        bits.append(f"@ {f(entry)}")
+    bits.append(f"stop {f(stop)}" if stop is not None else "stop none")
+    bits.append(f"pnl {pnl:+,.0f}" if pnl is not None else "pnl n/a")
+    return " · ".join(bits) + note
+
+
+def open_positions_text(engines: list[Engine], settings: Settings, journal: Journal) -> str:
+    """Per-position detail in reply to /open -- what /status rolls up into one per-sleeve figure.
+
+    Includes the forex watcher's "in" trade, which holds nothing at any broker because it is executed
+    by hand; without it, the one trade you are actually meant to be acting on would be the one missing
+    from a command whose whole point is to list what is open.
+    """
+    from trader.engine.dashboard import intraday_today
+
+    lines = []
+    for engine in engines:
+        for state in engine._my_states():
+            symbol = state["symbol"]
+            qty = engine.journal.sleeve_holdings(state["sleeve_id"]).get(symbol, 0.0)
+            if abs(qty) < DUST_QTY:
+                continue
+            ac = settings.asset_class(symbol)
+            try:
+                price = engine.broker.get_quote(symbol, ac).price
+            except Exception:
+                price = None
+            entry = state["entry_price"]
+            pnl = qty * (price - entry) if price is not None and entry is not None else None
+            lines.append(_open_line(state["sleeve_id"], symbol, qty, entry, state["stop"], pnl, ac))
+    today = intraday_today(settings, journal)
+    for pair in today.get("pairs", []):
+        if pair["state"] == "in" and pair["plan"] and pair["entry"]:
+            plan, entry, rate = pair["plan"], pair["entry"], pair["rate"]
+            qty = plan.sized_qty
+            pnl = qty * (rate - entry) if rate is not None else None
+            lines.append(_open_line("fx (hand-traded)", pair["symbol"], qty, entry, plan.stop, pnl,
+                                    AssetClass.FOREX, note=" · no broker position"))
+    if not lines:
+        return "No open positions."
+    return "📂 Open positions\n" + "\n".join(lines)
+
+
 def handle_commands(notifier: Notifier, journal: Journal, kill_switch: KillSwitch, engines: list[Engine]) -> list[str]:
     done = []
     for command in notifier.poll_commands(journal):
@@ -1068,8 +1145,12 @@ def handle_commands(notifier: Notifier, journal: Journal, kill_switch: KillSwitc
             notifier.send("✅ Kill switch OFF. Trading resumes on the next run.")
         elif command == "/status":
             notifier.send(status_text(engines))
+        elif command == "/today":
+            notifier.send(today_text(engines[0].settings, journal))
+        elif command == "/open":
+            notifier.send(open_positions_text(engines, engines[0].settings, journal))
         else:
-            notifier.send("Commands: /status · /halt · /resume")
+            notifier.send("Commands: /status · /open · /today · /halt · /resume")
         done.append(f"telegram {command}")
     return done
 
