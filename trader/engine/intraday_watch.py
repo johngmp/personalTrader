@@ -472,6 +472,46 @@ class IntradayWatcher:
         raw = self._get(day, "entry", symbol)
         return float(raw) if raw else None
 
+    # --- what you actually did, as reported over Telegram -------------------------------------------
+    #
+    # Everything above this point is the system's own side of the trade: the rate it quoted when it
+    # said BUY or SELL. It has no broker connection and never will -- this pair is hand-traded in MT4
+    # -- so without this it never learns what you actually got, or whether you traded at all. `/taken
+    # <price>` and `/skipped` in the forex chat record that, against the one open signal for the day.
+    # Same kv-keyed pattern as `plan`, `state` and `entry`: one more column, not a new mechanism.
+
+    def report(self, day: date, symbol: str) -> tuple[str, float | None] | None:
+        """(\"taken\", price) or (\"skipped\", None), or None when nothing has been reported yet.
+
+        Three states, not two -- "no response" has to be distinguishable from "skipped", or a signal
+        nobody has answered yet would read on the dashboard as one that was deliberately passed on.
+        """
+        raw = self._get(day, "report", symbol)
+        if raw is None:
+            return None
+        if raw == "skipped":
+            return ("skipped", None)
+        _, _, price = raw.partition(":")
+        return ("taken", float(price))
+
+    def record_taken(self, day: date, symbol: str, price: float) -> None:
+        self._set(day, "report", f"taken:{price}", symbol)
+
+    def record_skipped(self, day: date, symbol: str) -> None:
+        self._set(day, "report", "skipped", symbol)
+
+    def open_symbol(self, day: date) -> str | None:
+        """The symbol with a signal open today, or None when there is nothing to confirm.
+
+        "Open" means a plan was built -- `/taken` and `/skipped` are answers to "what did you do about
+        today's ticket", and a ticket went out the moment the plan did, whatever its state has moved
+        on to since.
+        """
+        for symbol in self.cfg.symbols:
+            if self._get(day, "plan", symbol):
+                return symbol
+        return None
+
     def _store_plan(self, p: Plan) -> None:
         self._set(p.day, "plan", f"{p.session_open},{p.atr},{p.trigger},{p.stop},{p.target},{p.qty}",
                   p.symbol)

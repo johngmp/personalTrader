@@ -595,6 +595,19 @@ def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
         else:
             live = f'<p class="irv-now">Now <b>{f(rate)}</b></p>'
 
+    # Your report, next to the system's own quote -- not instead of it. The system only ever knows the
+    # rate it quoted; it has no broker connection to this pair at all, so whether you actually took the
+    # trade, and at what price, is otherwise invisible here and lives only in a Telegram chat.
+    report = pair.get("report")
+    if report is not None:
+        kind, price = report
+        reported = (f'<p class="irv-reported">You reported: <b>skipped</b></p>' if kind == "skipped" else
+                    f'<p class="irv-reported">You reported: <b>taken at {f(price)}</b></p>')
+    elif state in ("in", "done") and plan is not None:
+        reported = '<p class="irv-reported subtle">No /taken or /skipped reply yet</p>'
+    else:
+        reported = ""
+
     note = (f"Flat by {close_utc} UTC either way." if state in ("waiting", "in")
             else "The session is over for today." if not in_session else "")
     evidence = pair.get("evidence")
@@ -603,7 +616,7 @@ def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
     return (f'<div class="plan irv irv-{html.escape(state)}"><div class="plan-head">'
             f'<b>{html.escape(sym)}</b><span class="pill {tone}">{word}</span></div>'
             f'<p class="irv-head">{html.escape(headline)}</p>'
-            f'<dl class="plan-rows">{rows}</dl>{live}{foot}</div>')
+            f'<dl class="plan-rows">{rows}</dl>{live}{reported}{foot}</div>')
 
 
 def intraday_card(settings: Settings, journal: Journal, now: datetime | None = None) -> str:
@@ -672,7 +685,7 @@ def intraday_today(settings: Settings, journal: Journal, now: datetime | None = 
             rate = None
         entry = watcher._entry(day, symbol)
         pairs.append({"symbol": symbol, "plan": plan, "state": state, "rate": rate, "entry": entry,
-                      "evidence": EVIDENCE.get(symbol)})
+                      "report": watcher.report(day, symbol), "evidence": EVIDENCE.get(symbol)})
     # The session is quoted in UTC everywhere else because that is what the watcher works in, but the
     # person reading this is in Sydney, where 07:00 UTC is 6pm the same evening. A reader should not
     # have to do that arithmetic to know when the next message is due.
@@ -1711,6 +1724,10 @@ CSS += (
     "margin:0 0 22px}\n"
     ".irv .irv-head{margin:.1rem 0 .6rem;font-size:var(--t-md);color:var(--ink2)}\n"
     ".irv .irv-now{margin:.55rem 0 0;font-size:var(--t-md);color:var(--ink2)}\n"
+    # What you actually did, distinct from the system's own quote above it -- never a replacement for
+    # it, because the two can and do disagree (a fill a touch above the mid, a ticket typed late).
+    ".irv .irv-reported{margin:.35rem 0 0;font-size:var(--t-md);color:var(--ink2)}\n"
+    ".irv .irv-reported.subtle{color:var(--muted)}\n"
     # Rule 4: space goes to what needs attention. A live trade is the only state you can still get
     # wrong, so it is the only one that raises its voice -- a left edge, not a colour wash, because a
     # wash behind these figures is the gradient-under-a-number problem rule 3 exists to prevent.

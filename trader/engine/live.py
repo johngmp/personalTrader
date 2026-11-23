@@ -1074,6 +1074,47 @@ def handle_commands(notifier: Notifier, journal: Journal, kill_switch: KillSwitc
     return done
 
 
+def handle_fx_commands(notifier: Notifier, journal: Journal, settings: Settings, now: datetime) -> list[str]:
+    """`/taken <price>` and `/skipped`, read from the forex chat and recorded against today's open
+    signal. See IntradayWatcher.report for why this is its own storage, not a repurposed `state`.
+
+    Polled separately from `handle_commands` on purpose: forex tickets have their own chat so the one
+    message that needs a reply is not buried in the engine's main traffic, and these commands are
+    answers to that chat specifically -- typing `/taken` into the main chat should not do this, any
+    more than `/halt` typed into the forex chat should touch the kill switch.
+    """
+    from trader.engine.intraday_watch import IntradayWatcher
+
+    poll = getattr(notifier, "poll_commands_full", None)
+    if poll is None:
+        return []  # a notifier with no command channel of its own -- e.g. the main one, reused as-is
+    done = []
+    for command, args in poll(journal):
+        if command not in ("/taken", "/skipped"):
+            continue
+        watcher = IntradayWatcher(settings, journal, notifier, clock=lambda: now)
+        day = now.date()
+        symbol = watcher.open_symbol(day)
+        if symbol is None:
+            notifier.send("Nothing to confirm — no forex signal is open today.")
+            done.append(f"telegram {command}: nothing open")
+            continue
+        if command == "/taken":
+            price_text = args.strip()
+            try:
+                price = float(price_text)
+            except ValueError:
+                notifier.send(f"/taken needs a price, e.g. /taken 1.08421 (got {price_text!r}).")
+                continue
+            watcher.record_taken(day, symbol, price)
+            notifier.send(f"✅ Recorded: you took {symbol} at {price}.")
+        else:
+            watcher.record_skipped(day, symbol)
+            notifier.send(f"✅ Recorded: {symbol} skipped today.")
+        done.append(f"telegram {command} {symbol}")
+    return done
+
+
 def send_digest(notifier: Notifier, journal: Journal, engines: list[Engine], now: datetime) -> None:
     local = now.astimezone(SYDNEY)
     if local.hour < DIGEST_HOUR or journal.kv_get("last_digest") == str(local.date()):
@@ -1124,6 +1165,11 @@ class Coordinator:
                 handle_commands(self.notifier, self.journal, self.engines[0].kill_switch, self.engines)
             except Exception as exc:
                 self.journal.log(f"telegram commands failed: {exc}", level="error")
+            try:
+                for what in handle_fx_commands(self.fx_notifier, self.journal, self.settings, self.clock()):
+                    self.journal.log(what, level="info")
+            except Exception as exc:
+                self.journal.log(f"telegram fx commands failed: {exc}", level="error")
             reports = [engine._run() for engine in self.engines]  # noqa: SLF001
             # Once per cycle, not once per broker: it is a watcher over one symbol, and running it per
             # engine would message you twice for the same signal.

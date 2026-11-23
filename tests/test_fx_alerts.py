@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from trader.config import IntradayConfig
 from trader.engine.live import HAND_EXECUTED, _fill_text, _stop_move_text
 from trader.models import AssetClass, Fill, Side, format_price, price_decimals, round_price
 
@@ -433,6 +434,99 @@ def test_the_coordinator_defaults_the_forex_chat_to_the_main_one(settings, tmp_p
         assert Coordinator(settings, journal, engines, only).fx_notifier is only
     finally:
         journal.close()
+
+
+# --- /taken and /skipped, read from the forex chat -----------------------------------------------
+
+_TAKEN_CFG = IntradayConfig(enabled=True, symbols=["EUR/USD"], drop_atr=0.5, stop_atr=0.3,
+                            target_frac=1.0, atr_days=20, capital_usd=10_000.0, risk_pct=1.0)
+
+
+class _FxBot:
+    """A fake with a command channel of its own -- `poll_commands_full`, not `poll_commands` -- since
+    `/taken` needs the price it carries and the bare command list throws that away."""
+
+    def __init__(self, commands):
+        self._commands = commands
+        self.sent: list[str] = []
+
+    def send(self, text):
+        self.sent.append(text)
+        return True
+
+    def poll_commands_full(self, store):
+        return self._commands
+
+
+def _with_open_signal(settings, journal, now):
+    from trader.engine.intraday_watch import IntradayWatcher, Plan
+
+    s = settings.model_copy(update={"intraday": _TAKEN_CFG})
+    watcher = IntradayWatcher(s, journal, _FxBot([]), clock=lambda: now)
+    watcher._store_plan(Plan(day=now.date(), symbol="EUR/USD", session_open=1.10000, atr=0.0060,
+                             trigger=1.09700, stop=1.07900, target=1.10000, qty=1000.0))
+    return s
+
+
+def test_taken_records_the_price_against_todays_signal(settings, journal):
+    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_open_signal(settings, journal, now)
+    bot = _FxBot([("/taken", "1.09680")])
+    done = handle_fx_commands(bot, journal, s, now)
+    assert done == ["telegram /taken EUR/USD"]
+    watcher = IntradayWatcher(s, journal, bot, clock=lambda: now)
+    assert watcher.report(now.date(), "EUR/USD") == ("taken", 1.09680)
+    assert "1.0968" in bot.sent[0]
+
+
+def test_skipped_is_recorded_distinctly_from_taken(settings, journal):
+    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_open_signal(settings, journal, now)
+    bot = _FxBot([("/skipped", "")])
+    handle_fx_commands(bot, journal, s, now)
+    watcher = IntradayWatcher(s, journal, bot, clock=lambda: now)
+    assert watcher.report(now.date(), "EUR/USD") == ("skipped", None)
+
+
+def test_taken_with_nothing_open_says_so_instead_of_doing_nothing(settings, journal):
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = settings.model_copy(update={"intraday": _TAKEN_CFG})
+    bot = _FxBot([("/taken", "1.10000")])
+    done = handle_fx_commands(bot, journal, s, now)
+    assert "nothing open" in done[0]
+    assert "Nothing to confirm" in bot.sent[0]
+
+
+def test_taken_without_a_parseable_price_does_not_record_garbage(settings, journal):
+    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_open_signal(settings, journal, now)
+    bot = _FxBot([("/taken", "not a number")])
+    handle_fx_commands(bot, journal, s, now)
+    watcher = IntradayWatcher(s, journal, bot, clock=lambda: now)
+    assert watcher.report(now.date(), "EUR/USD") is None
+    assert "needs a price" in bot.sent[0]
+
+
+def test_a_notifier_with_no_command_channel_of_its_own_is_skipped_quietly(settings, journal):
+    """The default when no fx chat is configured at all -- the Coordinator reuses the main notifier,
+    which has no `poll_commands_full` of its own in that path. Nothing should blow up."""
+    from trader.engine.live import handle_fx_commands
+    from trader.notify.telegram import NullNotifier
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = settings.model_copy(update={"intraday": _TAKEN_CFG})
+    assert handle_fx_commands(NullNotifier(), journal, s, now) == []
 
 
 def test_a_dry_run_does_not_message_the_forex_chat():
