@@ -110,9 +110,10 @@ class RiskGate:
             add("no_short_selling", qty <= held * (1 + 1e-9),
                 f"sleeve {sleeve.id} holds {held:g} {order.symbol}, cannot sell {qty:g}")
 
-        # --- activity limits ------------------------------------------------------------------
-        add("max_orders_per_day", ctx.orders_today < risk.account.max_orders_per_day,
-            f"{ctx.orders_today} orders today (limit {risk.account.max_orders_per_day})")
+        # --- activity limits (block entries, always allow exits) ------------------------------
+        if is_entry:
+            add("max_orders_per_day", ctx.orders_today < risk.account.max_orders_per_day,
+                f"{ctx.orders_today} orders today (limit {risk.account.max_orders_per_day})")
         window = risk.guards.duplicate_order_window_s
         dupes = [o for o in ctx.recent_orders
                  if o.sleeve_id == order.sleeve_id and o.symbol == order.symbol and o.side is order.side
