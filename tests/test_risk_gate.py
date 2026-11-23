@@ -77,6 +77,24 @@ def test_unknown_or_disabled_sleeve_is_blocked(gate):
     assert "sleeve_enabled" in failed(gate.check(buy(), ctx(sleeve_disabled=True)))
 
 
+def test_disabled_sleeve_blocks_entries_but_not_exits(gate):
+    """A disabled sleeve must still be able to protect any position it already holds.
+
+    The engine's _protect() keeps placing/moving stops for a disabled sleeve's existing position
+    on purpose (it filters only on broker match, not .enabled) -- disabling a sleeve is a routine
+    operational action, not an emergency, and must not strand an open position with no way to
+    place or move its stop. So, like daily_loss_limit/drawdown_halt/max_orders_per_day, this guard
+    only constrains entries.
+    """
+    spy = ctx(quote=Quote(symbol="SPY", price=500, ts=NOW), asset_class=AssetClass.US_EQUITY,
+              sleeve_holdings={"SPY": 1.0})
+    assert gate.check(sell(1.0, sleeve="S2", symbol="SPY"), spy).approved
+    assert "sleeve_enabled" in failed(gate.check(buy(sleeve="S2", symbol="SPY", stop=490), spy))
+    assert "sleeve_enabled" in failed(gate.check(buy(), ctx(sleeve_disabled=True)))
+    held = {"BTC/USD": 0.01}
+    assert gate.check(sell(0.01), ctx(sleeve_disabled=True, sleeve_holdings=held)).approved
+
+
 def test_symbol_must_be_in_universe_and_sleeve(gate):
     efa = ctx(quote=Quote(symbol="EFA", price=80, ts=NOW), asset_class=AssetClass.US_EQUITY)
     assert failed(gate.check(buy(symbol="EFA", stop=78), efa)) == {"symbol_in_sleeve"}
