@@ -202,9 +202,15 @@ sleeves:
     # B0 and S1, and shadow orders count too (they get a broker_order_id). Measured, not guessed: with
     # the cap lifted a cold start placed exactly 80; at 60 the entries filled and then the STOPS were
     # refused -- "could not place S8 stop for QQQ: max_orders_per_day" -- leaving positions open and
-    # unprotected for the rest of the day. The cap was raised to 150 on 2026-10-08, which covers a cold
-    # start plus stop maintenance. test_s8_at_the_shipped_order_budget_starves_its_stops pins the
-    # failure mode so a future reduction cannot quietly bring it back.
+    # unprotected for the rest of the day. The cap was raised to 150 on 2026-10-08, which covered a cold
+    # start plus stop maintenance, but that was just enough capacity to outrun worst-case demand, not a
+    # guarantee -- the same starvation would have returned the moment another sleeve was enabled or S8
+    # widened further. trader/risk/gate.py's max_orders_per_day check was then changed to exempt exits
+    # (protective stops are exits) the same way daily_loss_limit/drawdown_halt already exempt them, so a
+    # stop can never be refused for budget reasons regardless of the cap. test_max_orders_per_day_blocks
+    # _entries_but_not_exits (tests/test_risk_gate.py) and test_a_low_order_budget_can_starve_entries_but
+    # _never_stops (tests/test_engine.py) pin that guarantee; test_the_shipped_budget_covers_a_cold_start
+    # _of_everything_enabled (tests/test_engine.py) pins that the shipped cap still has headroom for entries.
 
   - id: S8S
     name: Trend following, diversified (19 markets, shadow archive)

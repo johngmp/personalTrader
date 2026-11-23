@@ -168,6 +168,21 @@ def test_max_orders_per_day(gate, settings):
     assert gate.check(buy(), ctx(orders_today=cap - 1)).approved
 
 
+def test_max_orders_per_day_blocks_entries_but_not_exits(gate, settings):
+    """A protective stop is an exit. It must never be refused for burning the day's order budget.
+
+    An entry and its stop are separate orders in the same engine cycle, with all sleeves' entries
+    going out before that cycle's stops. If the account-wide cap applied to exits too, a busy day
+    could exhaust the budget on entries and leave real positions with no stop for the rest of the
+    day. So, like daily_loss_limit/drawdown_halt, this guard only constrains entries.
+    """
+    cap = settings.risk.account.max_orders_per_day
+    held = {"BTC/USD": 0.01}
+    assert gate.check(sell(0.01), ctx(orders_today=cap, sleeve_holdings=held)).approved
+    assert gate.check(sell(0.01), ctx(orders_today=cap + 50, sleeve_holdings=held)).approved
+    assert failed(gate.check(buy(), ctx(orders_today=cap))) == {"max_orders_per_day"}
+
+
 def test_every_failure_is_reported_not_just_the_first(gate, settings):
     cap = settings.risk.account.max_orders_per_day
     d = gate.check(buy(notional=5_000, stop=None),
