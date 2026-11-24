@@ -1083,6 +1083,8 @@ def today_text(settings: Settings, journal: Journal, now: datetime | None = None
             else:
                 line += f" · now {f(rate)}"
         lines.append(line)
+        if pair.get("report") is None:
+            lines.append("Reply /taken <price> or /skipped once you've acted on this.")
     return "\n".join(lines)
 
 

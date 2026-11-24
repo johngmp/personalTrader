@@ -258,6 +258,7 @@ def plan_text(p: Plan, cfg: IntradayConfig) -> str:
         f"position the moment the order fills, your broker closes it at whichever comes first, and the "
         f"Expiry cancels anything still resting at the close -- the tested rule holds nothing "
         f"overnight. If your MT4 has no Expiry box, cancel it yourself by {local_close}.\n"
+        f"Once you've acted on this, reply /taken <price> or /skipped in this chat.\n"
         f"Shadow test — {EVIDENCE.get(p.symbol, 'not yet measured on this pair')}. Not advice."
     )
 
@@ -511,6 +512,44 @@ class IntradayWatcher:
             if self._get(day, "plan", symbol):
                 return symbol
         return None
+
+    def report_summary(self, since: date, until: date) -> dict:
+        """Taken/skipped/no-response counts for every signal between `since` and `until` (inclusive),
+        plus how each reported fill compared with the rate the BUY message quoted.
+
+        This is the one bridge from a Telegram reply to anything that reviews the week. Without it the
+        only reader of `/taken` and `/skipped` was the dashboard's "today" card, so the system never
+        learned whether the tickets it sent were actually followed.
+        """
+        taken = skipped = no_response = 0
+        fills: list[dict] = []
+        flat = {s.replace("/", ""): s for s in self.cfg.symbols}
+        for key in self.journal.kv_keys("irv:%:plan"):
+            parts = key.split(":")
+            if len(parts) != 4:
+                continue                                  # a pre-multi-pair key
+            try:
+                day = date.fromisoformat(parts[1])
+            except ValueError:
+                continue
+            if not (since <= day <= until):
+                continue
+            symbol = flat.get(parts[2])
+            if symbol is None:
+                continue
+            report = self.report(day, symbol)
+            if report is None:
+                no_response += 1
+                continue
+            kind, price = report
+            if kind == "skipped":
+                skipped += 1
+                continue
+            taken += 1
+            quoted = self._entry(day, symbol)
+            fills.append({"day": day.isoformat(), "symbol": symbol, "reported": price,
+                          "quoted": quoted, "slip_pips": None if quoted is None else (price - quoted) / PIP})
+        return {"taken": taken, "skipped": skipped, "no_response": no_response, "fills": fills}
 
     def _store_plan(self, p: Plan) -> None:
         self._set(p.day, "plan", f"{p.session_open},{p.atr},{p.trigger},{p.stop},{p.target},{p.qty}",
