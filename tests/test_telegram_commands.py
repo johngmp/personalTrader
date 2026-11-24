@@ -77,6 +77,32 @@ def test_today_says_plainly_when_the_watcher_is_off(settings, tmp_path):
     journal.close()
 
 
+def test_today_prompts_for_a_report_when_none_has_come_in(settings, tmp_path):
+    """The dashboard card is a secondary, desktop-only surface -- /today is read on the same phone the
+    ticket arrived on, so it is the other place this has to be discoverable."""
+    journal = _fx_journal_with_plan(tmp_path, date.today(), state="waiting")
+    engine = Engine(settings, SimBroker(cash=100_000, name="alpaca"), journal, {}, notifier=NullNotifier())
+    notifier = FakeNotifier("/today")
+
+    handle_commands(notifier, journal, engine.kill_switch, [engine])
+
+    text = notifier.sent[0]
+    assert "/taken" in text and "/skipped" in text
+    journal.close()
+
+
+def test_today_does_not_prompt_once_a_report_is_in(settings, tmp_path):
+    journal = _fx_journal_with_plan(tmp_path, date.today(), state="waiting")
+    journal.kv_set(f"irv:{date.today():%Y-%m-%d}:EURUSD:report", "skipped")
+    engine = Engine(settings, SimBroker(cash=100_000, name="alpaca"), journal, {}, notifier=NullNotifier())
+    notifier = FakeNotifier("/today")
+
+    handle_commands(notifier, journal, engine.kill_switch, [engine])
+
+    assert "/taken" not in notifier.sent[0]
+    journal.close()
+
+
 def test_today_says_plainly_when_there_is_no_plan_yet(settings, tmp_path):
     """Enabled, but nothing has been built for today yet -- the common case most of the day."""
     journal = Journal(tmp_path / "j.db")

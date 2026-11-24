@@ -24,6 +24,7 @@ Work in `/Users/jm/Documents/Projects/personalTrader`. Run every command as `uv 
    - trades closed this week: symbol, sleeve, P&L, R, why in and why out
    - **AI A/B check:** for each S5 veto this week, what S1 did with the same entry (the same symbol and bar date in S1's trades). Did the veto save money or cost money? Keep a running tally.
    - process health: warnings, mismatches, rejected AI signals, skipped entries ("no AI verdict")
+   - **forex ticket follow-through:** from `fx_reports_recent` in the context JSON -- how many of the week's hand-traded tickets were taken, skipped, or never answered, and for the taken ones, the slippage in pips between the quoted BUY rate and the price actually reported. Raw counts only; there are too few trades yet to draw a lesson from them.
 3. **Post-trade reviews.** For each trade closed this week, append under `## Review` (below `<!-- engine:end -->`) in its note:
    - *Decision quality:* did the entry and exit follow the rules? Was the stop sensible given the volatility then?
    - *What happened:* the facts, in one or two lines

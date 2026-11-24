@@ -1161,6 +1161,14 @@ def test_the_ticket_still_carries_what_the_evidence_actually_says(journal):
     assert "Not advice" in w.notifier.sent[0]
 
 
+def test_the_ticket_prompts_you_to_report_back(journal):
+    """/taken and /skipped only exist because the phone, not the dashboard, is where this is read --
+    so the ticket itself has to say they exist, or nobody discovers them."""
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    assert "/taken" in w.notifier.sent[0] and "/skipped" in w.notifier.sent[0]
+
+
 # --- what you actually did, as reported over Telegram -------------------------------------------------
 
 def test_no_report_is_distinct_from_skipped(journal):
@@ -1198,3 +1206,53 @@ def test_open_symbol_ignores_other_days(journal):
     w = _watcher(journal, "07:05", 1.16420)
     w.run_once()
     assert w.open_symbol(date(2026, 10, 6)) is None
+
+
+# --- report_summary: the bridge from a Telegram reply to the weekly review ----------------------------
+
+
+def test_report_summary_counts_taken_skipped_and_no_response(journal):
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()                                    # today's plan, no report yet -> no_response
+    other_day = date(2026, 10, 6)
+    w._store_plan(Plan(day=other_day, symbol="EUR/USD", session_open=1.1, atr=0.005,
+                       trigger=1.097, stop=1.094, target=1.1, qty=10_000))
+    w.record_skipped(other_day, "EUR/USD")
+    third_day = date(2026, 10, 5)
+    w._store_plan(Plan(day=third_day, symbol="EUR/USD", session_open=1.1, atr=0.005,
+                       trigger=1.097, stop=1.094, target=1.1, qty=10_000))
+    w.record_taken(third_day, "EUR/USD", 1.0972)
+
+    summary = w.report_summary(date(2026, 10, 1), date(2026, 10, 10))
+
+    assert summary["no_response"] == 1
+    assert summary["skipped"] == 1
+    assert summary["taken"] == 1
+    assert summary["fills"] == [{"day": "2026-10-05", "symbol": "EUR/USD", "reported": 1.0972,
+                                 "quoted": None, "slip_pips": None}]
+
+
+def test_report_summary_measures_slippage_against_the_quoted_buy(journal):
+    """The fill the message quoted lives under `entry`, written when the BUY alert fires -- not the
+    trigger, which is the level, not what actually happened. Compared against that, not the trigger."""
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    w2 = _watcher(journal, "08:00", 1.16100)        # at/under the trigger -> a BUY alert, entry recorded
+    w2.run_once()
+    w2.record_taken(DAY, "EUR/USD", 1.16090)
+
+    summary = w.report_summary(DAY, DAY)
+
+    assert summary["taken"] == 1
+    fill = summary["fills"][0]
+    assert fill["quoted"] == pytest.approx(1.16100)
+    assert fill["reported"] == 1.16090
+    assert fill["slip_pips"] == pytest.approx((1.16090 - 1.16100) / 1e-4)
+
+
+def test_report_summary_ignores_days_outside_the_window(journal):
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    w.record_taken(DAY, "EUR/USD", 1.16400)
+    summary = w.report_summary(date(2026, 1, 1), date(2026, 1, 31))
+    assert summary == {"taken": 0, "skipped": 0, "no_response": 0, "fills": []}

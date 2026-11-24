@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from trader.brokers.base import Broker, LiveTradingRefused
@@ -792,6 +792,7 @@ def cmd_context(settings: Settings, args: argparse.Namespace) -> int:
     import json
 
     from trader.engine.dashboard import collect
+    from trader.engine.intraday_watch import IntradayWatcher
     from trader.signals import store as signals
 
     journal = Journal(settings.journal_path)
@@ -825,6 +826,9 @@ def cmd_context(settings: Settings, args: argparse.Namespace) -> int:
             "warnings_recent": [dict(w) for w in d["warnings"]],
             "disabled_sleeves": [{"id": s.id, "name": s.name, "ai": s.ai} for s in settings.sleeves.values()
                                  if not s.enabled and s.id != "TEST"],
+            "fx_reports_recent": IntradayWatcher(settings, journal, notifier=None, clock=lambda: now)
+                .report_summary(now.date() - timedelta(days=args.days), now.date())
+                if settings.intraday.enabled and settings.intraday.symbols else None,
         }
     finally:
         journal.close()
