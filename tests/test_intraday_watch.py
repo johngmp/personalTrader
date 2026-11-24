@@ -1159,3 +1159,42 @@ def test_the_ticket_still_carries_what_the_evidence_actually_says(journal):
     w.run_once()
     assert "+4.0%/yr out of sample over 34 trades" in w.notifier.sent[0]
     assert "Not advice" in w.notifier.sent[0]
+
+
+# --- what you actually did, as reported over Telegram -------------------------------------------------
+
+def test_no_report_is_distinct_from_skipped(journal):
+    """Three states, not two: a signal nobody has answered yet must not read as one that was
+    deliberately passed on."""
+    w = _watcher(journal, "07:05", 1.16420)
+    assert w.report(DAY, "EUR/USD") is None
+    w.record_skipped(DAY, "EUR/USD")
+    assert w.report(DAY, "EUR/USD") == ("skipped", None)
+
+
+def test_a_taken_report_keeps_the_price(journal):
+    w = _watcher(journal, "07:05", 1.16420)
+    w.record_taken(DAY, "EUR/USD", 1.16377)
+    assert w.report(DAY, "EUR/USD") == ("taken", 1.16377)
+
+
+def test_a_later_report_overwrites_an_earlier_one(journal):
+    """Someone correcting themselves -- `/skipped` then realising they did take it -- must win, not
+    be silently ignored because a row already existed."""
+    w = _watcher(journal, "07:05", 1.16420)
+    w.record_skipped(DAY, "EUR/USD")
+    w.record_taken(DAY, "EUR/USD", 1.16400)
+    assert w.report(DAY, "EUR/USD") == ("taken", 1.16400)
+
+
+def test_open_symbol_is_whichever_pair_got_a_plan_today(journal):
+    w = _watcher(journal, "07:05", 1.16420)
+    assert w.open_symbol(DAY) is None, "nothing built yet -- nothing to confirm"
+    w.run_once()
+    assert w.open_symbol(DAY) == "EUR/USD"
+
+
+def test_open_symbol_ignores_other_days(journal):
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    assert w.open_symbol(date(2026, 10, 6)) is None

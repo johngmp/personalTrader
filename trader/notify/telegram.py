@@ -74,10 +74,14 @@ class NullNotifier:
     def poll_commands(self, store: KV) -> list[str]:
         return []
 
+    def poll_commands_full(self, store: KV) -> list[tuple[str, str]]:
+        return []
+
 
 class Telegram:
     def __init__(self, token: str, chat_id: str, client: httpx.Client | None = None,
-                 sleep: Callable[[float], None] | None = None) -> None:
+                 sleep: Callable[[float], None] | None = None,
+                 offset_key: str = "telegram_offset") -> None:
         self.base = f"https://api.telegram.org/bot{token}"
         self.chat_id = str(chat_id)
         self.client = client or httpx.Client(timeout=10)
@@ -85,6 +89,14 @@ class Telegram:
         self.failures = 0                   # consecutive sends that did not get through
         self.last_error: str | None = None
         self.attempts_used = 0              # attempts the last failed send spent, for the tests
+        # A second Telegram instance polling a different chat on the SAME bot token -- the forex
+        # split -- must track its own `getUpdates` offset under its own key. `getUpdates` confirms
+        # (and lets Telegram discard) everything before the offset you send, for every caller sharing
+        # the token, not just the one chat you are filtering for. Two instances reading and writing
+        # the one "telegram_offset" row in the same run would have the second one's write silently
+        # undo what the first just saw, and whichever polled second would come up empty even though
+        # its chat's message was sitting right there in the response the first call got.
+        self.offset_key = offset_key
 
     def send(self, text: str) -> bool:
         """True if Telegram confirmed delivery. Never raises: an alert must not stop the engine trading.
@@ -150,8 +162,12 @@ class Telegram:
             return False, None, httpx.HTTPError(str(body.get("description") or "telegram returned ok:false"))
         return True, None, None
 
-    def poll_commands(self, store: KV) -> list[str]:
-        offset = int(store.kv_get("telegram_offset", "0") or 0)
+    def _poll(self, store: KV) -> list[tuple[str, str, str]]:
+        """(chat id, command word, rest of the text) for every command-shaped message queued for this
+        bot, from one `getUpdates` call. Shared by `poll_commands` and `poll_commands_full` so there is
+        exactly one place that does the offset bookkeeping -- see `offset_key` on why that matters.
+        """
+        offset = int(store.kv_get(self.offset_key, "0") or 0)
         try:
             r = self.client.get(f"{self.base}/getUpdates", params={"offset": offset, "timeout": 0})
             r.raise_for_status()
@@ -159,18 +175,27 @@ class Telegram:
         except (httpx.HTTPError, ValueError) as exc:
             log.warning("telegram poll failed: %s", exc)
             return []
-        commands = []
+        out: list[tuple[str, str, str]] = []
         for update in updates:
             offset = max(offset, update["update_id"] + 1)
             self._remember_group(update, store)
             message = update.get("message") or {}
-            if str(message.get("chat", {}).get("id")) != self.chat_id:
-                continue  # ignore anyone else who finds the bot
-            text = (message.get("text") or "").strip().split()
-            if text and text[0].startswith("/"):
-                commands.append(text[0].split("@")[0].lower())
-        store.kv_set("telegram_offset", str(offset))
-        return commands
+            chat_id = str(message.get("chat", {}).get("id"))
+            parts = (message.get("text") or "").strip().split(maxsplit=1)
+            if parts and parts[0].startswith("/"):
+                out.append((chat_id, parts[0].split("@")[0].lower(), parts[1] if len(parts) > 1 else ""))
+        store.kv_set(self.offset_key, str(offset))
+        return out
+
+    def poll_commands(self, store: KV) -> list[str]:
+        return [cmd for chat_id, cmd, _ in self._poll(store)
+                if chat_id == self.chat_id]  # ignore anyone else who finds the bot
+
+    def poll_commands_full(self, store: KV) -> list[tuple[str, str]]:
+        """Like `poll_commands`, but keeps the text after the command word -- `/taken 1.08421` needs
+        the price, which the bare command list throws away."""
+        return [(cmd, args) for chat_id, cmd, args in self._poll(store)
+                if chat_id == self.chat_id]
 
     @staticmethod
     def _remember_group(update: dict, store: KV) -> None:
@@ -216,11 +241,16 @@ def fx_from_env() -> Notifier:
     load_dotenv(PROJECT_ROOT / ".env")
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     fx_chat = os.environ.get("TELEGRAM_FX_CHAT_ID", "").strip()
+    main_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if token and fx_chat:
-        return Telegram(token, fx_chat)
-    if token and os.environ.get("TELEGRAM_CHAT_ID", "").strip():
+        return Telegram(token, fx_chat, offset_key="telegram_fx_offset")
+    if token and main_chat:
         log.info("TELEGRAM_FX_CHAT_ID not set; forex messages go to the main chat. "
                  "Run `trader telegram-setup --fx` to give them their own.")
+        # Still its OWN offset key even though it is the main chat: `/taken` and `/skipped` are read
+        # by a separate poll from the main commands (see live.handle_fx_commands), and that poll must
+        # not share a `getUpdates` offset with the main one or it comes up empty -- see `offset_key`.
+        return Telegram(token, main_chat, offset_key="telegram_fx_offset")
     return from_env()
 
 
