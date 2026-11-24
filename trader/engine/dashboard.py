@@ -16,8 +16,9 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from trader.config import Settings
-from trader.journal.db import Journal, trading_day_start
 from trader.engine.explain import GLOSSARY, headline
+from trader.engine.live import SYDNEY
+from trader.journal.db import Journal, trading_day_start
 from trader.models import AssetClass, format_price, price_decimals
 from trader.money import format_aud, stored_rate
 from trader.journal.vault import Trip, round_trips
@@ -290,7 +291,7 @@ def fx_series(symbols: list[str], live: dict[str, float] | None = None) -> dict[
     return out
 
 
-def _fx_levels(sleeve, symbols: list[str]) -> dict[str, dict]:
+def _fx_levels(settings: Settings, sleeve, symbols: list[str]) -> dict[str, dict]:
     """The strategy's OWN latest indicator values, per symbol.
 
     Built by running the real strategy object over the same daily history the engine uses, rather than
@@ -323,7 +324,8 @@ def _fx_levels(sleeve, symbols: list[str]) -> dict[str, dict]:
                        "atr": float(last["atr"]), "bar_close": float(last["close"]),
                        "fast_n": int(strat.params["fast"]), "slow_n": int(strat.params["slow"]),
                        "atr_mult": float(strat.params["atr_mult"]),
-                       "risk_pct": 1.0, "capital": sleeve.capital_usd}
+                       "risk_pct": settings.sleeve_limits(sleeve.id).risk_per_trade_pct,
+                       "capital": sleeve.capital_usd}
     return out
 
 
@@ -509,7 +511,7 @@ def fx_snapshot(settings: Settings, journal: Journal, engines: list[Engine]) -> 
         return {}
     engine = next((e for e in engines if e.broker.name == fx_sleeves[0].broker), None)
     symbols, rows = sorted({x for s in fx_sleeves for x in s.symbols}), []
-    levels = _fx_levels(fx_sleeves[0], symbols)
+    levels = _fx_levels(settings, fx_sleeves[0], symbols)
     held = {}
     for sleeve in fx_sleeves:
         held.update(journal.sleeve_holdings(sleeve.id))
@@ -689,8 +691,8 @@ def intraday_today(settings: Settings, journal: Journal, now: datetime | None = 
     # The session is quoted in UTC everywhere else because that is what the watcher works in, but the
     # person reading this is in Sydney, where 07:00 UTC is 6pm the same evening. A reader should not
     # have to do that arithmetic to know when the next message is due.
-    local_open = datetime.combine(day, opens, tzinfo=timezone.utc).astimezone()
-    local_close = datetime.combine(day, closes, tzinfo=timezone.utc).astimezone()
+    local_open = datetime.combine(day, opens, tzinfo=timezone.utc).astimezone(SYDNEY)
+    local_close = datetime.combine(day, closes, tzinfo=timezone.utc).astimezone(SYDNEY)
 
     # Most of the day there is no plan: before 07:00 UTC it has not been built, and the setup only
     # appears on about one day in three. An empty card at those times says nothing useful, so it falls
@@ -1137,7 +1139,7 @@ a few minutes.</p>
 <div id="searchbar"><input id="searchbox" type="search" autocomplete="off"
  placeholder="Search trades, orders, symbols or reasons&hellip;  (Esc to close)"
  aria-label="Search the tables on this page"></div>
-<header><div class="brand">PT</div><div><h1>Dashboard</h1><div class="subtle">{d['now'].astimezone():%A, %d %B %Y · %H:%M}</div></div>
+<header><div class="brand">PT</div><div><h1>Dashboard</h1><div class="subtle">{d['now'].astimezone(SYDNEY):%A, %d %B %Y · %H:%M}</div></div>
 <div class="spacer"></div>
 <div class="account"><div><b>Paper trading</b> <span class="pill {'bad' if d['kill_switch'] else 'ok'}">{'Halted' if d['kill_switch'] else 'Active'}</span>
 <span class="pill closed">Auto</span></div><div class="subtle">Last engine run {html.escape(last_run)} UTC · orders today {d['orders_today']}/{d['max_orders']}</div></div>

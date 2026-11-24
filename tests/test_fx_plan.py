@@ -408,3 +408,126 @@ def intraday_card_of(settings, journal):
     from trader.engine.dashboard import intraday_card
 
     return intraday_card(settings, journal)
+
+
+# --- the risk shown per pair is the sleeve's own configured setting, not a hardcoded figure ---------
+
+def _flat_trend_history(rows: int = 200) -> "pd.DataFrame":
+    """Daily bars, flat enough that _fx_levels' call into the strategy never raises -- the figure under
+    test is risk_pct, which comes from config, not from anything the market did."""
+    import pandas as pd
+
+    dates = pd.date_range("2025-01-01", periods=rows, freq="D")
+    return pd.DataFrame({"open": 1.1, "high": 1.11, "low": 1.09, "close": 1.1, "volume": 0.0}, index=dates)
+
+
+def test_risk_pct_comes_from_the_sleeves_own_configured_setting(settings, monkeypatch):
+    """_fx_levels used to hardcode risk_pct to 1.0 regardless of what the sleeve was actually configured
+    to risk. That number feeds both the risk-budget arithmetic and the "costs X% of the sleeve" text, so
+    a sleeve configured to risk 2.5% would still have shown 1.0% -- a wrong number on the one figure that
+    states exactly how much a trade can lose.
+    """
+    from trader.config import SleeveLimits
+    from trader.engine.dashboard import _fx_levels
+
+    monkeypatch.setattr("trader.data.history.load_history", lambda symbol: _flat_trend_history())
+
+    sleeve = settings.sleeves["S9"]
+    assert sleeve.limits is None or sleeve.limits.risk_per_trade_pct == 1, "fixture must start non-trivial"
+    custom = sleeve.model_copy(update={"limits": SleeveLimits(risk_per_trade_pct=2.5)})
+    settings.sleeves["S9"] = custom
+
+    out = _fx_levels(settings, custom, ["EUR/USD"])
+    assert out["EUR/USD"]["risk_pct"] == 2.5, "must reflect the sleeve's own configured risk, not 1.0"
+
+
+def test_a_default_sleeve_still_shows_its_real_one_percent(settings, monkeypatch):
+    """The default happens to equal the old hardcoded literal, so this pins that the code path reads
+    config rather than coincidentally matching it."""
+    from trader.engine.dashboard import _fx_levels
+
+    monkeypatch.setattr("trader.data.history.load_history", lambda symbol: _flat_trend_history())
+
+    sleeve = settings.sleeves["S9"]
+    out = _fx_levels(settings, sleeve, ["EUR/USD"])
+    assert out["EUR/USD"]["risk_pct"] == settings.sleeve_limits("S9").risk_per_trade_pct == 1
+
+
+# --- every timestamp shown to the reader is in Sydney time, regardless of the host OS clock ---------
+
+def _minimal_dashboard_dict(now):
+    """Just enough of collect()'s output for render() to run, so the header timestamp can be checked
+    without the cost of building real engines, brokers and a journal."""
+    return {
+        "now": now, "accounts": [], "total": 0.0, "start_equity": 0.0, "total_pnl": 0.0,
+        "day_pnl": 0.0, "day_pct": 0.0, "drawdown": 0.0, "worst_broker": "",
+        "day_used": 0.0, "dd_used": 0.0, "risk_level": "Low risk",
+        "kill_switch": False, "kill_reason": None,
+        "last_run": None, "orders_today": 0, "max_orders": 60,
+        "realized": 0.0, "unrealized": 0.0, "fees": 0.0,
+        "kpis": {"closed": 0, "win_rate": None, "avg_win": None, "avg_loss": None,
+                 "avg_r": None, "profit_factor": None, "trading_days": 0, "open": 0},
+        "sleeves": [], "trips": [], "price": lambda s: None,
+        "states": {}, "watchlist": [], "equities": {}, "orders": [], "rate": None, "fx": {},
+        "research": [], "gate2": [], "health": [], "blocked": [],
+        "warnings": [], "blocked_today": [],
+        "charts": {"account": {}, "sleeves": {}, "shadow": {}},
+        "_limits_day": "3", "_limits_dd": "15",
+    }
+
+
+@pytest.mark.parametrize("host_tz", ["UTC", "America/New_York"])
+def test_the_header_clock_is_sydney_time_regardless_of_host_timezone(host_tz):
+    """`.astimezone()` with no argument converts to whatever timezone the HOST MACHINE happens to be
+    set to -- which could be anything depending on where this engine runs -- not necessarily Sydney,
+    where the person reading the page actually is.
+    """
+    import os
+    import time
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import render
+
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = host_tz
+    time.tzset()
+    try:
+        now = datetime(2026, 6, 15, 8, 30, tzinfo=timezone.utc)  # 18:30 in Sydney (AEST, UTC+10)
+        page = render(_minimal_dashboard_dict(now))
+        assert "Monday, 15 June 2026 · 18:30" in page, page[page.index("<header"):page.index("<header") + 300]
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
+
+
+def test_the_intraday_session_times_are_sydney_time_regardless_of_host_timezone(settings, tmp_path):
+    """intraday_today's local_open/local_close feed the "today's plan" card -- the same bug (bare
+    `.astimezone()`) would have shown the host machine's own timezone there too.
+    """
+    import os
+    import time
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_today
+    from trader.journal.db import Journal
+
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        now = datetime(2026, 6, 15, 2, 0, tzinfo=timezone.utc)
+        j = Journal(tmp_path / "j.db")
+        out = intraday_today(settings, j, now)
+        j.close()
+        # 07:00 UTC in June is 17:00 in Sydney (AEST, UTC+10 -- no daylight saving in the southern
+        # hemisphere winter), and would be 03:00 in New York (EDT, UTC-4) if the host tz leaked in.
+        assert out["open_local"].strftime("%H:%M") == "17:00", out["open_local"]
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
