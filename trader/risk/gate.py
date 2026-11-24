@@ -76,7 +76,13 @@ class RiskGate:
         if sleeve is None:
             return RiskDecision(approved=False, checks=checks)
         limits = s.sleeve_limits(sleeve.id)
-        add("sleeve_enabled", sleeve.enabled and not ctx.sleeve_disabled, f"sleeve {sleeve.id} is disabled")
+        is_entry = order.side is Side.BUY
+        # --- sleeve enabled (block entries, always allow exits) -----------------------------
+        # A disabled sleeve must still be able to protect any position it already holds: the
+        # engine's _protect() keeps placing/moving stops for disabled sleeves on purpose (it
+        # filters only on broker match, not .enabled), so this check must not block exits.
+        if is_entry:
+            add("sleeve_enabled", sleeve.enabled and not ctx.sleeve_disabled, f"sleeve {sleeve.id} is disabled")
         add("symbol_in_universe", ctx.asset_class is not None, f"{order.symbol} is not in universe.yaml")
         add("symbol_in_sleeve", order.symbol in sleeve.symbols, f"{order.symbol} is not in sleeve {sleeve.id}'s symbols")
 
@@ -103,7 +109,6 @@ class RiskGate:
         qty = order.qty if order.qty is not None else order.notional / price  # type: ignore[operator]
         notional = qty * price
         held = ctx.sleeve_holdings.get(order.symbol, 0.0)
-        is_entry = order.side is Side.BUY
 
         # --- exits: long-only, can't sell more than the sleeve holds -------------------------
         if not is_entry:

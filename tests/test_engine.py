@@ -94,6 +94,41 @@ def _stops(broker: SimBroker) -> dict[str, float]:
             if o.order_type in (OrderType.STOP, OrderType.STOP_LIMIT)}
 
 
+def test_disabling_a_sleeve_does_not_strand_its_open_positions_stop(world):
+    """Disabling a sleeve is a routine operational action, not an emergency.
+
+    trader/risk/gate.py's sleeve_enabled check used to apply uniformly to every order for that
+    sleeve -- entries and exits alike. The engine's own _protect() deliberately keeps placing and
+    moving stops for a disabled sleeve's existing position (it filters _my_states() only on broker
+    match, not .enabled), while _decide() filters new entries on .enabled via _live_sleeves(). If
+    the gate blocked exits too, disabling a sleeve would strand its open position with no way to
+    get a stop for as long as it stayed disabled. This pins that the exit still gets through while
+    a new entry into the disabled sleeve stays blocked.
+    """
+    engine, journal, broker, settings = world["engine"], world["journal"], world["broker"], world["settings"]
+    engine.run_once()  # first run: S1 opens positions and gets stops
+
+    held_before = dict(journal.sleeve_holdings("S1"))
+    assert held_before, "S1 should hold something after its first run"
+
+    # Lose one of S1's resting stops, the same way a broker-side sync loss would.
+    symbol = next(s for s in held_before if journal.position_state("S1", s)["stop_order_id"])
+    state = journal.position_state("S1", symbol)
+    engine._cancel_stop(state)
+    assert journal.position_state("S1", symbol)["stop_order_id"] is None
+
+    settings.sleeves["S1"] = settings.sleeves["S1"].model_copy(update={"enabled": False})
+    report = engine.run_once()
+
+    assert not any("could not place" in p and symbol in p for p in report.problems), report.problems
+    new_state = journal.position_state("S1", symbol)
+    assert new_state["stop_order_id"] is not None, "a disabled sleeve's position must still get its stop back"
+    assert symbol in _stops(broker), "the stop must actually be resting at the broker"
+
+    # No new entries into the now-disabled sleeve.
+    assert dict(journal.sleeve_holdings("S1")) == held_before, "a disabled sleeve must not open new positions"
+
+
 def test_first_run_buys_benchmark_enters_trends_and_places_stops(world):
     report = world["engine"].run_once()
     assert not report.problems, report.problems
