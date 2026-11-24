@@ -362,7 +362,28 @@ def test_a_send_that_failed_exits_non_zero_and_names_the_error(tmp_path):
 # -- and they arrived in the same conversation as every paper fill, stop and warning the engine sends.
 # On a busy day the one message that needs doing is one of forty that do not.
 
-def test_forex_messages_go_to_the_forex_chat_when_one_is_configured(monkeypatch):
+@pytest.fixture
+def no_real_dotenv(monkeypatch, tmp_path):
+    """Point the notifier at an empty project, so these tests cannot read the user's real .env.
+
+    Without it, `fx_from_env` calls `load_dotenv(PROJECT_ROOT / ".env")`, which fills in anything
+    `monkeypatch.delenv` just removed -- `load_dotenv` does not override what is already set, so a
+    deleted key comes straight back from the real file. The fallback test below therefore passed only
+    while the user had no forex chat configured, and started failing the day they set one up, asserting
+    "111" against their actual group id. A test whose verdict depends on the developer's credentials
+    file is not testing the code.
+
+    The same pattern as `test_from_env_says_which_credential_is_missing` in test_alerts.py. Deliberately
+    a fixture rather than autouse in conftest: one test in that file asserts that `from_env` reads the
+    real .env on its own, which is the bug it was written for, and isolating it would gut it.
+    """
+    import trader.notify.telegram as tg
+
+    monkeypatch.setattr(tg, "PROJECT_ROOT", tmp_path)
+    assert not (tmp_path / ".env").exists()
+
+
+def test_forex_messages_go_to_the_forex_chat_when_one_is_configured(monkeypatch, no_real_dotenv):
     from trader.notify.telegram import Telegram, fx_from_env
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
@@ -372,7 +393,7 @@ def test_forex_messages_go_to_the_forex_chat_when_one_is_configured(monkeypatch)
     assert isinstance(notifier, Telegram) and notifier.chat_id == "222"
 
 
-def test_forex_messages_fall_back_to_the_main_chat_rather_than_going_silent(monkeypatch):
+def test_forex_messages_fall_back_to_the_main_chat_rather_than_going_silent(monkeypatch, no_real_dotenv):
     """A half-finished setup must not stop the tickets arriving. The whole point of this path is that
     it keeps working -- going quiet because an optional key is missing would be the worst outcome of
     a change meant to make the messages easier to see."""
