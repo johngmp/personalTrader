@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
 from trader.config import IntradayConfig
+from trader.engine.live import SYDNEY
 from trader.models import AssetClass, format_price, round_price
 
 PIP = 1e-4
@@ -218,7 +219,7 @@ def _expiry(p: Plan, cfg: IntradayConfig) -> tuple[str, str]:
     """
     hh, mm = (int(x) for x in cfg.close_utc.split(":"))
     close = datetime.combine(p.day, time(hh, mm), tzinfo=timezone.utc)
-    local = close.astimezone()
+    local = close.astimezone(SYDNEY)
     same_day = local.date() == close.date()
     return (f"{local:%H:%M} {local:%Z}" + ("" if same_day else f" {local:%a %d %b}"),
             f"{close:%H:%M} UTC")
@@ -500,17 +501,30 @@ class IntradayWatcher:
     def record_skipped(self, day: date, symbol: str) -> None:
         self._set(day, "report", "skipped", symbol)
 
-    def open_symbol(self, day: date) -> str | None:
-        """The symbol with a signal open today, or None when there is nothing to confirm.
+    def open_symbols(self, day: date) -> list[str]:
+        """Every symbol whose ticket today has not been answered yet.
 
         "Open" means a plan was built -- `/taken` and `/skipped` are answers to "what did you do about
         today's ticket", and a ticket went out the moment the plan did, whatever its state has moved
-        on to since.
+        on to since. A pair that already has a `report` is not open any more: it has been answered,
+        and must not still count as a candidate for the next bare reply.
         """
-        for symbol in self.cfg.symbols:
-            if self._get(day, "plan", symbol):
-                return symbol
-        return None
+        return [symbol for symbol in self.cfg.symbols
+                if self._get(day, "plan", symbol) and self.report(day, symbol) is None]
+
+    def open_symbol(self, day: date) -> str | None:
+        """The one symbol a bare `/taken` or `/skipped` reply must be about, or None.
+
+        A bare reply carries no symbol, so it can only be resolved when exactly one pair is both
+        open and unanswered today. With one pair configured that is always true, which is why this
+        stayed silent for so long -- it used to return the FIRST configured pair with any plan today,
+        answered or not, so a second pair would have had its ticket silently misattributed to the
+        first the moment one came in. If more than one pair is genuinely awaiting a reply, there is
+        nothing in a bare command to say which one it is about, so this returns None and the caller
+        has to ask rather than guess.
+        """
+        pending = self.open_symbols(day)
+        return pending[0] if len(pending) == 1 else None
 
     def _store_plan(self, p: Plan) -> None:
         self._set(p.day, "plan", f"{p.session_open},{p.atr},{p.trigger},{p.stop},{p.target},{p.qty}",
