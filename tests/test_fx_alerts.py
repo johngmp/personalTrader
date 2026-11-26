@@ -301,6 +301,68 @@ def test_a_misconfigured_null_notifier_reports_failure_but_a_dry_run_does_not():
     assert NullNotifier(reason="no token", misconfigured=True).send("x") is False
 
 
+# --- a long reply must not be chopped mid-field -------------------------------------------------------
+
+def _open_style_reply(n: int) -> str:
+    """One line per position, each with a `stop` and a `pnl` field -- the shape `/open` sends back."""
+    lines = [f"S1 SYM{i:03d}: 10 @ 480.00 · stop 470.00 · pnl +{i:03d}" for i in range(n)]
+    return "Open positions\n" + "\n".join(lines)
+
+
+def test_a_reply_longer_than_the_limit_is_cut_at_a_line_not_through_one():
+    """A long /open reply used to be hard-sliced by character count (text[:MAX_LEN]), which can land
+    inside a line like "stop 470.00 · pnl +200" and hand back a position with its stop or pnl chopped
+    off mid-value. It must cut between lines instead."""
+    import json
+
+    import httpx
+
+    from trader.notify.telegram import MAX_LEN, Telegram
+
+    text = _open_style_reply(300)
+    assert len(text) > MAX_LEN
+    # Confirms this dataset actually exercises the bug: a raw character slice at MAX_LEN lands inside
+    # a line here, not conveniently on a line break.
+    assert text[MAX_LEN - 1] != "\n" and text[MAX_LEN] != "\n"
+
+    sent = {}
+
+    def transport(request):
+        sent["text"] = json.loads(request.content)["text"]
+        return httpx.Response(200, json={"ok": True})
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(transport)))
+    assert bot.send(text) is True
+
+    got = sent["text"]
+    assert len(got) <= MAX_LEN
+    assert text.startswith(got), "only ever drops a tail, never rewrites what it kept"
+    assert len(got) == len(text) or text[len(got)] == "\n", "must stop exactly at a line break"
+    last_line = got.splitlines()[-1]
+    assert last_line in text.splitlines(), "the last line kept must be a whole line, not a fragment"
+    assert "stop" in last_line and "pnl" in last_line
+
+
+def test_a_reply_under_the_limit_is_sent_whole():
+    import json
+
+    import httpx
+
+    from trader.notify.telegram import MAX_LEN, Telegram
+
+    text = _open_style_reply(3)
+    assert len(text) <= MAX_LEN
+    sent = {}
+
+    def transport(request):
+        sent["text"] = json.loads(request.content)["text"]
+        return httpx.Response(200, json={"ok": True})
+
+    bot = Telegram("token", "chat", client=httpx.Client(transport=httpx.MockTransport(transport)))
+    assert bot.send(text) is True
+    assert sent["text"] == text
+
+
 # --- the command's own delivery check ----------------------------------------------------------------
 #
 # `trader watch-fx` built a notifier, sent into it and exited 0 regardless. launchd runs it every
