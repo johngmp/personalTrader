@@ -21,6 +21,19 @@ from trader.config import PROJECT_ROOT
 log = logging.getLogger(__name__)
 MAX_LEN = 3900  # Telegram's limit is 4096 characters
 
+
+def _truncate(text: str, limit: int) -> str:
+    """Cut at the last line break at or before `limit`, not mid-line.
+
+    Messages here are one field per line (`stop 1.0842 · pnl +50`); slicing by raw character count can
+    land inside a line and hand back a field with its value chopped off. Falls back to a hard slice
+    only if a single line is itself longer than the limit, which does not happen in practice here.
+    """
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit)
+    return text[:cut] if cut > 0 else text[:limit]
+
 # A send gets three attempts, roughly a second apart. The numbers come from what this is for: the
 # forex watcher runs on a one-minute beat, so the whole retry sequence has to finish well inside a
 # minute or it delays the next pass. Three attempts over ~4 seconds covers the failure this is aimed at
@@ -141,7 +154,7 @@ class Telegram:
         """(delivered, seconds to wait before retrying or None if retrying is pointless, what failed)."""
         try:
             r = self.client.post(f"{self.base}/sendMessage",
-                                 json={"chat_id": self.chat_id, "text": text[:MAX_LEN]})
+                                 json={"chat_id": self.chat_id, "text": _truncate(text, MAX_LEN)})
         except httpx.RequestError as exc:                      # timeout, DNS, refused, reset
             return False, RETRY_WAIT_S[0], exc
         if r.status_code == 429:
