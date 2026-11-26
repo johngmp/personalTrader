@@ -518,6 +518,73 @@ def test_taken_without_a_parseable_price_does_not_record_garbage(settings, journ
     assert "needs a price" in bot.sent[0]
 
 
+_TWO_TAKEN_CFG = IntradayConfig(enabled=True, symbols=["EUR/USD", "GBP/USD"], drop_atr=0.5, stop_atr=0.3,
+                                target_frac=1.0, atr_days=20, capital_usd=10_000.0, risk_pct=1.0)
+
+
+def _with_two_open_signals(settings, journal, now):
+    from trader.engine.intraday_watch import IntradayWatcher, Plan
+
+    s = settings.model_copy(update={"intraday": _TWO_TAKEN_CFG})
+    watcher = IntradayWatcher(s, journal, _FxBot([]), clock=lambda: now)
+    watcher._store_plan(Plan(day=now.date(), symbol="EUR/USD", session_open=1.10000, atr=0.0060,
+                             trigger=1.09700, stop=1.07900, target=1.10000, qty=1000.0))
+    watcher._store_plan(Plan(day=now.date(), symbol="GBP/USD", session_open=1.30000, atr=0.0070,
+                             trigger=1.29650, stop=1.27600, target=1.30000, qty=1000.0))
+    return s
+
+
+def test_a_bare_reply_with_two_pairs_open_asks_rather_than_guesses(settings, journal):
+    """EUR/USD is first in `cfg.symbols`. Before the fix, a bare `/taken` here would have been recorded
+    silently against EUR/USD even though it might have been about GBP/USD -- the exact misattribution
+    the factory review flagged. Now it has to ask."""
+    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_two_open_signals(settings, journal, now)
+    bot = _FxBot([("/taken", "1.09680")])
+    done = handle_fx_commands(bot, journal, s, now)
+    assert "ambiguous" in done[0]
+    assert "EUR/USD" in bot.sent[0] and "GBP/USD" in bot.sent[0]
+
+    watcher = IntradayWatcher(s, journal, bot, clock=lambda: now)
+    assert watcher.report(now.date(), "EUR/USD") is None, "must not have guessed EUR/USD"
+    assert watcher.report(now.date(), "GBP/USD") is None
+
+
+def test_naming_the_pair_resolves_the_ambiguity(settings, journal):
+    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_two_open_signals(settings, journal, now)
+    bot = _FxBot([("/taken", "GBP/USD 1.29700")])
+    done = handle_fx_commands(bot, journal, s, now)
+    assert done == ["telegram /taken GBP/USD"]
+
+    watcher = IntradayWatcher(s, journal, bot, clock=lambda: now)
+    assert watcher.report(now.date(), "GBP/USD") == ("taken", 1.29700)
+    assert watcher.report(now.date(), "EUR/USD") is None
+
+
+def test_a_bare_reply_resolves_once_only_one_pair_is_still_unanswered(settings, journal):
+    """Not ambiguous once one of the two has already been answered -- the other is the only one left
+    a bare reply could be about."""
+    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_two_open_signals(settings, journal, now)
+    watcher = IntradayWatcher(s, journal, _FxBot([]), clock=lambda: now)
+    watcher.record_skipped(now.date(), "EUR/USD")
+
+    bot = _FxBot([("/taken", "1.29700")])
+    done = handle_fx_commands(bot, journal, s, now)
+    assert done == ["telegram /taken GBP/USD"]
+    assert watcher.report(now.date(), "GBP/USD") == ("taken", 1.29700)
+
+
 def test_a_notifier_with_no_command_channel_of_its_own_is_skipped_quietly(settings, journal):
     """The default when no fx chat is configured at all -- the Coordinator reuses the main notifier,
     which has no `poll_commands_full` of its own in that path. Nothing should blow up."""

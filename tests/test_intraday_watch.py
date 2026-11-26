@@ -1198,3 +1198,68 @@ def test_open_symbol_ignores_other_days(journal):
     w = _watcher(journal, "07:05", 1.16420)
     w.run_once()
     assert w.open_symbol(date(2026, 10, 6)) is None
+
+
+def test_open_symbol_is_the_unanswered_pair_not_the_first_configured_one(journal):
+    """Dormant while only EUR/USD is configured, live the moment a second pair is: a bare `/taken` or
+    `/skipped` reply used to resolve to the FIRST pair in `cfg.symbols` with any plan today, whatever
+    its state, rather than the one actually still awaiting an answer. Here EUR/USD -- first in the
+    list -- has already been answered, so a reply naming no pair can only be about GBP/USD.
+    """
+    w = _two(journal, "07:05", {"EUR/USD": 1.16420, "GBP/USD": 1.34500})
+    w.run_once()
+    w.record_skipped(DAY, "EUR/USD")
+    assert w.open_symbol(DAY) == "GBP/USD", \
+        "EUR/USD is first in cfg.symbols but already answered; GBP/USD is the one still open"
+
+
+def test_open_symbol_is_none_when_more_than_one_pair_genuinely_awaits_a_reply(journal):
+    """Real ambiguity: two pairs both have a plan today and neither has been answered. A bare reply
+    carries no symbol, so there is nothing here to resolve it with -- this must not guess."""
+    w = _two(journal, "07:05", {"EUR/USD": 1.16420, "GBP/USD": 1.34500})
+    w.run_once()
+    assert w.open_symbol(DAY) is None
+    assert set(w.open_symbols(DAY)) == {"EUR/USD", "GBP/USD"}
+
+
+def test_open_symbols_drops_a_pair_once_it_has_been_answered(journal):
+    w = _two(journal, "07:05", {"EUR/USD": 1.16420, "GBP/USD": 1.34500})
+    w.run_once()
+    w.record_taken(DAY, "EUR/USD", 1.16400)
+    assert w.open_symbols(DAY) == ["GBP/USD"]
+
+
+# --- the expiry time must not depend on whatever timezone this machine happens to be set to ---------
+
+def test_expiry_is_always_sydney_local_time_not_the_hosts_own_timezone(journal, monkeypatch):
+    """The Sydney-local time in the ticket used to come from a bare `.astimezone()`, which converts to
+    whatever timezone the HOST MACHINE's OS clock is set to -- not necessarily Sydney, and not
+    necessarily the same every time this runs on a different box. Pinning the host OS to a timezone
+    nowhere near Sydney and checking the message still says the Sydney hour is the only way to tell
+    this from a bug that happens to pass when the laptop running the test is itself set to Sydney.
+    """
+    import os
+    import time as time_mod
+
+    from trader.engine.intraday_watch import _expiry
+
+    previous_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"      # about as far from Sydney as a host clock gets
+    time_mod.tzset()
+    try:
+        w = _watcher(journal, "07:05", 1.16420)
+        w.run_once()
+        plan = w._stored_plan(DAY, "EUR/USD")
+        local, utc = _expiry(plan, CFG)
+    finally:
+        if previous_tz is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = previous_tz
+        time_mod.tzset()
+
+    assert utc == "16:00 UTC"
+    # 16:00 UTC on 7 Oct 2026 is 03:00 AEDT the next day in Sydney -- never 09:00, the Los Angeles hour
+    # a bare .astimezone() would have produced on that host.
+    assert local.startswith("03:00"), local
+    assert "Thu 08 Oct" in local, local

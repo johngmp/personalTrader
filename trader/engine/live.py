@@ -1155,6 +1155,20 @@ def handle_commands(notifier: Notifier, journal: Journal, kill_switch: KillSwitc
     return done
 
 
+def _take_symbol(args: str, symbols: list[str]) -> tuple[str | None, str]:
+    """Pull a leading pair name off `args`, e.g. "EUR/USD 1.08421" -> ("EUR/USD", "1.08421").
+
+    Matched against the configured pairs so "eurusd" and "EUR/USD" both work -- a reply typed on a
+    phone is not going to get the slash and the case right every time.
+    """
+    first, _, rest = args.strip().partition(" ")
+    norm = first.upper().replace("/", "")
+    for symbol in symbols:
+        if symbol.replace("/", "").upper() == norm:
+            return symbol, rest.strip()
+    return None, args.strip()
+
+
 def handle_fx_commands(notifier: Notifier, journal: Journal, settings: Settings, now: datetime) -> list[str]:
     """`/taken <price>` and `/skipped`, read from the forex chat and recorded against today's open
     signal. See IntradayWatcher.report for why this is its own storage, not a repurposed `state`.
@@ -1175,7 +1189,20 @@ def handle_fx_commands(notifier: Notifier, journal: Journal, settings: Settings,
             continue
         watcher = IntradayWatcher(settings, journal, notifier, clock=lambda: now)
         day = now.date()
-        symbol = watcher.open_symbol(day)
+        # A reply carries no symbol of its own, so with one pair open today there is nothing to
+        # resolve; with two or more it has to name one, or guessing would misattribute it -- which is
+        # exactly the bug this replaced, except silent instead of asked about.
+        symbol, args = _take_symbol(args, settings.intraday.symbols)
+        if symbol is None:
+            pending = watcher.open_symbols(day)
+            if len(pending) > 1:
+                example = f"{command} EUR/USD 1.08421" if command == "/taken" else f"{command} EUR/USD"
+                notifier.send(f"More than one forex signal is open today ({', '.join(pending)}) — "
+                              f"not sure which one this is about. Reply with the pair too, e.g. "
+                              f"\"{example}\".")
+                done.append(f"telegram {command}: ambiguous ({len(pending)} open)")
+                continue
+            symbol = pending[0] if pending else None
         if symbol is None:
             notifier.send("Nothing to confirm — no forex signal is open today.")
             done.append(f"telegram {command}: nothing open")
