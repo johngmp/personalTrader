@@ -212,6 +212,7 @@ def collect(settings: Settings, journal: Journal, engines: list[Engine]) -> dict
         "fx": fx_snapshot(settings, journal, engines),
         # Rendered here rather than in render(), which only ever sees this dict.
         "intraday": intraday_card(settings, journal, now),
+        "intraday_week": intraday_week_card(settings, journal, now),
         "research": latest_research(settings),
         "gate2": latest_gate2(settings),
         "health": operational_health(settings, journal, now),
@@ -556,13 +557,34 @@ _IRV_STATE = {
     "gapped":  ("skipped",  "closed", "Skipped — it went through both levels at once"),
 }
 
+# What "done" actually was. `state` alone used to say "finished" for a target hit, a stop-out, a
+# session-end close, a no-setup day and a stranded-overnight close alike -- the one thing the Telegram
+# message sent in the moment already knew, and the dashboard then discarded it on arrival. Keyed on the
+# `outcome` kv value IntradayWatcher writes alongside `state` at every transition into "done"; a row
+# written before that existed has no `outcome` and falls back to the generic word below rather than
+# guessing one.
+_IRV_OUTCOME = {
+    "target":      ("target hit",  "ok",     "Closed — target hit"),
+    "stop":        ("stopped out", "bad",    "Closed — stopped out"),
+    "session_end": ("closed flat", "closed", "Closed at the session end"),
+    "no_setup":    ("no setup",    "closed", "No trade today — the level was never reached"),
+    "stranded":    ("left open",   "warn",   "Left open overnight — check your broker"),
+}
+
+
+def _irv_word(state: str | None, outcome: str | None) -> tuple[str, str, str]:
+    """(word, tone, headline) for a day's state, refined by its outcome when the state is "done"."""
+    if state == "done" and outcome in _IRV_OUTCOME:
+        return _IRV_OUTCOME[outcome]
+    return _IRV_STATE.get(state, _IRV_STATE["none"])
+
 
 def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
     """One pair's card. See intraday_today for why this exists at all."""
     fx = AssetClass.FOREX
     f = lambda v: format_price(v, fx)          # noqa: E731
     sym, plan, state, rate = pair["symbol"], pair["plan"], pair["state"], pair["rate"]
-    word, tone, headline = _IRV_STATE.get(state, _IRV_STATE["none"])
+    word, tone, headline = _irv_word(state, pair.get("outcome"))
 
     if plan is None:
         when = "The levels are measured from the session open and set just after it."
@@ -601,8 +623,18 @@ def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
     report = pair.get("report")
     if report is not None:
         kind, price = report
-        reported = (f'<p class="irv-reported">You reported: <b>skipped</b></p>' if kind == "skipped" else
-                    f'<p class="irv-reported">You reported: <b>taken at {f(price)}</b></p>')
+        if kind == "skipped":
+            reported = '<p class="irv-reported">You reported: <b>skipped</b></p>'
+        elif state == "gapped":
+            # Same report, different sentence: /taken records what you did unchanged, but a gapped day
+            # is one the system itself called "do NOT buy" -- rendering it in the ordinary words used
+            # for a system-endorsed take would read as an agreement the watcher never gave.
+            reported = (f'<p class="irv-reported warn">You reported: <b>taken at {f(price)}</b> — but '
+                        f'the system\'s own call that day was <b>do NOT buy</b> (it gapped past both '
+                        f'levels at once). Recorded as what you did, not as a match with what was '
+                        f'tested.</p>')
+        else:
+            reported = f'<p class="irv-reported">You reported: <b>taken at {f(price)}</b></p>'
     elif state in ("in", "done") and plan is not None:
         reported = '<p class="irv-reported subtle">No /taken or /skipped reply yet</p>'
     else:
@@ -641,7 +673,7 @@ def intraday_card(settings: Settings, journal: Journal, now: datetime | None = N
         last = "".join(
             f'<div class="plan irv"><div class="plan-head"><b>{html.escape(p["symbol"])}</b>'
             f'<span class="pill closed">{p["day"]:%a %-d %b}</span></div>'
-            f'<p class="irv-head">{html.escape(_IRV_STATE.get(p["state"], _IRV_STATE["none"])[2])}</p>'
+            f'<p class="irv-head">{html.escape(_irv_word(p["state"], p.get("outcome"))[2])}</p>'
             f'<dl class="plan-rows">'
             f'<div><dt>Buy was</dt><dd>{format_price(p["plan"].trigger, AssetClass.FOREX)}</dd></div>'
             f'<div><dt>Stop</dt><dd>{format_price(p["plan"].stop, AssetClass.FOREX)}</dd></div>'
@@ -684,8 +716,10 @@ def intraday_today(settings: Settings, journal: Journal, now: datetime | None = 
         except Exception:
             rate = None
         entry = watcher._entry(day, symbol)
+        outcome = watcher._outcome(day, symbol) if state == "done" else None
         pairs.append({"symbol": symbol, "plan": plan, "state": state, "rate": rate, "entry": entry,
-                      "report": watcher.report(day, symbol), "evidence": EVIDENCE.get(symbol)})
+                      "outcome": outcome, "report": watcher.report(day, symbol),
+                      "evidence": EVIDENCE.get(symbol)})
     # The session is quoted in UTC everywhere else because that is what the watcher works in, but the
     # person reading this is in Sydney, where 07:00 UTC is 6pm the same evening. A reader should not
     # have to do that arithmetic to know when the next message is due.
@@ -702,14 +736,91 @@ def intraday_today(settings: Settings, journal: Journal, now: datetime | None = 
             plan = watcher._stored_plan(earlier, symbol)
             if plan is None:
                 continue
-            previous.append({"symbol": symbol, "day": earlier, "plan": plan,
-                             "state": watcher._get(earlier, "state", symbol) or "waiting",
-                             "entry": watcher._entry(earlier, symbol)})
+            earlier_state = watcher._get(earlier, "state", symbol) or "waiting"
+            previous.append({"symbol": symbol, "day": earlier, "plan": plan, "state": earlier_state,
+                             "entry": watcher._entry(earlier, symbol),
+                             "outcome": watcher._outcome(earlier, symbol) if earlier_state == "done" else None})
             break
     return {"pairs": pairs, "open_utc": cfg.open_utc, "close_utc": cfg.close_utc,
             "open_local": local_open, "close_local": local_close, "previous": previous,
             "weekend": now.weekday() >= 5,
             "in_session": now.weekday() < 5 and opens <= now.time() < closes, "now": now}
+
+
+def intraday_week(settings: Settings, journal: Journal, now: datetime | None = None) -> dict:
+    """The last 7 trading days per pair, built purely by re-reading the per-day kv rows `intraday_today`
+    already reads -- `plan`, `state`, `outcome`, `entry`, `report` -- over a date range instead of one
+    day. No new storage: a week is just more of the rows that already exist, one `IntradayWatcher`
+    accessor call per row.
+
+    Returns {} when the watcher is switched off, same as `intraday_today`.
+    """
+    from trader.engine.intraday_watch import IntradayWatcher
+
+    cfg = settings.intraday
+    if not cfg.enabled or not cfg.symbols:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    watcher = IntradayWatcher(settings, journal, notifier=None, clock=lambda: now)
+
+    # Walk back far enough to collect 7 WEEKDAYS -- the market has nothing to say about a Saturday --
+    # then include every calendar day from there to today, so the weekend(s) crossed on the way still
+    # get a row rather than vanishing from the table with no explanation.
+    end = now.date()
+    weekdays: list = []
+    d = end
+    while len(weekdays) < 7:
+        if d.weekday() < 5:
+            weekdays.append(d)
+        d -= timedelta(days=1)
+    start = min(weekdays)
+    days: list = []
+    d = start
+    while d <= end:
+        days.append(d)
+        d += timedelta(days=1)
+
+    rows = []
+    for symbol in cfg.symbols:
+        for day in days:
+            if day.weekday() >= 5:
+                rows.append({"symbol": symbol, "day": day, "report": None,
+                             "word": "market shut", "tone": "closed"})
+                continue
+            state = watcher._get(day, "state", symbol)
+            outcome = watcher._outcome(day, symbol) if state == "done" else None
+            if state is None:
+                word, tone = "no setup", "closed"
+            else:
+                word, tone, _ = _irv_word(state, outcome)
+            rows.append({"symbol": symbol, "day": day, "report": watcher.report(day, symbol),
+                         "word": word, "tone": tone})
+    return {"symbols": cfg.symbols, "days": days, "rows": rows}
+
+
+def intraday_week_card(settings: Settings, journal: Journal, now: datetime | None = None) -> str:
+    """The last 7 trading days per pair, so "how has this actually been going" does not require
+    scrolling a week of Telegram history. Empty string when the watcher is switched off."""
+    d = intraday_week(settings, journal, now)
+    if not d:
+        return ""
+    fx = AssetClass.FOREX
+    f = lambda v: format_price(v, fx)        # noqa: E731
+
+    def reported(report) -> str:
+        if report is None:
+            return '<span class="subtle">no reply</span>'
+        kind, price = report
+        return "skipped" if kind == "skipped" else f"taken at {f(price)}"
+
+    body = "".join(
+        f'<tr><td>{r["day"]:%a %d %b}</td><td>{html.escape(r["symbol"])}</td>'
+        f'<td><span class="pill {r["tone"]}">{html.escape(r["word"])}</span></td>'
+        f'<td>{reported(r["report"])}</td></tr>'
+        for r in d["rows"])
+    return (f'<h2>Last 7 trading days</h2>'
+            f'<div class="card scroll"><table><tr><th>Day</th><th>Pair</th><th>Outcome</th>'
+            f'<th>You reported</th></tr>{body}</table></div>')
 
 
 def latest_research(settings: Settings) -> list[dict]:
@@ -1092,6 +1203,7 @@ def render(d: dict) -> str:
                "A negative number means these rules lost to leaving the money in T-bills, so this sleeve "
                "sends nothing to any broker and its signals are not advice to act on.") + "</p>")
         fx_card = f"""{d.get('intraday', '')}
+{d.get('intraday_week', '')}
 <h2>Forex {shut}</h2>
 <p class="subtle">{html.escape(", ".join(fx["sleeves"]))} trades these on live prices with
 <b>no orders sent anywhere</b>. Daily closes with the latest quote on the end; the feed is free and lags
@@ -1728,6 +1840,8 @@ CSS += (
     # it, because the two can and do disagree (a fill a touch above the mid, a ticket typed late).
     ".irv .irv-reported{margin:.35rem 0 0;font-size:var(--t-md);color:var(--ink2)}\n"
     ".irv .irv-reported.subtle{color:var(--muted)}\n"
+    # A /taken on a gapped day: what you did, next to the fact the system's own call was not to trade.
+    ".irv .irv-reported.warn{color:var(--warn)}\n"
     # Rule 4: space goes to what needs attention. A live trade is the only state you can still get
     # wrong, so it is the only one that raises its voice -- a left edge, not a colour wash, because a
     # wash behind these figures is the gradient-under-a-number problem rule 3 exists to prevent.

@@ -318,6 +318,21 @@ def gapped_text(p: Plan, rate: float) -> str:
             f"entry, which is a different trade from the one that was tested.")
 
 
+def gapped_taken_confirmation(symbol: str, price: float) -> str:
+    """Said back by `/taken` instead of the ordinary confirmation, when the day it lands on is one
+    `gapped_text` already told you not to trade.
+
+    `/taken` still records exactly what you report -- that never changes, whatever the day's own state
+    is. What was missing is that the dashboard and this reply then showed a gapped day's `/taken` in the
+    identical words used for a trade the system itself endorsed, so a report typed in confusion, or
+    typed because the resting order filled anyway, read as if the watcher had agreed with it.
+    """
+    return (f"✅ Recorded: you took {symbol} at {price}.\n"
+            f"⚠️ But the system's own call that day was do NOT buy — it gapped past both levels in one "
+            f"window, which is a different trade from the one that was tested. This records what you "
+            f"did; it is not the watcher agreeing with it.")
+
+
 def no_setup_text(p: Plan, cfg: IntradayConfig) -> str:
     """Said at the close on a day that never triggered, so silence never has to be interpreted.
 
@@ -472,6 +487,16 @@ class IntradayWatcher:
         raw = self._get(day, "entry", symbol)
         return float(raw) if raw else None
 
+    def _outcome(self, day: date, symbol: str) -> str | None:
+        """Which of the five ways a day ends in "done", for a reader who only sees `state`.
+
+        `state` alone collapses a target hit, a stop-out, a session-end close, a no-setup day and a
+        stranded-overnight close into the same string, "done" -- even though the Telegram message sent
+        in the moment already knew which one it was. Written alongside `state` at every transition into
+        "done", additively, so an old row from before this existed simply has none.
+        """
+        return self._get(day, "outcome", symbol)
+
     # --- what you actually did, as reported over Telegram -------------------------------------------
     #
     # Everything above this point is the system's own side of the trade: the rate it quoted when it
@@ -511,6 +536,15 @@ class IntradayWatcher:
             if self._get(day, "plan", symbol):
                 return symbol
         return None
+
+    def is_gapped(self, day: date, symbol: str) -> bool:
+        """True when the day's own verdict was `gapped` -- both levels crossed in one window.
+
+        `open_symbol` still answers `/taken` on a day like this exactly as on any other: what you
+        report is yours to report, unchanged. This is for the caller that wants to say, alongside the
+        recording, that the system's own call that day was not to trade at all. See `gapped_text`.
+        """
+        return self._get(day, "state", symbol) == "gapped"
 
     def _store_plan(self, p: Plan) -> None:
         self._set(p.day, "plan", f"{p.session_open},{p.atr},{p.trigger},{p.stop},{p.target},{p.qty}",
@@ -607,6 +641,7 @@ class IntradayWatcher:
             return []
         if not self._claim(day, symbol, "in", "done"):
             return []
+        self._set(day, "outcome", why, symbol)             # see _outcome: "target" or "stop"
         if not self._announce(sell_text(plan, rate, why, self._entry(day, symbol)),
                               self._key(day, "state", symbol), "done", was="in"):
             return [f"intraday SELL {symbol} not delivered; will retry"]
@@ -712,6 +747,7 @@ class IntradayWatcher:
                 continue
             if not self._claim(day, symbol, "in", "done"):
                 continue
+            self._set(day, "outcome", "stranded", symbol)
             if not self._announce(stranded_text(plan, self._entry(day, symbol)),
                                   self._key(day, "state", symbol), "done", was="in"):
                 out.append(f"intraday: {symbol} from {day} left open, message not delivered; will retry")
@@ -746,6 +782,7 @@ class IntradayWatcher:
             # system knew and never told you. Silence should not need interpreting.
             if not self._claim(day, symbol, None, "done"):
                 return []
+            self._set(day, "outcome", "no_setup", symbol)
             if not self._announce(no_setup_text(plan, self.cfg), self._key(day, "state", symbol), "done"):
                 return [f"intraday: no {symbol} setup message not delivered; will retry"]
             return [f"intraday: no {symbol} setup today"]
@@ -755,6 +792,7 @@ class IntradayWatcher:
             return []
         if not self._claim(day, symbol, "in", "done"):
             return []
+        self._set(day, "outcome", "session_end", symbol)
         if not self._announce(sell_text(plan, rate, "session end", self._entry(day, symbol)),
                               self._key(day, "state", symbol), "done", was="in"):
             return [f"intraday SELL {symbol} (session end) not delivered; will retry"]
