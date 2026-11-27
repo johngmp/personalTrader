@@ -178,7 +178,7 @@ class Telegram:
         out: list[tuple[str, str, str]] = []
         for update in updates:
             offset = max(offset, update["update_id"] + 1)
-            self._remember_group(update, store)
+            self._remember_group(update, store, self.chat_id)
             message = update.get("message") or {}
             chat_id = str(message.get("chat", {}).get("id"))
             parts = (message.get("text") or "").strip().split(maxsplit=1)
@@ -198,8 +198,9 @@ class Telegram:
                 if chat_id == self.chat_id]
 
     @staticmethod
-    def _remember_group(update: dict, store: KV) -> None:
-        """Write down any group this bot is shown, because this poll is about to destroy the evidence.
+    def _remember_group(update: dict, store: KV, owner_chat_id: str) -> None:
+        """Write down a group this bot is shown BY ITS OWNER, because this poll is about to destroy the
+        evidence.
 
         `getUpdates` with an offset CONFIRMS everything before it, and Telegram then deletes those
         updates for good. The engine polls every fifteen minutes, so the `my_chat_member` update that
@@ -211,13 +212,23 @@ class Telegram:
         So the consumer records it. Whichever path sees the group first, the id survives: cooperation
         instead of a race over the same one-shot queue. Commands are still only accepted from the main
         chat -- being remembered here does not grant a group the right to halt the engine.
+
+        The bot's username is public, unlike its token, so a stranger can add it to their own group at
+        any time. Without a check on who did the adding, that stranger's chat would get written to
+        `LAST_GROUP_KEY` and `telegram-setup --fx` would happily wire every forex ticket to it the next
+        time the live lookup came up empty -- which is the expected case, not the rare one. So only a
+        `my_chat_member` change performed BY THE OWNER (`from.id` matching the already-configured
+        `TELEGRAM_CHAT_ID`) counts. `message`/`channel_post` updates have no such actor to check against
+        membership, and are not a vector for adding the bot anywhere, so they are ignored for this
+        purpose.
         """
-        for chat in ((update.get("message") or {}).get("chat"),
-                     (update.get("channel_post") or {}).get("chat"),
-                     (update.get("my_chat_member") or {}).get("chat")):
-            if chat and chat.get("type") in {"group", "supergroup", "channel"}:
-                store.kv_set(LAST_GROUP_KEY, json.dumps(
-                    {"id": chat["id"], "title": chat.get("title"), "type": chat["type"]}))
+        actor = (update.get("my_chat_member") or {}).get("from") or {}
+        if str(actor.get("id")) != owner_chat_id:
+            return
+        chat = (update.get("my_chat_member") or {}).get("chat")
+        if chat and chat.get("type") in {"group", "supergroup", "channel"}:
+            store.kv_set(LAST_GROUP_KEY, json.dumps(
+                {"id": chat["id"], "title": chat.get("title"), "type": chat["type"]}))
 
 
 def _notifier_for(token: str, chat_id: str, missing: str, env_path: Path) -> Notifier:

@@ -696,7 +696,8 @@ def test_polling_for_commands_writes_down_any_group_it_is_shown():
 
     _, store = _poll_once([
         {"update_id": 1,
-         "my_chat_member": {"chat": {"id": -500, "type": "supergroup", "title": "Forex tickets"}}},
+         "my_chat_member": {"chat": {"id": -500, "type": "supergroup", "title": "Forex tickets"},
+                            "from": {"id": 111}}},     # the owner, chat_id "111" in _poll_once
     ])
     noted = json.loads(store[LAST_GROUP_KEY])
     assert noted["id"] == -500 and noted["title"] == "Forex tickets"
@@ -714,7 +715,8 @@ def test_a_remembered_group_is_still_there_after_the_queue_is_gone():
 
     _, store = _poll_once([
         {"update_id": 7,
-         "my_chat_member": {"chat": {"id": -900, "type": "group", "title": "FX"}}},
+         "my_chat_member": {"chat": {"id": -900, "type": "group", "title": "FX"},
+                            "from": {"id": 111}}},     # the owner
     ])
 
     # Telegram now has nothing left to give: the poll above confirmed the queue.
@@ -729,15 +731,31 @@ def test_a_remembered_group_is_still_there_after_the_queue_is_gone():
 
 
 def test_being_remembered_does_not_let_a_group_halt_the_engine():
-    """The group is recorded, not trusted. Commands stay restricted to the configured chat, or anyone
-    who found the bot could add it to a group and send /halt."""
+    """The group is recorded, not trusted. Commands stay restricted to the configured chat, even when
+    sent from a group the owner really did add the bot to."""
     commands, store = _poll_once([
-        {"update_id": 1, "message": {"chat": {"id": -500, "type": "group", "title": "FX"},
-                                     "text": "/halt"}},
+        {"update_id": 1, "my_chat_member": {"chat": {"id": -500, "type": "group", "title": "FX"},
+                                            "from": {"id": 111}}},        # the owner adds the bot
+        {"update_id": 2, "message": {"chat": {"id": -500, "type": "group", "title": "FX"},
+                                     "text": "/halt"}},                   # someone in that group tries /halt
     ])
     assert commands == [], "a command from a group must be ignored"
     from trader.notify.telegram import LAST_GROUP_KEY
     assert LAST_GROUP_KEY in store, "but the group is still noted"
+
+
+def test_a_group_added_by_a_non_owner_is_not_remembered():
+    """The whole point of the fix: the bot's username is discoverable, unlike its token, so a stranger
+    can add the bot to their own group at any time. That must not get written to LAST_GROUP_KEY, or
+    `telegram-setup --fx` would wire every forex ticket to the stranger's chat the next time the live
+    `getUpdates` lookup came up empty -- the expected case, not a rare one."""
+    from trader.notify.telegram import LAST_GROUP_KEY
+
+    _, store = _poll_once([
+        {"update_id": 1, "my_chat_member": {"chat": {"id": -999, "type": "group", "title": "Not yours"},
+                                            "from": {"id": 666}}},        # a stranger, not chat_id "111"
+    ])
+    assert LAST_GROUP_KEY not in store
 
 
 def test_a_command_from_the_real_chat_still_works():
@@ -761,7 +779,8 @@ def test_the_main_private_chat_is_never_recorded_as_the_forex_group():
     from trader.notify.telegram import LAST_GROUP_KEY
 
     _, store = _poll_once([
-        {"update_id": 1, "my_chat_member": {"chat": {"id": -500, "type": "group", "title": "FX"}}},
+        {"update_id": 1, "my_chat_member": {"chat": {"id": -500, "type": "group", "title": "FX"},
+                                            "from": {"id": 111}}},
         {"update_id": 2, "message": {"chat": {"id": 111, "type": "private"}, "text": "hi"}},
     ])
     assert json.loads(store[LAST_GROUP_KEY])["id"] == -500, "the group must survive a later private message"
@@ -775,3 +794,111 @@ def test_nothing_is_recorded_when_only_a_private_chat_is_seen():
         {"update_id": 1, "message": {"chat": {"id": 111, "type": "private"}, "text": "/status"}},
     ])
     assert LAST_GROUP_KEY not in store
+
+
+# --- the operator must confirm a candidate chat before it becomes the destination ----------------------
+#
+# `find_chat`/`find_group_chat` hand back whoever messaged the bot MOST RECENTLY, not necessarily the
+# owner. A stray message from a stranger who found the bot by searching its public username -- arriving
+# before the owner's own "Start" message -- would otherwise be silently adopted as the destination for
+# every trade alert and the daily summary.
+
+class _FakeTelegram:
+    """Records what would have been sent, without touching the network."""
+
+    sent: list[tuple[str, str]] = []
+
+    def __init__(self, token, chat_id):
+        self.chat_id = chat_id
+
+    def send(self, text):
+        _FakeTelegram.sent.append((self.chat_id, text))
+        return True
+
+
+def test_telegram_setup_declines_leave_env_and_telegram_untouched(settings, monkeypatch):
+    import argparse
+
+    from trader import cli
+    from trader.notify import telegram
+
+    _FakeTelegram.sent = []
+    chat = {"id": 42, "type": "private", "first_name": "Sam"}
+    monkeypatch.setattr(telegram, "find_chat", lambda _token: ("my_trader_bot", chat))
+    monkeypatch.setattr(telegram, "Telegram", _FakeTelegram)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "n")   # operator declines
+
+    env_path = settings.root / ".env"
+    env_path.write_text("TELEGRAM_BOT_TOKEN=tok\n")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+
+    rc = cli.cmd_telegram_setup(settings, argparse.Namespace(fx=False))
+    assert rc == 1
+    assert env_path.read_text() == "TELEGRAM_BOT_TOKEN=tok\n", "declining must leave .env unchanged"
+    assert _FakeTelegram.sent == [], "declining must send no message"
+
+
+def test_telegram_setup_writes_env_only_once_confirmed(settings, monkeypatch):
+    import argparse
+
+    from trader import cli
+    from trader.notify import telegram
+
+    _FakeTelegram.sent = []
+    chat = {"id": 42, "type": "private", "first_name": "Sam"}
+    monkeypatch.setattr(telegram, "find_chat", lambda _token: ("my_trader_bot", chat))
+    monkeypatch.setattr(telegram, "Telegram", _FakeTelegram)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "y")   # operator confirms
+
+    env_path = settings.root / ".env"
+    env_path.write_text("TELEGRAM_BOT_TOKEN=tok\n")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+
+    rc = cli.cmd_telegram_setup(settings, argparse.Namespace(fx=False))
+    assert rc == 0
+    assert "TELEGRAM_CHAT_ID=42" in env_path.read_text()
+    assert _FakeTelegram.sent, "confirming must still send the welcome message"
+
+
+def test_fx_setup_declines_leave_env_and_telegram_untouched(settings, monkeypatch):
+    import argparse
+
+    from trader import cli
+    from trader.notify import telegram
+
+    _FakeTelegram.sent = []
+    chat = {"id": -500, "type": "group", "title": "FX"}
+    monkeypatch.setattr(telegram, "find_group_chat", lambda _token: ("my_trader_bot", chat))
+    monkeypatch.setattr(telegram, "Telegram", _FakeTelegram)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "n")   # operator declines
+
+    env_path = settings.root / ".env"
+    env_path.write_text("TELEGRAM_BOT_TOKEN=tok\n")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+
+    rc = cli.cmd_telegram_setup(settings, argparse.Namespace(fx=True))
+    assert rc == 1
+    assert env_path.read_text() == "TELEGRAM_BOT_TOKEN=tok\n", "declining must leave .env unchanged"
+    assert _FakeTelegram.sent == [], "declining must send no message"
+
+
+def test_fx_setup_writes_env_only_once_confirmed(settings, monkeypatch):
+    import argparse
+
+    from trader import cli
+    from trader.notify import telegram
+
+    _FakeTelegram.sent = []
+    chat = {"id": -500, "type": "group", "title": "FX"}
+    monkeypatch.setattr(telegram, "find_group_chat", lambda _token: ("my_trader_bot", chat))
+    monkeypatch.setattr(telegram, "Telegram", _FakeTelegram)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "y")   # operator confirms
+
+    env_path = settings.root / ".env"
+    env_path.write_text("TELEGRAM_BOT_TOKEN=tok\n")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+
+    rc = cli.cmd_telegram_setup(settings, argparse.Namespace(fx=True))
+    assert rc == 0
+    assert "TELEGRAM_FX_CHAT_ID=-500" in env_path.read_text()
+    assert _FakeTelegram.sent, "confirming must still send the welcome message"

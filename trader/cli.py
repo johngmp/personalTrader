@@ -675,6 +675,27 @@ def cmd_ctrader_auth(settings: Settings, _: argparse.Namespace) -> int:
     return 0
 
 
+def _confirm_candidate_chat(chat: dict, use: str) -> bool:
+    """Print the candidate chat's identifying details and ask the operator to confirm before anything
+    is written to .env or sent to it.
+
+    `find_chat`/`find_group_chat` -- and the `LAST_GROUP_KEY` fallback they share with the engine --
+    return whoever messaged the bot MOST RECENTLY, not necessarily the owner. A stray message from
+    someone who found the bot by searching its public username, arriving before the owner's own
+    "Start" message, would otherwise be silently adopted as the destination for every trade alert and
+    the daily summary.
+    """
+    who = (" ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+           or chat.get("title") or chat.get("username") or "(no name)")
+    print(f"\nFound a chat to {use}:")
+    print(f"  name/title : {who}")
+    if chat.get("username"):
+        print(f"  username   : @{chat['username']}")
+    print(f"  type       : {chat.get('type', '?')}")
+    print(f"  chat id    : {chat['id']}")
+    return input("Is this really the right chat? [y/N]: ").strip().lower() in ("y", "yes")
+
+
 def cmd_telegram_setup(settings: Settings, args: argparse.Namespace) -> int:
     import os
 
@@ -706,6 +727,9 @@ def cmd_telegram_setup(settings: Settings, args: argparse.Namespace) -> int:
     if chat is None:
         print(f"Token works (bot @{username}), but nobody has messaged it yet.\n"
               f"Open https://t.me/{username} in Telegram, press Start (or send 'hi'), then run this again.")
+        return 1
+    if not _confirm_candidate_chat(chat, "connect as your Telegram chat"):
+        print("Not confirmed. .env left unchanged and no message sent.")
         return 1
     chat_id = str(chat["id"])
     set_env_value(env_path, "TELEGRAM_CHAT_ID", chat_id)
@@ -765,6 +789,9 @@ def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Tel
               "\nThen run this command again. Step 4 matters: a plain group message does not reach a "
               "bot whose privacy mode is on, which is the default, but a command addressed to it "
               "always does.")
+        return 1
+    if not _confirm_candidate_chat(chat, "use for forex tickets"):
+        print("Not confirmed. .env left unchanged and no message sent.")
         return 1
     chat_id = str(chat["id"])
     set_env_value(env_path, "TELEGRAM_FX_CHAT_ID", chat_id)
