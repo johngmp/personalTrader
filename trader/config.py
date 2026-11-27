@@ -144,6 +144,17 @@ class IntradayConfig(BaseModel):
     # clear it, THIS sets the position size and the risk per trade -- so a wrong value here is wrong on
     # every single trade, in the direction of risking more than intended.
     min_lot: float = 0.01
+    # The London session (07:00-16:00 UTC) lands at 18:00-03:00 Sydney local, so a record-only alert --
+    # one telling you what the broker's own SL/TP already did, not one asking you to do something -- can
+    # just as easily land at 2am as at 7pm. Queuing those overnight and delivering one batched message
+    # the next time anything runs after the window ends means a quiet night does not mean a buzzing
+    # phone. Half past eleven rather than eleven on the dot: the close is 03:00 Sydney and most
+    # record-only exits cluster either side of midnight, so starting a little into the evening still
+    # catches all of those without swallowing the last hour of a normal evening session. Plan and buy
+    # alerts -- the ones that need you to actually do something -- are never delayed by this, whatever
+    # these are set to.
+    quiet_hours_start: str = "23:30"
+    quiet_hours_end: str = "07:00"
 
     @field_validator("symbols")
     @classmethod

@@ -1322,6 +1322,7 @@ class Coordinator:
         # Swept first and unconditionally: a trade stranded by a missed 16:00 close has to be raised
         # whatever today is, including a weekend, and before a new day's plan is built over the top.
         did = watcher.sweep_unfinished() + watcher.run_once(report) + watcher.close_out()
+        did += watcher.flush_queued()
         report.actions += did
         # Journalled explicitly, because this runs AFTER each engine has already logged its own
         # "run finished" line -- so everything the forex watcher did was absent from the journal

@@ -28,11 +28,22 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from trader.config import IntradayConfig
 from trader.models import AssetClass, format_price, round_price
 
 PIP = 1e-4
+
+# Same zone live.py uses for the daily digest. Quiet hours are a Sydney-local idea -- the London
+# session sent its record-only alerts at whatever UTC o'clock the market happened to touch a level, and
+# the only clock that matters for "is anyone awake" is the one on this side of the world.
+SYDNEY = ZoneInfo("Australia/Sydney")
+
+# Where a queued record-only alert is kept until quiet hours end. Namespaced apart from `irv:queue:`
+# itself (no trailing colon) so a LIKE "irv:queue:%" sweep of the queue never also matches the counter.
+QUEUE_SEQ_KEY = "irv:queueseq"
+QUEUE_PREFIX = "irv:queue:"
 
 # Liveness keys. `last_pass` moves on every executed pass and nothing else; `downtime_reported` holds
 # the `last_pass` value an outage was already announced for, so a long gap is reported once rather than
@@ -449,6 +460,59 @@ class IntradayWatcher:
                          level="error")
         return False
 
+    def _in_quiet_hours(self, now: datetime) -> bool:
+        """True during the configured Sydney-local overnight window. See `IntradayConfig.quiet_hours_*`."""
+        start, end = _parse(self.cfg.quiet_hours_start), _parse(self.cfg.quiet_hours_end)
+        if start == end:
+            return False                        # a zero-width window means the feature is off
+        local = now.astimezone(SYDNEY).time()
+        if start < end:
+            return start <= local < end
+        return local >= start or local < end     # wraps past midnight, the normal case
+
+    def _enqueue(self, text: str) -> None:
+        """Hold a record-only alert for delivery once quiet hours end. See `flush_queued`."""
+        seq = int(self.journal.kv_get(QUEUE_SEQ_KEY) or "0") + 1
+        self.journal.kv_set(QUEUE_SEQ_KEY, str(seq))
+        self.journal.kv_set(f"{QUEUE_PREFIX}{seq:08d}", text)
+
+    def _announce_record_only(self, text: str, key: str, wrote: str, was: str | None = None) -> bool:
+        """Like `_announce`, but for a message that only records what the broker already did.
+
+        During quiet hours the message is queued instead of sent -- see `flush_queued` for delivery.
+        The state transition is claimed either way: the trade already happened at the broker the
+        moment the level was crossed, whether or not anything is awake to say so right now. Queuing is
+        a local database write, not a network call, so there is no failure mode here to roll back the
+        way a failed Telegram send has one.
+        """
+        if self._in_quiet_hours(self.clock()):
+            self._enqueue(text)
+            return True
+        return self._announce(text, key, wrote, was)
+
+    def flush_queued(self) -> list[str]:
+        """Deliver anything queued overnight, as one message, the first pass after quiet hours end.
+
+        One batched message rather than one per alert: the point of queuing a quiet night is that it
+        stays quiet, not that the silence is repaid with a burst of pings the moment the window closes.
+        """
+        if not self.cfg.enabled or self._in_quiet_hours(self.clock()):
+            return []
+        items = [(k, v) for k, v in
+                 ((k, self.journal.kv_get(k)) for k in self.journal.kv_keys(f"{QUEUE_PREFIX}%"))
+                 if v]
+        if not items:
+            return []
+        body = "\n\n— — —\n\n".join(text for _, text in items)
+        batched = (f"🌙 {len(items)} overnight update(s) from while you were asleep -- every one of "
+                   f"these is a record of something your broker already did, nothing to act on now:\n\n"
+                   f"{body}")
+        if not self.notifier.send(batched):
+            return ["intraday: queued overnight alert(s) not delivered; will retry"]
+        for key, text in items:
+            self.journal.kv_del_if(key, text)
+        return [f"intraday: delivered {len(items)} queued overnight alert(s)"]
+
     def _get(self, day: date, name: str, symbol: str) -> str | None:
         return self.journal.kv_get(self._key(day, name, symbol))
 
@@ -583,7 +647,8 @@ class IntradayWatcher:
                 # down here is simply a different trade from the one that was measured.
                 if not self._claim(day, symbol, None, "gapped"):
                     return []
-                if not self._announce(gapped_text(plan, rate), self._key(day, "state", symbol), "gapped"):
+                if not self._announce_record_only(gapped_text(plan, rate), self._key(day, "state", symbol),
+                                                  "gapped"):
                     return [f"intraday: {symbol} gapped, message not delivered; will retry"]
                 return [f"intraday: {symbol} gapped past the stop at {rate:.5f}; day skipped"]
             if rate <= plan.trigger:
@@ -607,8 +672,10 @@ class IntradayWatcher:
             return []
         if not self._claim(day, symbol, "in", "done"):
             return []
-        if not self._announce(sell_text(plan, rate, why, self._entry(day, symbol)),
-                              self._key(day, "state", symbol), "done", was="in"):
+        # Target and stop are both record-only here -- the broker's attached SL/TP closed this without
+        # anyone watching, so the message is the record, not an instruction. See `sell_text`.
+        if not self._announce_record_only(sell_text(plan, rate, why, self._entry(day, symbol)),
+                                          self._key(day, "state", symbol), "done", was="in"):
             return [f"intraday SELL {symbol} not delivered; will retry"]
         return [f"intraday SELL {symbol} at {rate:.5f} ({why})"]
 
@@ -712,8 +779,8 @@ class IntradayWatcher:
                 continue
             if not self._claim(day, symbol, "in", "done"):
                 continue
-            if not self._announce(stranded_text(plan, self._entry(day, symbol)),
-                                  self._key(day, "state", symbol), "done", was="in"):
+            if not self._announce_record_only(stranded_text(plan, self._entry(day, symbol)),
+                                              self._key(day, "state", symbol), "done", was="in"):
                 out.append(f"intraday: {symbol} from {day} left open, message not delivered; will retry")
                 continue
             out.append(f"intraday: {symbol} from {day} was left open; told you to check it")
