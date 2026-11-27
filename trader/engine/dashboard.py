@@ -557,6 +557,26 @@ _IRV_STATE = {
 }
 
 
+def _irv_row(label: str, value: str) -> str:
+    """One <dt>/<dd> pair in a plan's row list.
+
+    Pulled out so the live card below and the "previous session" fallback in `intraday_card` render a
+    row the same way and cannot drift on this markup independently of the different fields each shows.
+    """
+    return f'<div><dt>{html.escape(label)}</dt><dd>{value}</dd></div>'
+
+
+def _irv_shell(sym: str, tone: str, word: str, body: str, extra_class: str = "") -> str:
+    """The card wrapper every intraday tile shares: the symbol, a pill, then whatever `body` is.
+
+    Pulled out so the "previous session" fallback in `intraday_card` can't drift from the live card
+    here by hand-rolling its own copy of this div -- which is exactly how it used to go out of sync.
+    """
+    return (f'<div class="plan irv{f" {extra_class}" if extra_class else ""}">'
+            f'<div class="plan-head"><b>{html.escape(sym)}</b>'
+            f'<span class="pill {tone}">{word}</span></div>{body}</div>')
+
+
 def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
     """One pair's card. See intraday_today for why this exists at all."""
     fx = AssetClass.FOREX
@@ -568,17 +588,15 @@ def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
         when = "The levels are measured from the session open and set just after it."
         if state == "missed":
             when = "The open was missed, so the levels cannot be measured from it. Skipped, by design."
-        return (f'<div class="plan irv"><div class="plan-head"><b>{html.escape(sym)}</b>'
-                f'<span class="pill {tone}">{word}</span></div>'
-                f'<p class="subtle">{html.escape(headline)}. {html.escape(when)}</p></div>')
+        return _irv_shell(sym, tone, word,
+                          f'<p class="subtle">{html.escape(headline)}. {html.escape(when)}</p>')
 
     rows = (
-        f'<div><dt>Buy at</dt><dd>{f(plan.trigger)}</dd></div>'
-        f'<div><dt>Stop</dt><dd>{f(plan.stop)}'
-        f'<span class="subtle"> {plan.risk_pips:.0f} pips · ${plan.risk_usd:,.0f}</span></dd></div>'
-        f'<div><dt>Target</dt><dd>{f(plan.target)}'
-        f'<span class="subtle"> {plan.reward_pips:.0f} pips</span></dd></div>'
-        f'<div><dt>Size</dt><dd>{plan.qty:,.0f}<span class="subtle"> units</span></dd></div>')
+        _irv_row("Buy at", f(plan.trigger)) +
+        _irv_row("Stop", f'{f(plan.stop)}<span class="subtle"> {plan.risk_pips:.0f} pips · '
+                          f'${plan.risk_usd:,.0f}</span>') +
+        _irv_row("Target", f'{f(plan.target)}<span class="subtle"> {plan.reward_pips:.0f} pips</span>') +
+        _irv_row("Size", f'{plan.qty:,.0f}<span class="subtle"> units</span>'))
 
     live = ""
     if rate is not None:
@@ -613,10 +631,9 @@ def _irv_pair(pair: dict, close_utc: str, in_session: bool) -> str:
     evidence = pair.get("evidence")
     foot = (f'<p class="ap-note">{html.escape(note)} '
             f'{("Shadow test — " + html.escape(evidence) + ". Not advice.") if evidence else ""}</p>')
-    return (f'<div class="plan irv irv-{html.escape(state)}"><div class="plan-head">'
-            f'<b>{html.escape(sym)}</b><span class="pill {tone}">{word}</span></div>'
-            f'<p class="irv-head">{html.escape(headline)}</p>'
-            f'<dl class="plan-rows">{rows}</dl>{live}{reported}{foot}</div>')
+    body = (f'<p class="irv-head">{html.escape(headline)}</p>'
+            f'<dl class="plan-rows">{rows}</dl>{live}{reported}{foot}')
+    return _irv_shell(sym, tone, word, body, extra_class=f"irv-{html.escape(state)}")
 
 
 def intraday_card(settings: Settings, journal: Journal, now: datetime | None = None) -> str:
@@ -639,14 +656,15 @@ def intraday_card(settings: Settings, journal: Journal, now: datetime | None = N
     # When today has nothing yet, the last session is more use than an empty card.
     if all(p["plan"] is None for p in d["pairs"]) and d.get("previous"):
         last = "".join(
-            f'<div class="plan irv"><div class="plan-head"><b>{html.escape(p["symbol"])}</b>'
-            f'<span class="pill closed">{p["day"]:%a %-d %b}</span></div>'
-            f'<p class="irv-head">{html.escape(_IRV_STATE.get(p["state"], _IRV_STATE["none"])[2])}</p>'
-            f'<dl class="plan-rows">'
-            f'<div><dt>Buy was</dt><dd>{format_price(p["plan"].trigger, AssetClass.FOREX)}</dd></div>'
-            f'<div><dt>Stop</dt><dd>{format_price(p["plan"].stop, AssetClass.FOREX)}</dd></div>'
-            f'<div><dt>Target</dt><dd>{format_price(p["plan"].target, AssetClass.FOREX)}</dd></div>'
-            f'</dl></div>' for p in d["previous"])
+            _irv_shell(p["symbol"], "closed", f'{p["day"]:%a %-d %b}',
+                      f'<p class="irv-head">'
+                      f'{html.escape(_IRV_STATE.get(p["state"], _IRV_STATE["none"])[2])}</p>'
+                      f'<dl class="plan-rows">'
+                      f'{_irv_row("Buy was", format_price(p["plan"].trigger, AssetClass.FOREX))}'
+                      f'{_irv_row("Stop", format_price(p["plan"].stop, AssetClass.FOREX))}'
+                      f'{_irv_row("Target", format_price(p["plan"].target, AssetClass.FOREX))}'
+                      f'</dl>')
+            for p in d["previous"])
         body += last
     return (f'<h2>Today\'s plan <span class="pill closed">you place these</span></h2>'
             f'<p class="subtle">These are the messages sent to your phone, shown here so the answer to '
@@ -677,7 +695,7 @@ def intraday_today(settings: Settings, journal: Journal, now: datetime | None = 
     pairs = []
     for symbol in cfg.symbols:
         plan = watcher._stored_plan(day, symbol)
-        state = watcher._get(day, "state", symbol) or ("waiting" if plan else "none")
+        state = watcher._state(day, symbol, plan)
         rate = None
         try:
             rate = watcher._rate(symbol)
@@ -703,7 +721,7 @@ def intraday_today(settings: Settings, journal: Journal, now: datetime | None = 
             if plan is None:
                 continue
             previous.append({"symbol": symbol, "day": earlier, "plan": plan,
-                             "state": watcher._get(earlier, "state", symbol) or "waiting",
+                             "state": watcher._state(earlier, symbol, plan),
                              "entry": watcher._entry(earlier, symbol)})
             break
     return {"pairs": pairs, "open_utc": cfg.open_utc, "close_utc": cfg.close_utc,

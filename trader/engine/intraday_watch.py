@@ -472,6 +472,18 @@ class IntradayWatcher:
         raw = self._get(day, "entry", symbol)
         return float(raw) if raw else None
 
+    def _state(self, day: date, symbol: str, plan: Plan | None) -> str:
+        """What today's state is, given whatever row is actually stored and whether a plan exists.
+
+        The stored value always wins. Absent one, a day with a plan and nothing written against it yet
+        is "waiting" for its trigger -- plan creation claims that explicitly now (see `_run_symbol`), so
+        the only rows that still rely on this default are ones written before that existed, or a test
+        that stores a plan directly. Absent a plan too, there is no "waiting": nothing has happened,
+        which only the dashboard's `intraday_today` needs to tell apart from "waiting" (`none` and
+        `waiting` render as different pills), so this is shared rather than reimplemented there.
+        """
+        return self._get(day, "state", symbol) or ("waiting" if plan else "none")
+
     # --- what you actually did, as reported over Telegram -------------------------------------------
     #
     # Everything above this point is the system's own side of the trade: the rate it quoted when it
@@ -559,15 +571,30 @@ class IntradayWatcher:
             plan = build_plan(self.cfg, rate, self._daily_ranges(symbol), day, symbol)
             if plan is None:
                 return []
+            # Claimed on the STATE key, exactly like every other transition -- see `_claim`. This used
+            # to be a bare `kv_set_if` on the PLAN key instead, which only ever raced against another
+            # process also building a plan. It did not race against the `missed` claim just above,
+            # which writes the state key: one process could be here, mid-build, while a slightly later
+            # one decided the open had been missed and claimed "missed" on an empty state key. The first
+            # process would then go on to store a plan and send it -- a plan message AND a "no plan
+            # today" message for the same day -- and leave the state on "missed", so the plan it had
+            # just told you to place would never be watched for its trigger. Claiming "waiting" here,
+            # before the plan is stored, closes that window: whichever of "missed" or "waiting" writes
+            # the empty state key first is the only one that gets to act.
+            if not self._claim(day, symbol, None, "waiting"):
+                return []                               # someone else already decided today
             stored = (f"{plan.session_open},{plan.atr},{plan.trigger},"
                       f"{plan.stop},{plan.target},{plan.qty}")
-            if not self.journal.kv_set_if(self._key(day, "plan", symbol), None, stored):
-                return []                               # another process got there first
-            if not self._announce(plan_text(plan, self.cfg), self._key(day, "plan", symbol), stored):
+            self._store_plan(plan)
+            if not self._announce(plan_text(plan, self.cfg), self._key(day, "state", symbol), "waiting"):
+                # The plan row goes with the claim. Left behind, `_stored_plan` above would find it on
+                # the next pass and skip straight past rebuilding the plan -- even though the claim (and
+                # so the message) was just undone.
+                self.journal.kv_del_if(self._key(day, "plan", symbol), stored)
                 return [f"intraday plan for {symbol} could not be delivered; will retry"]
             return [f"intraday plan for {symbol}: buy {plan.trigger:.5f}"]
 
-        state = self._get(day, "state", symbol) or "waiting"
+        state = self._state(day, symbol, plan)
         if state in ("done", "missed", "gapped"):
             return []
         rate = self._rate(symbol)
@@ -581,16 +608,18 @@ class IntradayWatcher:
                 # on the next run. The tested rule enters with a RESTING LIMIT at the trigger, so it is
                 # either already filled and already stopped, or it never happened -- and a fresh entry
                 # down here is simply a different trade from the one that was measured.
-                if not self._claim(day, symbol, None, "gapped"):
+                if not self._claim(day, symbol, "waiting", "gapped"):
                     return []
-                if not self._announce(gapped_text(plan, rate), self._key(day, "state", symbol), "gapped"):
+                if not self._announce(gapped_text(plan, rate), self._key(day, "state", symbol), "gapped",
+                                      was="waiting"):
                     return [f"intraday: {symbol} gapped, message not delivered; will retry"]
                 return [f"intraday: {symbol} gapped past the stop at {rate:.5f}; day skipped"]
             if rate <= plan.trigger:
-                if not self._claim(day, symbol, None, "in"):
+                if not self._claim(day, symbol, "waiting", "in"):
                     return []
                 self._set(day, "entry", f"{rate}", symbol)       # what the message quoted, for the sell to measure from
-                if not self._announce(buy_text(plan, rate), self._key(day, "state", symbol), "in"):
+                if not self._announce(buy_text(plan, rate), self._key(day, "state", symbol), "in",
+                                      was="waiting"):
                     # The entry goes with the claim. Leaving it behind would have the retried BUY --
                     # or a later SELL -- measure profit from a rate that was never sent to anyone.
                     self.journal.kv_del_if(self._key(day, "entry", symbol), f"{rate}")
@@ -733,20 +762,21 @@ class IntradayWatcher:
 
     def _close_symbol(self, symbol: str, now: datetime) -> list[str]:
         day = now.date()
-        state = self._get(day, "state", symbol) or "waiting"
-        if state not in ("in", "waiting"):
-            return []
         plan = self._stored_plan(day, symbol)
         if plan is None:
+            return []
+        state = self._state(day, symbol, plan)
+        if state not in ("in", "waiting"):
             return []
 
         if state == "waiting":
             # The day is over and the level was never reached. Said once, because you asked why no
             # messages were arriving and the honest answer was "the setup did not happen" -- which the
             # system knew and never told you. Silence should not need interpreting.
-            if not self._claim(day, symbol, None, "done"):
+            if not self._claim(day, symbol, "waiting", "done"):
                 return []
-            if not self._announce(no_setup_text(plan, self.cfg), self._key(day, "state", symbol), "done"):
+            if not self._announce(no_setup_text(plan, self.cfg), self._key(day, "state", symbol), "done",
+                                  was="waiting"):
                 return [f"intraday: no {symbol} setup message not delivered; will retry"]
             return [f"intraday: no {symbol} setup today"]
 

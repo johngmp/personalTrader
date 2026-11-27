@@ -192,6 +192,28 @@ def test_a_plan_built_inside_the_window_is_still_allowed(journal):
     assert w.run_once() and "Market Execution to BUY LIMIT" in w.notifier.sent[0]
 
 
+def test_plan_creation_cannot_win_after_missed_has_already_claimed_the_day(journal):
+    """Plan creation must be claimed on the same STATE key as every other transition, not on the plan
+    row by itself.
+
+    The plan row's own `kv_set_if` only ever raced against another process also building a plan -- never
+    against `missed`, which claims the state key. A process could fetch its rate, build a Plan, and only
+    THEN discover (if it checked at all) that a slightly later pass had already decided the open was
+    missed and claimed "missed" on an empty state key. Claiming on the plan row let it go on anyway: a
+    plan stored and sent, state left on "missed", so the plan it had just told you to place would never
+    be watched for its trigger and a "no plan today" message would also have gone out for the same day.
+    """
+    w = _watcher(journal, "07:05", 1.16420)
+    # Stand in for the other process: the day is already decided before this one gets to claim anything.
+    assert w._claim(DAY, "EUR/USD", None, "missed")
+
+    actions = w._run_symbol("EUR/USD", w.clock())
+    assert actions == [], "a day already claimed missed must not also get a plan"
+    assert w._stored_plan(DAY, "EUR/USD") is None, "no plan may be stored once missed has won"
+    assert w.notifier.sent == [], "no plan message once missed has won"
+    assert w._get(DAY, "state", "EUR/USD") == "missed", "the other process's claim must survive untouched"
+
+
 def test_a_trade_left_open_by_a_missed_close_is_raised_not_forgotten(journal):
     """Being told to buy and never told to sell is the worst way this can fail.
 
@@ -516,7 +538,7 @@ def test_one_pair_triggering_leaves_the_other_alone():
     actions = w.run_once()
     assert len(actions) == 1 and "BUY GBP/USD" in actions[0]
     assert j.kv_get("irv:2026-10-07:GBPUSD:state") == "in"
-    assert j.kv_get("irv:2026-10-07:EURUSD:state") is None, "EUR must still be waiting"
+    assert j.kv_get("irv:2026-10-07:EURUSD:state") == "waiting", "EUR must still be waiting"
     assert "GBP/USD" in w.notifier.sent[0] and "EUR/USD" not in w.notifier.sent[0]
     j.close()
 
@@ -623,12 +645,13 @@ def test_two_processes_that_both_read_waiting_still_send_one_buy(journal):
     a = _watcher(journal, "09:00", 1.11000)
     b = _watcher(journal, "09:00", 1.11000)
 
-    # Both read first: neither has written yet, so both see an unclaimed day.
-    assert a._get(DAY, "state", "EUR/USD") is None
-    assert b._get(DAY, "state", "EUR/USD") is None
+    # Both read first: the plan's own creation already claimed "waiting", so both see the same day,
+    # neither having moved it on yet.
+    assert a._get(DAY, "state", "EUR/USD") == "waiting"
+    assert b._get(DAY, "state", "EUR/USD") == "waiting"
 
     # Then both try to claim it. Exactly one may win.
-    won = [a._claim(DAY, "EUR/USD", None, "in"), b._claim(DAY, "EUR/USD", None, "in")]
+    won = [a._claim(DAY, "EUR/USD", "waiting", "in"), b._claim(DAY, "EUR/USD", "waiting", "in")]
     assert won.count(True) == 1, f"both processes claimed the same transition: {won}"
     assert journal.kv_get("irv:2026-10-07:EURUSD:state") == "in"
 
@@ -659,6 +682,44 @@ def test_every_message_the_watcher_sends_is_behind_a_claim():
         # the message that was supposed to go with it vanished.
         assert "self.notifier.send(" not in src, (
             f"{method.__name__} calls the notifier directly; use _announce so a failed send is undone")
+
+
+def test_the_day_state_default_is_shared_not_reimplemented(journal):
+    """`_state` is the one place that decides what today's state is read as when no row has been
+    written yet. It used to be `_get(...) or "waiting"`, copied by hand into `_run_symbol` and
+    `_close_symbol`, and a third, genuinely different copy in the dashboard's `intraday_today` -- which
+    needs "none" rather than "waiting" when there is no plan either, because the two render as
+    different pills ("No plan yet" vs "Waiting for the level"). A stored value always wins over either
+    default.
+    """
+    w = _watcher(journal, "09:00", 1.0)
+    plan = build_plan(CFG, 1.16420, RANGES, DAY)
+
+    assert w._state(DAY, "EUR/USD", None) == "none", "no plan and no row: nothing has happened yet"
+    assert w._state(DAY, "EUR/USD", plan) == "waiting", "a plan with no row yet is waiting for its trigger"
+    w._set(DAY, "state", "in", "EUR/USD")
+    assert w._state(DAY, "EUR/USD", plan) == "in", "a stored value always wins over either default"
+
+
+def test_the_shared_state_default_is_actually_used_everywhere():
+    """A helper nothing calls protects nothing (see the claim test above for the same point made about
+    `_claim`). This is what would catch `_run_symbol`, `_close_symbol` or the dashboard's
+    `intraday_today` quietly going back to rolling their own fallback instead of calling `_state`.
+    """
+    import inspect
+
+    from trader.engine import dashboard
+    from trader.engine.intraday_watch import IntradayWatcher
+
+    run_src = inspect.getsource(IntradayWatcher._run_symbol)
+    close_src = inspect.getsource(IntradayWatcher._close_symbol)
+    today_src = inspect.getsource(dashboard.intraday_today)
+
+    assert "self._state(" in run_src, "_run_symbol must read today's state through the shared helper"
+    assert "self._state(" in close_src, "_close_symbol must read today's state through the shared helper"
+    assert "watcher._state(" in today_src, "intraday_today must read state through the shared helper"
+    assert '_get(day, "state"' not in run_src + close_src, "a hand-rolled fallback crept back in"
+    assert '_get(day, "state"' not in today_src, "the dashboard's own hand-rolled fallback crept back in"
 
 
 def test_the_quick_watcher_is_its_own_command_and_touches_no_broker():
@@ -923,7 +984,7 @@ def test_an_undelivered_buy_does_not_leave_the_state_saying_you_are_in(journal):
     out = lost.run_once()
     assert len(lost.notifier.sent) == 1, "it must have tried"
     assert "not delivered" in out[0]
-    assert lost._get(DAY, "state", "EUR/USD") is None, "the claim must be undone"
+    assert lost._get(DAY, "state", "EUR/USD") == "waiting", "the claim must be undone, back to waiting"
     assert lost._entry(DAY, "EUR/USD") is None, "and the entry rate with it"
 
     again = _watcher(journal, "09:01", trigger)

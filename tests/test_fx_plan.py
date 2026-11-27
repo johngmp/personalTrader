@@ -395,6 +395,43 @@ def test_an_empty_day_falls_back_to_the_last_session(settings, tmp_path):
     j.close()
 
 
+def test_the_previous_session_fallback_shares_its_markup_with_the_live_card(settings, tmp_path, monkeypatch):
+    """The "previous session" tile used to hand-roll its own copy of the live card's wrapper div and
+    row markup instead of calling `_irv_shell`/`_irv_row` -- which is exactly how the two would drift
+    apart the next time either one's markup changed without the other following. Spying on the shared
+    helpers, rather than just diffing the rendered HTML, is what makes this fail if either path goes
+    back to writing its own copy: the HTML can come out identical either way.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from trader.engine import dashboard
+
+    shell_calls: list[str] = []
+    row_calls: list[str] = []
+    original_shell, original_row = dashboard._irv_shell, dashboard._irv_row
+
+    def spy_shell(*a, **kw):
+        shell_calls.append(a[0])
+        return original_shell(*a, **kw)
+
+    def spy_row(*a, **kw):
+        row_calls.append(a[0])
+        return original_row(*a, **kw)
+
+    monkeypatch.setattr(dashboard, "_irv_shell", spy_shell)
+    monkeypatch.setattr(dashboard, "_irv_row", spy_row)
+
+    now = datetime(2026, 10, 8, 2, 0, tzinfo=timezone.utc)      # before today's open: no plan yet
+    j = _journal_with_plan(tmp_path, (now - timedelta(days=1)).date(), state="done")
+    card = dashboard.intraday_card(settings, j, now)
+    j.close()
+
+    assert "1.11621" in card and "No plan yet" in card, "sanity: this is still the fallback card"
+    assert shell_calls.count("EUR/USD") == 2, (
+        "one call for today's empty tile and one for yesterday's history tile, both through _irv_shell")
+    assert "Buy was" in row_calls, "the history tile's rows must go through _irv_row too"
+
+
 def test_the_card_disappears_entirely_when_the_watcher_is_off(settings, tmp_path):
     from trader.journal.db import Journal
 
