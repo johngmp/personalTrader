@@ -134,6 +134,34 @@ def test_open_says_plainly_when_nothing_is_open(settings, tmp_path):
     journal.close()
 
 
+# --- /halt ----------------------------------------------------------------------------------------
+
+
+def test_the_halt_message_says_the_forex_watcher_stops_too(settings, tmp_path):
+    """/halt used to leave this ambiguous: nothing in the confirmation said whether the hand-traded
+    forex ticket watcher (the one channel where the user is the one placing trades) also goes quiet.
+    It does -- `Coordinator._intraday` refuses to run while `kill_switch.active` -- so the message has
+    to say so, tying the claim to the code that actually makes it true rather than just asserting it."""
+    import inspect
+
+    from trader.engine import live
+
+    journal = Journal(tmp_path / "j.db")
+    engine = Engine(settings, SimBroker(cash=100_000, name="alpaca"), journal, {}, notifier=NullNotifier())
+    notifier = FakeNotifier("/halt")
+
+    handle_commands(notifier, journal, engine.kill_switch, [engine])
+
+    text = notifier.sent[0]
+    assert "forex" in text.lower(), "the confirmation must say what happens to the hand-traded signal"
+    assert "no new plans" in text.lower() or "stops too" in text.lower()
+    assert engine.kill_switch.active, "the command has to actually engage the switch the message describes"
+
+    src = inspect.getsource(live.Coordinator._intraday)
+    assert "kill_switch.active" in src, "the message's claim is only true while this guard exists"
+    journal.close()
+
+
 def test_open_includes_the_hand_traded_forex_position_with_no_broker_behind_it(settings, tmp_path):
     """State "in": bought, not yet closed. Nothing at any broker holds this -- it is executed by hand --
     so it would otherwise be invisible to a command whose whole point is to list what is open."""

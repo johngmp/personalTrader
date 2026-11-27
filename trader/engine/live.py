@@ -1139,7 +1139,10 @@ def handle_commands(notifier: Notifier, journal: Journal, kill_switch: KillSwitc
     for command in notifier.poll_commands(journal):
         if command == "/halt":
             kill_switch.engage("halted from Telegram")
-            notifier.send("🛑 Kill switch ON. No new orders. Existing stops stay at the brokers. /resume to undo.")
+            notifier.send("🛑 Kill switch ON. No new orders, and the forex ticket watcher stops too -- "
+                          "no new plans, buy/sell prompts or close-out messages until /resume. Existing "
+                          "stops stay at the brokers; any MT4 order you already placed keeps resting "
+                          "exactly as you left it, so cancel it yourself if you want it gone. /resume to undo.")
         elif command == "/resume":
             kill_switch.release()
             notifier.send("✅ Kill switch OFF. Trading resumes on the next run.")
