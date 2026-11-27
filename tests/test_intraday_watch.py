@@ -1198,3 +1198,86 @@ def test_open_symbol_ignores_other_days(journal):
     w = _watcher(journal, "07:05", 1.16420)
     w.run_once()
     assert w.open_symbol(date(2026, 10, 6)) is None
+
+
+# --- the outcome behind "done" is not thrown away -----------------------------------------------------
+#
+# Every path into "done" wrote the identical string, discarding the one thing the Telegram message sent
+# in the moment already knew: whether this was a target hit, a stop-out, a no-setup day, a session-end
+# close or a stranded-overnight close. `outcome` is written alongside `state` at each of those sites.
+
+def test_a_target_hit_records_its_own_outcome(journal):
+    _watcher(journal, "07:05", 1.16420).run_once()
+    _watcher(journal, "08:15", 1.16100).run_once()            # in
+    out = _watcher(journal, "11:00", 1.16430)
+    out.run_once()
+    assert out._outcome(DAY, "EUR/USD") == "target"
+
+
+def test_a_stop_out_records_its_own_outcome(journal):
+    _watcher(journal, "07:05", 1.16420).run_once()
+    _watcher(journal, "08:15", 1.16100).run_once()            # in
+    out = _watcher(journal, "11:00", 1.15900)
+    out.run_once()
+    assert out._outcome(DAY, "EUR/USD") == "stop"
+
+
+def test_a_session_end_close_records_its_own_outcome(journal):
+    _watcher(journal, "07:05", 1.16420).run_once()
+    _watcher(journal, "08:15", 1.16100).run_once()            # in
+    end = _watcher(journal, "16:00", 1.16250)
+    end.close_out()
+    assert end._outcome(DAY, "EUR/USD") == "session_end"
+
+
+def test_a_no_setup_day_records_its_own_outcome(journal):
+    _watcher(journal, "07:05", 1.11919).run_once()
+    quiet = _watcher(journal, "16:05", 1.12100)               # drifted up all day, never near the trigger
+    quiet.run_once()
+    quiet.close_out()
+    assert quiet._outcome(DAY, "EUR/USD") == "no_setup"
+
+
+def test_a_stranded_overnight_close_records_its_own_outcome(journal):
+    yesterday = _watcher(journal, "07:05", 1.11919)
+    yesterday.run_once()
+    entered = _watcher(journal, "09:00", 1.11500)
+    entered.run_once()
+    later = _watcher(journal, "07:05", 1.12500)
+    later.clock = lambda: NEXT_DAY
+    later.sweep_unfinished()
+    assert later._outcome(DAY, "EUR/USD") == "stranded"
+
+
+def test_a_gapped_day_has_no_outcome_because_it_never_reaches_done(journal):
+    """`gapped` is its own terminal state, distinct from `done` -- there is nothing for `outcome` to
+    say about it that `state` does not already say."""
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    plan = w._stored_plan(DAY, "EUR/USD")
+    gap = _watcher(journal, "09:00", plan.stop - 0.0020)
+    gap.run_once()
+    assert gap._get(DAY, "state", "EUR/USD") == "gapped"
+    assert gap._outcome(DAY, "EUR/USD") is None
+
+
+# --- a gapped day still accepts /taken, exactly as reported, but says what the system itself called it
+
+def test_is_gapped_is_true_only_for_a_gapped_day(journal):
+    w = _watcher(journal, "07:05", 1.16420)
+    w.run_once()
+    plan = w._stored_plan(DAY, "EUR/USD")
+    assert not w.is_gapped(DAY, "EUR/USD")
+
+    gap = _watcher(journal, "09:00", plan.stop - 0.0020)
+    gap.run_once()
+    assert gap.is_gapped(DAY, "EUR/USD")
+
+
+def test_the_gapped_taken_confirmation_names_the_price_and_the_systems_own_call():
+    from trader.engine.intraday_watch import gapped_taken_confirmation
+
+    text = gapped_taken_confirmation("EUR/USD", 1.15800)
+    assert "1.158" in text
+    assert "do NOT buy" in text
+    assert "Recorded" in text

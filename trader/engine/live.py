@@ -1164,7 +1164,7 @@ def handle_fx_commands(notifier: Notifier, journal: Journal, settings: Settings,
     answers to that chat specifically -- typing `/taken` into the main chat should not do this, any
     more than `/halt` typed into the forex chat should touch the kill switch.
     """
-    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.intraday_watch import IntradayWatcher, gapped_taken_confirmation
 
     poll = getattr(notifier, "poll_commands_full", None)
     if poll is None:
@@ -1188,7 +1188,13 @@ def handle_fx_commands(notifier: Notifier, journal: Journal, settings: Settings,
                 notifier.send(f"/taken needs a price, e.g. /taken 1.08421 (got {price_text!r}).")
                 continue
             watcher.record_taken(day, symbol, price)
-            notifier.send(f"✅ Recorded: you took {symbol} at {price}.")
+            if watcher.is_gapped(day, symbol):
+                # Visibility only -- the record above is unconditional and identical either way. This
+                # is the one place `/taken` gets answered, and the plain confirmation reads as the
+                # watcher agreeing the trade matched what was tested, which on a gapped day it did not.
+                notifier.send(gapped_taken_confirmation(symbol, price))
+            else:
+                notifier.send(f"✅ Recorded: you took {symbol} at {price}.")
         else:
             watcher.record_skipped(day, symbol)
             notifier.send(f"✅ Recorded: {symbol} skipped today.")

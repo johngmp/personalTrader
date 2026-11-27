@@ -307,7 +307,7 @@ def test_the_fx_shadow_no_longer_reaches_your_phone():
 
 # --- today's hand-executed plan, on the page -------------------------------------------------------
 
-def _journal_with_plan(tmp_path, day, symbol="EUR/USD", state=None):
+def _journal_with_plan(tmp_path, day, symbol="EUR/USD", state=None, outcome=None):
     from trader.journal.db import Journal
 
     j = Journal(tmp_path / "j.db")
@@ -315,6 +315,8 @@ def _journal_with_plan(tmp_path, day, symbol="EUR/USD", state=None):
     j.kv_set(f"{key}:plan", "1.11894,0.005473,1.11621,1.11456,1.11894,60897.7")
     if state:
         j.kv_set(f"{key}:state", state)
+    if outcome:
+        j.kv_set(f"{key}:outcome", outcome)
     return j
 
 
@@ -408,3 +410,124 @@ def intraday_card_of(settings, journal):
     from trader.engine.dashboard import intraday_card
 
     return intraday_card(settings, journal)
+
+
+# --- the outcome behind "done" is not thrown away ----------------------------------------------------
+
+def test_each_outcome_behind_done_is_rendered_distinctly(settings, tmp_path):
+    """`state` alone said "finished" for a target hit, a stop-out, a session-end close, a no-setup day
+    and a stranded-overnight close alike. `outcome` is the one thing that tells them apart."""
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_card
+
+    now = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)
+    cards = {}
+    for outcome in ("target", "stop", "session_end", "no_setup", "stranded"):
+        j = _journal_with_plan(tmp_path / outcome, now.date(), state="done", outcome=outcome)
+        cards[outcome] = intraday_card(settings, j, now)
+        j.close()
+
+    assert "target hit" in cards["target"]
+    assert "stopped out" in cards["stop"]
+    assert "closed flat" in cards["session_end"]
+    assert "no setup" in cards["no_setup"]
+    assert "left open" in cards["stranded"]
+    assert len(set(cards.values())) == 5, "every outcome must render a distinct card"
+
+
+def test_a_done_day_with_no_stored_outcome_falls_back_to_the_generic_word(settings, tmp_path):
+    """A row written before `outcome` existed has none. It must not guess one."""
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_card
+
+    now = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)
+    j = _journal_with_plan(tmp_path, now.date(), state="done")
+    card = intraday_card(settings, j, now)
+    assert "Finished for today" in card
+    j.close()
+
+
+# --- a gapped day's /taken must not read as a system-endorsed take -----------------------------------
+
+def test_a_gapped_days_taken_report_is_rendered_distinctly(settings, tmp_path):
+    """/taken records what you did, unchanged -- but the system's own call that day was "do NOT buy",
+    and the ordinary wording used for an endorsed take would read as agreement the watcher never gave."""
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_card
+
+    now = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)
+    gapped = _journal_with_plan(tmp_path / "g", now.date(), state="gapped")
+    gapped.kv_set(f"irv:{now.date():%Y-%m-%d}:EURUSD:report", "taken:1.15800")
+
+    card = intraday_card(settings, gapped, now)
+    assert "taken at 1.15800" in card
+    assert "do NOT buy" in card
+    gapped.close()
+
+
+def test_an_ordinary_days_taken_report_is_unaffected(settings, tmp_path):
+    """The distinct wording is additive to the gapped case only -- an ordinary day's /taken must read
+    exactly as it did before."""
+    from datetime import datetime, timezone
+
+    from trader.engine.dashboard import intraday_card
+
+    now = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)
+    held = _journal_with_plan(tmp_path / "h", now.date(), state="in")
+    held.kv_set(f"irv:{now.date():%Y-%m-%d}:EURUSD:report", "taken:1.15800")
+
+    card = intraday_card(settings, held, now)
+    assert "taken at 1.15800" in card
+    assert "do NOT buy" not in card
+    held.close()
+
+
+# --- the week behind today, built from the same per-day rows -----------------------------------------
+
+def test_a_week_with_a_mix_of_outcomes_renders_each_distinctly(settings, tmp_path):
+    """target, stop, skipped and no-setup days all have to look different on the page, and a weekend
+    must read as the market being shut rather than as a blank row nobody can explain."""
+    from datetime import date, datetime, timezone
+
+    from trader.engine.dashboard import intraday_week_card
+    from trader.journal.db import Journal
+
+    now = datetime(2026, 10, 8, 9, 0, tzinfo=timezone.utc)   # a Thursday
+    j = Journal(tmp_path / "j.db")
+
+    def row(day, state=None, outcome=None, report=None):
+        key = f"irv:{day:%Y-%m-%d}:EURUSD"
+        if state:
+            j.kv_set(f"{key}:state", state)
+        if outcome:
+            j.kv_set(f"{key}:outcome", outcome)
+        if report:
+            j.kv_set(f"{key}:report", report)
+
+    row(date(2026, 9, 30), "done", "target", "taken:1.10000")     # Wed -- target hit, taken
+    row(date(2026, 10, 1), "done", "stop", "skipped")              # Thu -- stopped out, but self-reported skipped
+    row(date(2026, 10, 5), "done", "no_setup")                      # Mon -- no setup that day
+    # 3 Oct and 4 Oct are the weekend inside this window; 2 Oct and 8 Oct are left with no row at all.
+
+    card = intraday_week_card(settings, j, now)
+
+    assert "target hit" in card
+    assert "stopped out" in card
+    assert "no setup" in card
+    assert "market shut" in card
+    assert "taken at 1.10000" in card
+    assert "skipped" in card
+    j.close()
+
+
+def test_the_week_card_disappears_when_the_watcher_is_off(settings, tmp_path):
+    from trader.engine.dashboard import intraday_week_card
+    from trader.journal.db import Journal
+
+    settings.intraday = settings.intraday.model_copy(update={"enabled": False})
+    j = Journal(tmp_path / "j.db")
+    assert intraday_week_card(settings, j) == ""
+    j.close()

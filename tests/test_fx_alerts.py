@@ -482,6 +482,35 @@ def test_taken_records_the_price_against_todays_signal(settings, journal):
     assert "1.0968" in bot.sent[0]
 
 
+def test_taken_on_a_gapped_day_gets_the_systems_own_verdict(settings, journal):
+    """/taken still records exactly what you report -- that never changes -- but the ordinary
+    confirmation would read as the watcher agreeing with a trade it had actually called "do NOT buy"."""
+    from trader.engine.intraday_watch import IntradayWatcher
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_open_signal(settings, journal, now)
+    journal.kv_set(f"irv:{now.date():%Y-%m-%d}:EURUSD:state", "gapped")
+    bot = _FxBot([("/taken", "1.07500")])
+    done = handle_fx_commands(bot, journal, s, now)
+    assert done == ["telegram /taken EUR/USD"]
+    watcher = IntradayWatcher(s, journal, bot, clock=lambda: now)
+    assert watcher.report(now.date(), "EUR/USD") == ("taken", 1.07500), "still recorded, unchanged"
+    assert "1.075" in bot.sent[0]
+    assert "do NOT buy" in bot.sent[0]
+
+
+def test_taken_on_an_ordinary_day_is_unaffected_by_the_gapped_wording(settings, journal):
+    """The distinct wording is additive -- an ordinary day's confirmation must read exactly as before."""
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_open_signal(settings, journal, now)
+    bot = _FxBot([("/taken", "1.09680")])
+    handle_fx_commands(bot, journal, s, now)
+    assert "do NOT buy" not in bot.sent[0]
+
+
 def test_skipped_is_recorded_distinctly_from_taken(settings, journal):
     from trader.engine.intraday_watch import IntradayWatcher
     from trader.engine.live import handle_fx_commands
