@@ -648,15 +648,17 @@ def test_every_message_the_watcher_sends_is_behind_a_claim():
     for method in (IntradayWatcher._run_symbol, IntradayWatcher._close_symbol,
                    IntradayWatcher.sweep_unfinished):
         src = inspect.getsource(method)
-        sends = src.count("self._announce(")
+        # `_announce_record_only` counts too: it is `_announce`, or the quiet-hours queue in its place,
+        # for a message that only records what the broker already did -- see intraday_watch.py.
+        sends = src.count("self._announce(") + src.count("self._announce_record_only(")
         guards = src.count("self._claim(") + src.count("self.journal.kv_set_if(")
         assert sends > 0, f"{method.__name__} sends nothing; this test is watching the wrong place"
         assert guards == sends, (
             f"{method.__name__} has {sends} message(s) and {guards} exclusive claim(s): "
             "every message must be behind one, or two processes can send the same alert")
-        # And every message goes through `_announce`, never the notifier directly. A bare send is a
-        # message with no delivery check behind it, which is how a claimed state could advance while
-        # the message that was supposed to go with it vanished.
+        # And every message goes through `_announce` (or its record-only wrapper), never the notifier
+        # directly. A bare send is a message with no delivery check behind it, which is how a claimed
+        # state could advance while the message that was supposed to go with it vanished.
         assert "self.notifier.send(" not in src, (
             f"{method.__name__} calls the notifier directly; use _announce so a failed send is undone")
 
@@ -1198,3 +1200,150 @@ def test_open_symbol_ignores_other_days(journal):
     w = _watcher(journal, "07:05", 1.16420)
     w.run_once()
     assert w.open_symbol(date(2026, 10, 6)) is None
+
+
+# --- quiet hours: record-only alerts overnight are queued, not pushed to the phone -------------------
+#
+# The London session (07:00-16:00 UTC) lands at 18:00-03:00 Sydney local, so a stop or target hit, a
+# gapped day or a stranded-overnight notice routinely lands in the middle of the Sydney night. None of
+# those need the same-moment action a plan or buy alert does -- the broker's own SL/TP already closed
+# the trade before the message was ever built -- so there is nothing lost by holding it for the morning.
+# 2026-10-07 is inside Sydney daylight time (UTC+11), so "13:00" UTC is 00:00 Sydney the next day.
+
+QUIET_CFG = CFG.model_copy(update={"quiet_hours_start": "23:30", "quiet_hours_end": "07:00"})
+
+
+def test_a_record_only_alert_during_quiet_hours_is_queued_not_sent(journal):
+    """A stop or target hit at midnight Sydney time has nothing for you to do -- it can wait."""
+    _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG).run_once()
+    plan = _watcher(journal, "07:05", 1.0, cfg=QUIET_CFG)._stored_plan(DAY, "EUR/USD")
+    _watcher(journal, "09:00", plan.trigger, cfg=QUIET_CFG).run_once()            # in, 20:00 Sydney
+
+    night = _watcher(journal, "13:00", plan.target, cfg=QUIET_CFG)                # 00:00 Sydney, next day
+    actions = night.run_once()
+    assert actions and "SELL" in actions[0], "the day still advances -- it is delivery that waits"
+    assert night.notifier.sent == [], "nothing should reach the phone in the middle of the night"
+    assert night._get(DAY, "state", "EUR/USD") == "done", "the claim is not held up by the quiet hours"
+
+
+def test_a_gapped_day_during_quiet_hours_is_also_queued_not_sent(journal):
+    w = _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG)
+    w.run_once()
+    plan = w._stored_plan(DAY, "EUR/USD")
+
+    night = _watcher(journal, "13:00", plan.stop - 0.0020, cfg=QUIET_CFG)         # 00:00 Sydney, gapped
+    actions = night.run_once()
+    assert actions and "gapped" in actions[0]
+    assert night.notifier.sent == []
+
+
+def test_a_stranded_overnight_notice_during_quiet_hours_is_also_queued(journal):
+    _watcher(journal, "07:05", 1.11919, cfg=QUIET_CFG).run_once()
+    _watcher(journal, "09:00", 1.11500, cfg=QUIET_CFG).run_once()                 # in, never closed
+
+    midnight_next_day = _watcher(journal, "07:05", 1.12500, cfg=QUIET_CFG)
+    midnight_next_day.clock = lambda: datetime(2026, 10, 8, 13, 0, tzinfo=timezone.utc)  # 00:00 Sydney
+    actions = midnight_next_day.sweep_unfinished()
+    assert actions and "left open" in actions[0]
+    assert midnight_next_day.notifier.sent == []
+
+
+def test_the_same_alert_outside_quiet_hours_is_sent_immediately_as_before(journal):
+    """Same setup, same exit, but in the evening -- so it goes straight to the phone as always."""
+    _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG).run_once()
+    plan = _watcher(journal, "07:05", 1.0, cfg=QUIET_CFG)._stored_plan(DAY, "EUR/USD")
+    _watcher(journal, "09:00", plan.trigger, cfg=QUIET_CFG).run_once()
+
+    evening = _watcher(journal, "11:00", plan.target, cfg=QUIET_CFG)              # 22:00 Sydney, not quiet
+    actions = evening.run_once()
+    assert actions and "SELL" in actions[0]
+    assert len(evening.notifier.sent) == 1, "outside quiet hours nothing is held back"
+    assert "CLOSE" in evening.notifier.sent[0]
+
+
+def test_a_buy_alert_is_never_delayed_even_at_midnight_sydney(journal):
+    """A plan/buy alert needs you to act now, so quiet hours must not touch it."""
+    _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG).run_once()
+    plan = _watcher(journal, "07:05", 1.0, cfg=QUIET_CFG)._stored_plan(DAY, "EUR/USD")
+
+    night = _watcher(journal, "13:00", plan.trigger, cfg=QUIET_CFG)               # 00:00 Sydney, next day
+    actions = night.run_once()
+    assert actions and "BUY" in actions[0]
+    assert len(night.notifier.sent) == 1, "a buy alert must reach the phone at once, quiet hours or not"
+    assert "BUY" in night.notifier.sent[0]
+
+
+def test_queued_alerts_are_delivered_once_quiet_hours_end(journal):
+    """What was held overnight goes out as one batched message the next time anything runs."""
+    _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG).run_once()
+    plan = _watcher(journal, "07:05", 1.0, cfg=QUIET_CFG)._stored_plan(DAY, "EUR/USD")
+    _watcher(journal, "09:00", plan.trigger, cfg=QUIET_CFG).run_once()
+
+    night = _watcher(journal, "13:00", plan.target, cfg=QUIET_CFG)                # queued, 00:00 Sydney
+    night.run_once()
+    assert night.notifier.sent == []
+
+    morning = _watcher(journal, "20:00", 1.16420, cfg=QUIET_CFG)                  # 07:00 Sydney, next day
+    delivered = morning.flush_queued()
+    assert delivered == ["intraday: delivered 1 queued overnight alert(s)"]
+    assert len(morning.notifier.sent) == 1
+    assert "CLOSE" in morning.notifier.sent[0] and "target" in morning.notifier.sent[0]
+
+    # And it is not delivered a second time.
+    again = _watcher(journal, "20:05", 1.16420, cfg=QUIET_CFG)
+    assert again.flush_queued() == [] and again.notifier.sent == []
+
+
+def test_several_queued_alerts_are_delivered_as_one_batched_message(journal):
+    """A stranded trade from yesterday and a target hit today, both record-only, both queued overnight
+    -- must arrive as ONE message, not two. The point of batching is a quiet phone, not a quieter one."""
+    earlier_day = date(2026, 10, 6)
+    stranded = IntradayWatcher(load_settings().model_copy(update={"intraday": QUIET_CFG}), journal, Spy(),
+                               clock=lambda: datetime(2026, 10, 6, 7, 5, tzinfo=timezone.utc),
+                               price=lambda _s: 1.16420, ranges=RANGES)
+    stranded.run_once()
+    trigger = stranded._stored_plan(earlier_day, "EUR/USD").trigger
+    entered = IntradayWatcher(load_settings().model_copy(update={"intraday": QUIET_CFG}), journal, Spy(),
+                              clock=lambda: datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc),
+                              price=lambda _s: trigger, ranges=RANGES)
+    entered.run_once()                                    # in, and never closed that day
+
+    w = _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG)
+    w.run_once()
+    plan = w._stored_plan(DAY, "EUR/USD")
+    _watcher(journal, "09:00", plan.trigger, cfg=QUIET_CFG).run_once()
+
+    night = _watcher(journal, "13:00", plan.target, cfg=QUIET_CFG)                # 00:00 Sydney, next day
+    night_actions = night.run_once() + night.sweep_unfinished()
+    assert len(night_actions) == 2
+    assert night.notifier.sent == [], "neither record-only alert should reach the phone overnight"
+
+    morning = _watcher(journal, "20:00", 1.16420, cfg=QUIET_CFG)
+    delivered = morning.flush_queued()
+    assert delivered == ["intraday: delivered 2 queued overnight alert(s)"]
+    assert len(morning.notifier.sent) == 1, "one Telegram message, not one per queued alert"
+    assert "CLOSE" in morning.notifier.sent[0] and "never closed" in morning.notifier.sent[0]
+
+
+def test_flush_does_nothing_while_still_in_quiet_hours(journal):
+    _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG).run_once()
+    plan = _watcher(journal, "07:05", 1.0, cfg=QUIET_CFG)._stored_plan(DAY, "EUR/USD")
+    _watcher(journal, "09:00", plan.trigger, cfg=QUIET_CFG).run_once()
+    _watcher(journal, "13:00", plan.target, cfg=QUIET_CFG).run_once()
+
+    still_quiet = _watcher(journal, "14:00", 1.16420, cfg=QUIET_CFG)              # 01:00 Sydney, still quiet
+    assert still_quiet.flush_queued() == [] and still_quiet.notifier.sent == []
+
+
+def test_a_failed_flush_is_retried_not_dropped(journal):
+    _watcher(journal, "07:05", 1.16420, cfg=QUIET_CFG).run_once()
+    plan = _watcher(journal, "07:05", 1.0, cfg=QUIET_CFG)._stored_plan(DAY, "EUR/USD")
+    _watcher(journal, "09:00", plan.trigger, cfg=QUIET_CFG).run_once()
+    _watcher(journal, "13:00", plan.target, cfg=QUIET_CFG).run_once()
+
+    lost = _watcher(journal, "20:00", 1.16420, cfg=QUIET_CFG, delivers=False)
+    assert lost.flush_queued() == ["intraday: queued overnight alert(s) not delivered; will retry"]
+
+    again = _watcher(journal, "20:05", 1.16420, cfg=QUIET_CFG)
+    assert len(again.flush_queued()) == 1
+    assert len(again.notifier.sent) == 1

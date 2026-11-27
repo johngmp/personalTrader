@@ -1027,6 +1027,7 @@ def cmd_watch_fx(settings, args) -> int:
         # must run whether or not the rest of this pass works.
         did = watcher.report_downtime()
         did += watcher.sweep_unfinished() + watcher.run_once() + watcher.close_out()
+        did += watcher.flush_queued()
         for what in did:
             journal.log(what, level="info")
             print(f"{datetime.now():%Y-%m-%d %H:%M} {what}")
