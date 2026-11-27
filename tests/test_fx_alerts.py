@@ -518,6 +518,19 @@ def test_taken_without_a_parseable_price_does_not_record_garbage(settings, journ
     assert "needs a price" in bot.sent[0]
 
 
+def test_an_unrecognized_command_gets_a_command_hint_instead_of_silence(settings, journal):
+    """Unlike `/taken` and `/skipped`, anything else typed in the fx chat used to be dropped with no
+    reply at all -- the bug this guards, mirroring `handle_commands`' fallback in the main chat."""
+    from trader.engine.live import handle_fx_commands
+
+    now = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
+    s = _with_open_signal(settings, journal, now)
+    bot = _FxBot([("/status", "")])
+    done = handle_fx_commands(bot, journal, s, now)
+    assert done == ["telegram /status: unrecognized"]
+    assert bot.sent[0] == "Commands: /taken <price> · /skipped"
+
+
 def test_a_notifier_with_no_command_channel_of_its_own_is_skipped_quietly(settings, journal):
     """The default when no fx chat is configured at all -- the Coordinator reuses the main notifier,
     which has no `poll_commands_full` of its own in that path. Nothing should blow up."""

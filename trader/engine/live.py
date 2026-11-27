@@ -1172,6 +1172,8 @@ def handle_fx_commands(notifier: Notifier, journal: Journal, settings: Settings,
     done = []
     for command, args in poll(journal):
         if command not in ("/taken", "/skipped"):
+            notifier.send("Commands: /taken <price> · /skipped")
+            done.append(f"telegram {command}: unrecognized")
             continue
         watcher = IntradayWatcher(settings, journal, notifier, clock=lambda: now)
         day = now.date()

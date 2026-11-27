@@ -713,7 +713,7 @@ def cmd_telegram_setup(settings: Settings, args: argparse.Namespace) -> int:
     Telegram(token, chat_id).send(
         "✅ Personal Trader is connected.\n"
         "You'll get a message for every buy, sell and problem, plus a summary each morning at 7am.\n"
-        "Commands: /status · /halt (stop new orders) · /resume")
+        "Commands: /status · /open · /today · /halt · /resume")
     print(f"Connected bot @{username} to {who}'s chat. Saved TELEGRAM_CHAT_ID to .env and sent a test message.\n"
           "The engine uses it from its next run (within 15 minutes).")
     return 0
@@ -774,6 +774,7 @@ def _telegram_setup_fx(env_path, token: str, find_group_chat, set_env_value, Tel
         "Only EUR/USD plans you place by hand in MetaTrader 4 -- a ticket at the London open, a note "
         "when the day is done, and a warning if the watcher stops running. Everything else the system "
         "does stays in the other chat.\n"
+        "Reply /taken <price> once you've placed the ticket, or /skipped if you didn't take it.\n"
         "Nothing here is placed for you, and nothing here is advice.")
     print(f"Forex messages now go to '{title}' ({chat_id}).\n"
           f"Saved TELEGRAM_FX_CHAT_ID to .env and sent a test message there.\n"
