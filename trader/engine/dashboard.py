@@ -1653,6 +1653,8 @@ body.claude-open #claude-toggle{background:var(--accent);color:var(--accent-ink)
   padding:.2rem .5rem}
 .msg.err{align-self:flex-start;background:var(--down-bg);border:1px solid var(--down-line);
   color:var(--down);font-size:var(--t-md)}
+.msg.cut{align-self:flex-start;background:var(--warn-bg);border:1px solid var(--warn-line);
+  color:var(--warn);font-size:var(--t-xs)}
 .chips{display:flex;flex-wrap:wrap;gap:.35rem;margin-bottom:.55rem}
 .chip{background:var(--s2);border:1px solid var(--line);color:var(--ink2);border-radius:999px;
   padding:.28rem .65rem;font:inherit;font-size:var(--t-xs);cursor:pointer;text-align:left}
@@ -2070,8 +2072,8 @@ CHAT_JS = r"""
   var secs = parseInt((document.querySelector('meta[name=pt-refresh]') || {}).content || '300', 10);
   window.__ptBusy = false;
   setInterval(function () {
-    var onAsk = document.querySelector('.tab[data-tab="ask"].active');
-    if (!onAsk && !window.__ptBusy) location.reload();
+    var chatOpen = document.body.classList.contains('claude-open');
+    if (!chatOpen && !window.__ptBusy) location.reload();
   }, Math.max(secs, 15) * 1000);
 })();
 (function () {
@@ -2089,7 +2091,10 @@ CHAT_JS = r"""
   if (close) close.addEventListener('click', function () { setOpen(false); });
   var fresh = document.getElementById('claude-clear');
   if (fresh) fresh.addEventListener('click', function () {
+    if (window.__ptAbortChat) window.__ptAbortChat();
     document.getElementById('chat-log').innerHTML = ''; window.__ptSession = null;
+    window.__ptBusy = false;
+    var sendBtn = document.getElementById('chat-send'); if (sendBtn) sendBtn.disabled = false;
     document.getElementById('chat-input').focus();
   });
   document.addEventListener('keydown', function (e) {
@@ -2104,6 +2109,11 @@ CHAT_JS = r"""
       log = document.getElementById('chat-log'), send = document.getElementById('chat-send');
   window.__ptSession = window.__ptSession || null;
   if (!form) return;
+  // The in-flight fetch outlives a click on "New": without this, a reply that was already on the
+  // wire lands after the log was cleared and silently resurrects the conversation the user just
+  // abandoned. `controller` is shared with the "New" button's handler via window.__ptAbortChat.
+  var controller = null;
+  window.__ptAbortChat = function () { if (controller) controller.abort(); controller = null; };
   function add(cls, text) {
     var el = document.createElement('div'); el.className = 'msg ' + cls; el.textContent = text;
     log.appendChild(el); log.scrollTop = log.scrollHeight; return el;
@@ -2114,19 +2124,25 @@ CHAT_JS = r"""
   form.addEventListener('submit', function (e) {
     e.preventDefault();
     var q = input.value.trim(); if (!q) return;
+    if (controller) controller.abort();
+    controller = new AbortController();
+    var mine = controller;
     input.value = ''; send.disabled = true; window.__ptBusy = true; add('you', q);
     var reply = null, thinking = add('tool', 'Thinking\u2026');
     fetch('/ask', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                   body: JSON.stringify({question: q, session_id: window.__ptSession})})
+                   body: JSON.stringify({question: q, session_id: window.__ptSession}),
+                   signal: mine.signal})
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
         (function pump() {
           return reader.read().then(function (res) {
+            if (mine.signal.aborted) return;
             if (res.done) { send.disabled = false; return; }
             buf += dec.decode(res.value, {stream: true});
             var parts = buf.split('\n\n'); buf = parts.pop();
             parts.forEach(function (chunk) {
+              if (mine.signal.aborted) return;
               if (chunk.indexOf('data: ') !== 0) return;
               var ev; try { ev = JSON.parse(chunk.slice(6)); } catch (err) { return; }
               if (ev.kind === 'tool') { if (thinking) { thinking.remove(); thinking = null; } add('tool', ev.payload); }
@@ -2137,16 +2153,24 @@ CHAT_JS = r"""
               } else if (ev.kind === 'done') {
                 if (thinking) { thinking.remove(); thinking = null; }
                 window.__ptSession = (ev.payload && ev.payload.session_id) || window.__ptSession; reply = null; send.disabled = false; window.__ptBusy = false;
+                if (ev.payload && ev.payload.truncated) add('cut', 'Cut short: hit the turn or budget limit before finishing.');
+                if (controller === mine) controller = null;
               } else if (ev.kind === 'error') {
                 if (thinking) { thinking.remove(); thinking = null; }
                 add('err', ev.payload); send.disabled = false; window.__ptBusy = false;
+                if (controller === mine) controller = null;
               }
             });
             return pump();
           });
         })();
       })
-      .catch(function (err) { if (thinking) thinking.remove(); add('err', String(err)); send.disabled = false; window.__ptBusy = false; });
+      .catch(function (err) {
+        if (mine.signal.aborted) return;   // cancelled on purpose; the "New" handler already reset the UI
+        if (thinking) thinking.remove();
+        add('err', String(err)); send.disabled = false; window.__ptBusy = false;
+        if (controller === mine) controller = null;
+      });
   });
 })();
 """

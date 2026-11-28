@@ -153,6 +153,10 @@ only thing that trades, and point at the command they would run themselves."""
 MAX_TURNS = 30
 MAX_BUDGET_USD = 1.50     # a runaway loop costs usage, so cap each question
 
+# The CLI's own name for a result cut short by one of the caps above, as opposed to one that ran out
+# of things to say. Anything else -- "success", or an unrelated error subtype -- is not a truncation.
+TRUNCATED_SUBTYPES = frozenset({"error_max_turns", "error_max_budget_usd"})
+
 
 def _options(root: Path, resume: str | None = None):
     """Agent options wired to the policy above. Imported lazily so the SDK is optional.
@@ -205,7 +209,8 @@ async def ask_stream(question: str, root: Path, resume: str | None = None):
             if kind == "ResultMessage":
                 yield "done", {"session_id": session,
                                "cost_usd": getattr(message, "total_cost_usd", None),
-                               "turns": getattr(message, "num_turns", None)}
+                               "turns": getattr(message, "num_turns", None),
+                               "truncated": getattr(message, "subtype", None) in TRUNCATED_SUBTYPES}
     except Exception as exc:                 # a broken assistant must say so, not hang the page
         yield "error", f"{type(exc).__name__}: {exc}"
 
